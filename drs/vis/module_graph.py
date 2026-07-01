@@ -234,7 +234,7 @@ The following transient flow-edges were recorded during the simulation. An arrow
 ![Module Graph]({os.path.basename(png_path)})
 """
 
-    with open(md_path, "w") as f:
+    with open(md_path, "w",encoding="utf-8") as f:
         f.write(md_content)
 
     print(f"Saved module graph report to {md_path}")

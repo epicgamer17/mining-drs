@@ -8,6 +8,7 @@ Surging = extreme allocation	Surging must produce an OFF-target blend to drain t
 
 import sys
 import os
+from dataclasses import replace
 
 # Ensure the root directory is on the path so we can import 'examples.mining'
 sys.path.append(
@@ -117,6 +118,341 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
     )
     plt.close()
     print("Saved 'Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
+
+
+def _run_capacity_case(
+    label: str,
+    config: ConcentratorConfig,
+    max_time: float,
+    np_seed: int = 42,
+    random_seed: int = 11,
+):
+    from examples.mining.components.modes import MODES
+
+    np.random.seed(np_seed)
+    random.seed(random_seed)
+
+    sim = ActiveFleetConcentratorModel(config, enable_telemetry=True)
+    sim.controller.active_operating_mode.value = MODES["MODE_A"]
+
+    engine = DRSEngine(sim)
+    engine.run(max_time=max_time)
+
+    df = sim.telemetry.to_dataframe()
+    df["scenario"] = label
+    df["active_operating_mode_name"] = df["active_operating_mode"].apply(
+        lambda x: x.name if x else "None"
+    )
+    df["total_required_rate"] = (
+        df["face1_required_rate"] + df["face2_required_rate"]
+    )
+    df["total_max_extraction_rate"] = (
+        df["face1_max_extraction_rate"] + df["face2_max_extraction_rate"]
+    )
+    df["total_actual_rate"] = df["face1_actual_rate"] + df["face2_actual_rate"]
+    df["capacity_gap_rate"] = (
+        df["total_required_rate"] - df["total_actual_rate"]
+    ).clip(lower=0.0)
+    df["capacity_utilization"] = np.where(
+        df["total_required_rate"] > 1e-12,
+        df["total_actual_rate"] / df["total_required_rate"],
+        0.0,
+    )
+
+    dt = df["time"].diff().shift(-1).fillna(0.0)
+    capacity_lost_mass = float((df["capacity_gap_rate"] * dt).sum())
+    active_utilization = df.loc[
+        df["total_required_rate"] > 1e-12, "capacity_utilization"
+    ]
+    summary = {
+        "scenario": label,
+        "enable_face_capacity_limit": config.enable_face_capacity_limit,
+        "final_time": float(df["time"].iloc[-1]),
+        "fleet_shift_count": float(df["fleet_shift_count"].max()),
+        "mean_total_required_rate": float(df["total_required_rate"].mean()),
+        "mean_total_max_extraction_rate": float(
+            df["total_max_extraction_rate"].mean()
+        ),
+        "mean_total_actual_rate": float(df["total_actual_rate"].mean()),
+        "mean_face1_effective_delay_factor": float(
+            df["face1_effective_delay_factor"].mean()
+        ),
+        "mean_face2_effective_delay_factor": float(
+            df["face2_effective_delay_factor"].mean()
+        ),
+        "mean_capacity_utilization": float(active_utilization.mean()),
+        "max_capacity_gap_rate": float(df["capacity_gap_rate"].max()),
+        "capacity_lost_mass": capacity_lost_mass,
+        "final_ore1_stock": float(df["Ore1Stock_mass"].iloc[-1]),
+        "final_ore2_stock": float(df["Ore2Stock_mass"].iloc[-1]),
+        "min_ore2_stock": float(df["Ore2Stock_mass"].min()),
+    }
+    return df, summary
+
+
+def run_capacity_comparison(
+    base_config: ConcentratorConfig,
+    max_time: float = 60.0,
+):
+    import pandas as pd
+    from examples.mining.components.plot import plot_ore_with_modes
+
+    baseline_config = replace(base_config, enable_face_capacity_limit=False)
+    constrained_config = replace(
+        base_config,
+        enable_face_capacity_limit=True,
+        face_lhd_allocation=(0.50, 0.50),
+        face_truck_allocation=(0.50, 0.50),
+        face_availability=(0.93, 0.91),
+        face_haul_distance=(1.0, 1.2),
+        face_delay_factor=(0.025, 0.04),
+        face_gas_delay_factor=(0.005, 0.01),
+        face_truck_congestion_threshold=(0.45, 0.45),
+        truck_congestion_delay_sensitivity=0.10,
+        face_shift_capacity_factor=(1.0, 1.0),
+    )
+
+    cases = [
+        ("Policy 1 baseline", baseline_config),
+        ("Policy 1 + fleet capacity limit", constrained_config),
+    ]
+
+    frames = []
+    summaries = []
+    for label, config in cases:
+        df, summary = _run_capacity_case(label, config, max_time=max_time)
+        frames.append(df)
+        summaries.append(summary)
+        print(
+            f"{label}: mean actual rate={summary['mean_total_actual_rate']:.1f} t/d, "
+            f"capacity lost={summary['capacity_lost_mass']:.1f} t, "
+            f"min Ore2={summary['min_ore2_stock']:.1f} t"
+        )
+
+    combined = pd.concat(frames, ignore_index=True)
+    summary_df = pd.DataFrame(summaries)
+
+    selected_columns = [
+        "scenario",
+        "time",
+        "active_operating_mode_name",
+        "fleet_shift_count",
+        "fleet_shift_timer",
+        "face1_required_rate",
+        "face1_max_extraction_rate",
+        "face1_actual_rate",
+        "face1_effective_delay_factor",
+        "face2_required_rate",
+        "face2_max_extraction_rate",
+        "face2_actual_rate",
+        "face2_effective_delay_factor",
+        "total_required_rate",
+        "total_max_extraction_rate",
+        "total_actual_rate",
+        "capacity_gap_rate",
+        "capacity_utilization",
+        "Ore1Stock_mass",
+        "Ore2Stock_mass",
+        "total_system_ore_mass",
+        "mixed_ore1_fraction",
+    ]
+    combined[selected_columns].to_csv(
+        "capacity_policy_comparison.csv", index=False, encoding="utf-8"
+    )
+    summary_df.to_csv(
+        "capacity_policy_comparison_summary.csv", index=False, encoding="utf-8"
+    )
+
+    mode_order = [
+        "SHUTDOWN",
+        "MODE_A",
+        "MODE_A_CONTINGENCY",
+        "MODE_A_MINE_SURGING",
+        "MODE_B",
+        "MODE_B_CONTINGENCY",
+        "MODE_B_MINE_SURGING",
+    ]
+    mode_to_y = {mode: idx for idx, mode in enumerate(mode_order)}
+
+    fig, axes = plt.subplots(6, 1, figsize=(14, 20), sharex=True)
+    for label, group in combined.groupby("scenario"):
+        axes[0].plot(
+            group["time"],
+            group["total_required_rate"],
+            linestyle="--",
+            label=f"{label} required",
+        )
+        axes[0].plot(
+            group["time"], group["total_actual_rate"], label=f"{label} actual"
+        )
+        axes[1].plot(group["time"], group["capacity_gap_rate"], label=label)
+        axes[2].plot(group["time"], group["capacity_utilization"], label=label)
+        axes[3].plot(group["time"], group["Ore2Stock_mass"], label=label)
+        mode_y = group["active_operating_mode_name"].map(mode_to_y)
+        axes[4].step(group["time"], mode_y, where="post", label=label)
+        axes[5].plot(
+            group["time"], group["face1_actual_rate"], label=f"{label} face1"
+        )
+        axes[5].plot(
+            group["time"],
+            group["face2_actual_rate"],
+            linestyle="--",
+            label=f"{label} face2",
+        )
+
+    axes[0].set_ylabel("Rate (t/d)")
+    axes[0].set_title("Required vs Actual Extraction Rate")
+    axes[1].set_ylabel("Capacity Gap (t/d)")
+    axes[1].set_title("Lost Rate Due to Fleet Capacity Limit")
+    axes[2].set_ylabel("Actual / Required")
+    axes[2].set_ylim(-0.05, 1.05)
+    axes[2].set_title("Capacity Utilization")
+    axes[3].set_ylabel("Ore 2 Stockpile (t)")
+    axes[3].set_title("Ore 2 Stockpile Response")
+    axes[4].set_ylabel("Mode")
+    axes[4].set_yticks(list(mode_to_y.values()))
+    axes[4].set_yticklabels(mode_order)
+    axes[4].set_title("Operating Mode Timeline")
+    axes[5].set_ylabel("Face Actual Rate (t/d)")
+    axes[5].set_xlabel("Time (days)")
+    axes[5].set_title("Face-Level Actual Extraction Rates")
+    for ax in axes:
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig("Capacity_Policy_Comparison.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    palette = {
+        "MODE_A": "#1f77b4",
+        "MODE_A_CONTINGENCY": "#2ca02c",
+        "MODE_A_MINE_SURGING": "#9467bd",
+        "MODE_B": "#d62728",
+        "MODE_B_CONTINGENCY": "#ff7f0e",
+        "MODE_B_MINE_SURGING": "#8c564b",
+        "SHUTDOWN": "#FFD700",
+    }
+    mode_groups = {
+        "Mode A": ("MODE_A", "MODE_A_CONTINGENCY", "MODE_A_MINE_SURGING"),
+        "Mode B": ("MODE_B", "MODE_B_CONTINGENCY", "MODE_B_MINE_SURGING"),
+        "Shutdown": ("SHUTDOWN",),
+    }
+    for label, group in combined.groupby("scenario"):
+        diagnostic_df = group.copy()
+        for mode_label, mode_names in mode_groups.items():
+            diagnostic_df[mode_label] = diagnostic_df[
+                "active_operating_mode_name"
+            ].apply(lambda mode: len(mode_groups) - list(mode_groups).index(mode_label) if mode in mode_names else 0)
+
+        fig_diag, axes_diag = plt.subplots(
+            4,
+            1,
+            figsize=(14, 15),
+            sharex=True,
+            gridspec_kw={"height_ratios": [1, 2.2, 1, 1]},
+        )
+        axes_diag[0].step(
+            diagnostic_df["time"],
+            diagnostic_df["Mode A"],
+            where="post",
+            label="Mode A",
+        )
+        axes_diag[0].step(
+            diagnostic_df["time"],
+            diagnostic_df["Mode B"],
+            where="post",
+            label="Mode B",
+        )
+        axes_diag[0].step(
+            diagnostic_df["time"],
+            diagnostic_df["Shutdown"],
+            where="post",
+            label="Shutdown",
+        )
+        axes_diag[0].set_title("Modes (Step)")
+        axes_diag[0].set_yticks([0, 1, 2, 3])
+        axes_diag[0].legend(loc="upper right")
+
+        plot_ore_with_modes(
+            diagnostic_df,
+            time_col="time",
+            ore_cols=[
+                "total_system_ore_mass",
+                "Ore1Stock_mass",
+                "Ore2Stock_mass",
+            ],
+            mode_col="active_operating_mode_name",
+            campaign_split_mode="SHUTDOWN",
+            title="Ore Stockpiles & Mode Changes",
+            palette=palette,
+            hlines=[
+                {
+                    "y": base_config.target_ore_stock_level,
+                    "color": "black",
+                    "linestyle": "--",
+                    "linewidth": 1.5,
+                    "alpha": 0.7,
+                    "label": "Target Total",
+                },
+                {
+                    "y": base_config.critical_ore2_level,
+                    "color": "red",
+                    "linestyle": ":",
+                    "linewidth": 2,
+                    "alpha": 0.8,
+                    "label": "Critical Ore 2",
+                },
+            ],
+            ax=axes_diag[1],
+        )
+
+        axes_diag[2].step(
+            diagnostic_df["time"],
+            diagnostic_df["total_required_rate"],
+            where="post",
+            linestyle="--",
+            label="Required rate",
+        )
+        axes_diag[2].step(
+            diagnostic_df["time"],
+            diagnostic_df["total_actual_rate"],
+            where="post",
+            label="Actual rate",
+        )
+        axes_diag[2].set_ylabel("Rate (t/d)")
+        axes_diag[2].set_title("Required vs Actual Extraction Rate")
+        axes_diag[2].legend(loc="upper right")
+
+        axes_diag[3].step(
+            diagnostic_df["time"],
+            diagnostic_df["capacity_utilization"],
+            where="post",
+            label="Capacity utilization",
+        )
+        axes_diag[3].set_ylim(-0.05, 1.05)
+        axes_diag[3].set_ylabel("Actual / Required")
+        axes_diag[3].set_xlabel("Time (days)")
+        axes_diag[3].set_title("Fleet Capacity Utilization")
+        axes_diag[3].legend(loc="upper right")
+
+        for ax in axes_diag:
+            ax.grid(True, linestyle="--", alpha=0.35)
+        fig_diag.suptitle(label, fontsize=15)
+        fig_diag.tight_layout(rect=(0, 0, 1, 0.97), h_pad=2.0)
+        safe_label = label.lower().replace(" ", "_").replace("+", "plus")
+        safe_label = safe_label.replace("/", "_")
+        fig_diag.savefig(
+            f"Capacity_Policy_Diagnostics_{safe_label}.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig_diag)
+
+    print("Saved capacity_policy_comparison.csv")
+    print("Saved capacity_policy_comparison_summary.csv")
+    print("Saved Capacity_Policy_Comparison.png")
+    print("Saved Capacity_Policy_Diagnostics_*.png")
+    return combined, summary_df
 
 
 def run_and_analyze(config, equal_allocation=False, name="Managed"):
@@ -347,6 +683,18 @@ def run_and_analyze(config, equal_allocation=False, name="Managed"):
         {
             "func": plot_time_series,
             "kwargs": {
+                "y_columns": [
+                    "mixed_required_extraction_rate",
+                    "mixed_max_extraction_rate",
+                    "mixed_extraction_rate",
+                ],
+                "title": "Fleet-Constrained Extraction Rates",
+                "is_step": True,
+            },
+        },
+        {
+            "func": plot_time_series,
+            "kwargs": {
                 "y_columns": ["face1_alloc", "face2_alloc", "ore2_ratio"],
                 "title": "Active Fleet Allocation & Stockpile Ratio",
                 "is_step": True,
@@ -467,14 +815,23 @@ if __name__ == "__main__":
     parser.add_argument("--total_stockpile_level", type=float, default=60000.0)
     parser.add_argument("--std_dev_ore_fraction", type=float, default=0.05)
     parser.add_argument("--N", type=int, default=1)
+    parser.add_argument("--compare_capacity_cases", action="store_true")
+    parser.add_argument("--comparison_max_time", type=float, default=60.0)
     args = parser.parse_args()
 
+    # You can also run it a single time and print out the statistics to evaluate how it spends time
+    np.random.seed(42)
+    random.seed(11)
     config = ConcentratorConfig(
         replication_length=99999.0,
         target_ore_stock_level=args.total_stockpile_level,
         std_dev_ore_fraction=args.std_dev_ore_fraction,
         prob_new_facies=0.3,
     )
+
+    if args.compare_capacity_cases:
+        run_capacity_comparison(config, max_time=args.comparison_max_time)
+        raise SystemExit(0)
 
     df_managed = run_and_analyze(config, equal_allocation=False, name="Managed")
     df_equal = run_and_analyze(config, equal_allocation=True, name="Equal Allocation")
