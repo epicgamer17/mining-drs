@@ -87,4 +87,4 @@ The following transient flow-edges were recorded during the simulation. An arrow
 
 ## Visual Graph
 
-![Module Graph](Concentrator_Module_Graph_Managed.png)
+![Module Graph](Concentrator_Module_Graph_Dynamic_Fleet_Allocation.png)

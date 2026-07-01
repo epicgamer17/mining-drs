@@ -15,7 +15,7 @@
 | `ore1_stock` | `ore1_stock` | `current_mass, actual_outflow_rate, contained_ore_fraction_mass` |
 | `ore2_stock` | `ore2_stock` | `current_mass, actual_outflow_rate, contained_ore_fraction_mass` |
 | `plant` | `plant` | `cumulative_milled_mass` |
-| `controller` | `controller` | `active_operating_mode, total_system_ore_mass, current_campaign_duration, current_contingency_duration, cumulative_time_mode_a, +21 more` |
+| `controller` | `controller` | `active_operating_mode, total_system_ore_mass, current_campaign_duration, current_contingency_duration, cumulative_time_mode_a, +23 more` |
 
 ## Flowchart
 
@@ -38,10 +38,10 @@ subgraph root["<b>ActiveFleetConcentratorModel</b>"]
     ore1_stock(["<b>ore1_stock</b><br><i>current_mass</i><br><i>actual_outflow_rate</i><br><i>contained_ore_fraction_mass</i>"])
     ore2_stock(["<b>ore2_stock</b><br><i>current_mass</i><br><i>actual_outflow_rate</i><br><i>contained_ore_fraction_mass</i>"])
     plant(["<b>plant</b><br><i>cumulative_milled_mass</i>"])
-    controller(["<b>controller</b><br><i>active_operating_mode</i><br><i>total_system_ore_mass</i><br><i>current_campaign_duration</i><br><i>current_contingency_duration</i><br><i>cumulative_time_mode_a</i><br><i>+21 more</i>"])
+    controller(["<b>controller</b><br><i>active_operating_mode</i><br><i>total_system_ore_mass</i><br><i>current_campaign_duration</i><br><i>current_contingency_duration</i><br><i>cumulative_time_mode_a</i><br><i>+23 more</i>"])
 end
-    controller -->|face0_rate| face1
-    controller -->|face1_rate| face2
+    controller -->|face0_achieved_extraction_rate| face1
+    controller -->|face1_achieved_extraction_rate| face2
     controller -->|target_stock1_outflow_rate| ore1_stock
     controller -->|target_stock2_outflow_rate| ore2_stock
     face1 -->|cumulative_extracted_mass| controller
@@ -63,8 +63,8 @@ The following read-dependencies were recorded during the simulation. An arrow `A
   - `ore1_stock` → `ActiveFleetConcentratorModel` reads `Ore1Stock_mass`
   - `ore2_stock` → `ActiveFleetConcentratorModel` reads `Ore2Stock_mass`
   - `controller` → `ActiveFleetConcentratorModel` reads `total_system_ore_mass`
-  - `controller` → `face1` reads `face0_rate`
-  - `controller` → `face2` reads `face1_rate`
+  - `controller` → `face1` reads `face0_achieved_extraction_rate`
+  - `controller` → `face2` reads `face1_achieved_extraction_rate`
   - `controller` → `ore1_stock` reads `target_stock1_outflow_rate`
   - `controller` → `ore2_stock` reads `target_stock2_outflow_rate`
   - `face1` → `controller` reads `cumulative_extracted_mass`

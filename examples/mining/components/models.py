@@ -268,38 +268,38 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
                 / max(1e-12, m.controller.target_mine_mass_rate.value),
             )
             self.telemetry.register_metric(
-                "face1_required_rate",
-                lambda t, m, s, h: m.controller.face_required_rates[0].value,
+                "face1_target_extraction_rate",
+                lambda t, m, s, h: m.controller.face_target_extraction_rates[0].value,
             )
             self.telemetry.register_metric(
-                "face1_max_extraction_rate",
-                lambda t, m, s, h: m.controller.face_max_extraction_rates[0].value,
+                "face1_real_extraction_rate",
+                lambda t, m, s, h: m.controller.face_real_extraction_rates[0].value,
             )
             self.telemetry.register_metric(
-                "face1_actual_rate",
-                lambda t, m, s, h: m.controller.face_actual_rates[0].value,
+                "face1_achieved_extraction_rate",
+                lambda t, m, s, h: m.controller.face_achieved_extraction_rates[0].value,
             )
             self.telemetry.register_metric(
-                "face1_effective_delay_factor",
-                lambda t, m, s, h: m.controller.face_effective_delay_factors[
+                "face1_operational_downtime_fraction",
+                lambda t, m, s, h: m.controller.face_operational_downtime_fractions[
                     0
                 ].value,
             )
             self.telemetry.register_metric(
-                "face2_required_rate",
-                lambda t, m, s, h: m.controller.face_required_rates[1].value,
+                "face2_target_extraction_rate",
+                lambda t, m, s, h: m.controller.face_target_extraction_rates[1].value,
             )
             self.telemetry.register_metric(
-                "face2_max_extraction_rate",
-                lambda t, m, s, h: m.controller.face_max_extraction_rates[1].value,
+                "face2_real_extraction_rate",
+                lambda t, m, s, h: m.controller.face_real_extraction_rates[1].value,
             )
             self.telemetry.register_metric(
-                "face2_actual_rate",
-                lambda t, m, s, h: m.controller.face_actual_rates[1].value,
+                "face2_achieved_extraction_rate",
+                lambda t, m, s, h: m.controller.face_achieved_extraction_rates[1].value,
             )
             self.telemetry.register_metric(
-                "face2_effective_delay_factor",
-                lambda t, m, s, h: m.controller.face_effective_delay_factors[
+                "face2_operational_downtime_fraction",
+                lambda t, m, s, h: m.controller.face_operational_downtime_fractions[
                     1
                 ].value,
             )
@@ -344,21 +344,21 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
                 lambda t, m, s, h: m.face2.active_parcel_ore_fraction.value,
             )
             self.telemetry.register_metric(
-                "mixed_extraction_rate",
+                "mixed_achieved_extraction_rate",
                 lambda t, m, s, h: sum(
-                    rate.value for rate in m.controller.face_actual_rates
+                    rate.value for rate in m.controller.face_achieved_extraction_rates
                 ),
             )
             self.telemetry.register_metric(
-                "mixed_required_extraction_rate",
+                "mixed_target_extraction_rate",
                 lambda t, m, s, h: sum(
-                    rate.value for rate in m.controller.face_required_rates
+                    rate.value for rate in m.controller.face_target_extraction_rates
                 ),
             )
             self.telemetry.register_metric(
-                "mixed_max_extraction_rate",
+                "mixed_real_extraction_rate",
                 lambda t, m, s, h: sum(
-                    rate.value for rate in m.controller.face_max_extraction_rates
+                    rate.value for rate in m.controller.face_real_extraction_rates
                 ),
             )
             self.telemetry.register_metric(
@@ -386,8 +386,8 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
         self.global_time.rate = 1.0
         self.controller()
         ore1_flow, ore2_flow = self.fleet(
-            self.face1(self.controller.face_actual_rates[0]),
-            self.face2(self.controller.face_actual_rates[1]),
+            self.face1(self.controller.face_achieved_extraction_rates[0]),
+            self.face2(self.controller.face_achieved_extraction_rates[1]),
         )
         out1 = self.ore1_stock(
             self.controller.target_stock1_outflow_rate, inflow=ore1_flow

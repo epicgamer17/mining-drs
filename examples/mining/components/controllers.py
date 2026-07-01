@@ -225,28 +225,30 @@ class MultiFaceConcentratorController(BaseBlendingController):
     def __init__(self, config, faces, fleet, plant):
         super().__init__(config, mine=None, fleet=fleet, plant=plant)
         self.faces = list(faces)
-        self.face_required_rates = []
-        self.face_max_extraction_rates = []
-        self.face_actual_rates = []
-        self.face_effective_delay_factors = []
-        self.face_shift_capacity_factors = []
-        self.face_target_rates = self.face_actual_rates
+        self.total_extra_trucks = drs.Variable("total_extra_trucks", 0.0)
+        self.cumulative_mine_development = drs.Level("cumulative_mine_development", initial_value=0.0)
+        self.face_target_extraction_rates = []
+        self.face_real_extraction_rates = []
+        self.face_achieved_extraction_rates = []
+        self.face_operational_downtime_fractions = []
+        self.face_shift_allocation_fractions = []
+        self.face_target_rates = self.face_achieved_extraction_rates
         for i in range(len(self.faces)):
-            required = drs.Variable(f"face{i}_required_rate", 0.0)
-            max_extraction = drs.Variable(f"face{i}_max_extraction_rate", 0.0)
-            actual = drs.Variable(f"face{i}_rate", 0.0)
-            effective_delay = drs.Variable(f"face{i}_effective_delay_factor", 0.0)
-            shift_factor = drs.Variable(f"face{i}_shift_capacity_factor", 1.0)
-            setattr(self, f"face{i}_required_rate", required)
-            setattr(self, f"face{i}_max_extraction_rate", max_extraction)
-            setattr(self, f"face{i}_rate", actual)
-            setattr(self, f"face{i}_effective_delay_factor", effective_delay)
-            setattr(self, f"face{i}_shift_capacity_factor", shift_factor)
-            self.face_required_rates.append(required)
-            self.face_max_extraction_rates.append(max_extraction)
-            self.face_actual_rates.append(actual)
-            self.face_effective_delay_factors.append(effective_delay)
-            self.face_shift_capacity_factors.append(shift_factor)
+            target = drs.Variable(f"face{i}_target_extraction_rate", 0.0)
+            real_extraction = drs.Variable(f"face{i}_real_extraction_rate", 0.0)
+            achieved = drs.Variable(f"face{i}_achieved_extraction_rate", 0.0)
+            operational_downtime = drs.Variable(f"face{i}_operational_downtime_fraction", 0.0)
+            allocation_fraction = drs.Variable(f"face{i}_shift_allocation_fraction", 1.0)
+            setattr(self, f"face{i}_target_extraction_rate", target)
+            setattr(self, f"face{i}_real_extraction_rate", real_extraction)
+            setattr(self, f"face{i}_achieved_extraction_rate", achieved)
+            setattr(self, f"face{i}_operational_downtime_fraction", operational_downtime)
+            setattr(self, f"face{i}_shift_allocation_fraction", allocation_fraction)
+            self.face_target_extraction_rates.append(target)
+            self.face_real_extraction_rates.append(real_extraction)
+            self.face_achieved_extraction_rates.append(achieved)
+            self.face_operational_downtime_fractions.append(operational_downtime)
+            self.face_shift_allocation_fractions.append(allocation_fraction)
         self._mode_allocations = self._precompute_allocations()
         self.current_shift_allocations = None
         self.current_shift_mode_name = None
@@ -307,13 +309,13 @@ class MultiFaceConcentratorController(BaseBlendingController):
     def _clamp(self, value, lower, upper):
         return max(lower, min(upper, value))
 
-    def _refresh_shift_capacity_factors(self):
-        for i, factor in enumerate(self.face_shift_capacity_factors):
+    def _refresh_shift_allocation_fractions(self):
+        for i, factor in enumerate(self.face_shift_allocation_fractions):
             factor.value = self._face_config_value(
-                "face_shift_capacity_factor", i, 1.0
+                "face_shift_allocation_fraction", i, 1.0
             )
 
-    def _face_effective_delay_factor(self, face_index):
+    def _face_operational_downtime_fraction(self, face_index):
         c = self.config
         base_delay = self._clamp(
             self._face_config_value("face_delay_factor", face_index, 0.0), 0.0, 1.0
@@ -324,7 +326,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
             1.0,
         )
         truck = max(
-            0.0, self._face_config_value("face_truck_allocation", face_index, 0.0)
+            0.0, self._face_config_value("face_truck_count", face_index, 0.0)
         )
         congestion_threshold = max(
             0.0,
@@ -339,49 +341,70 @@ class MultiFaceConcentratorController(BaseBlendingController):
         )
         return self._clamp(base_delay + gas_delay + congestion_delay, 0.0, 1.0)
 
-    def _face_max_extraction_rate(self, face_index, required_rate):
+    def _face_real_extraction_rate(self, face_index, target_extraction_rate):
         c = self.config
         if not getattr(c, "enable_face_capacity_limit", False):
-            self.face_effective_delay_factors[face_index].value = 0.0
-            return required_rate
+            self.face_operational_downtime_fractions[face_index].value = 0.0
+            return target_extraction_rate
 
-        lhd = self._face_config_value("face_lhd_allocation", face_index, 0.0)
-        truck = self._face_config_value("face_truck_allocation", face_index, 0.0)
-        availability = self._clamp(
-            self._face_config_value("face_availability", face_index, 1.0),
-            0.0,
-            1.0,
-        )
+        lhd_alloc = self._face_config_value("face_lhd_count", face_index, 0.0)
+        truck_alloc = self._face_config_value("face_truck_count", face_index, 0.0)
         distance = self._face_config_value("face_haul_distance", face_index, 0.0)
-        delay = self._face_effective_delay_factor(face_index)
-        self.face_effective_delay_factors[face_index].value = delay
-        shift_factor = max(0.0, self.face_shift_capacity_factors[face_index].value)
+        availability = self._clamp(self._face_config_value("face_availability", face_index, 1.0), 0.0, 1.0)
+        
+        # 1. Calculate Traffic Delay (function of number of trucks)
+        traffic_delay = c.traffic_delay_base + (c.traffic_delay_multiplier * truck_alloc)
+        
+        # 2. Calculate Truck Cycle Time (Travel + Load + Dump + Traffic Delay)
+        travel_time = (2 * distance) / c.truck_velocity
+        truck_cycle_time = travel_time + c.loader_cycle_time_hours + c.truck_dump_time_hours + traffic_delay
+        
+        if truck_cycle_time <= 0 or lhd_alloc <= 0:
+            return 0.0
 
-        lhd_capacity = max(0.0, lhd) * c.lhd_capacity_per_allocation
-        truck_capacity = max(0.0, truck) * c.truck_capacity_per_allocation
-        resource_capacity = min(lhd_capacity, truck_capacity)
-        distance_excess = max(0.0, distance - c.haul_distance_reference)
-        distance_factor = 1.0 / (1.0 + c.haul_distance_sensitivity * distance_excess)
-        productive_time = 1.0 - delay
+        # 3. Calculate Match Factor
+        # MF = (Number of Trucks * Loader Cycle Time) / (Number of Loaders * Truck Cycle Time)
+        match_factor = (truck_alloc * c.loader_cycle_time_hours) / (lhd_alloc * truck_cycle_time)
+        
+        # 4. Calculate Efficiency & Throughput based on Match Factor
+        if match_factor < 1.0:
+            # Under-trucked: Trucks dictate production
+            efficiency = match_factor
+            max_rate = (truck_alloc / truck_cycle_time) * c.truck_payload_tonnes * 24.0 # tonnes per day
+        else:
+            # Over-trucked: Loaders dictate production (trucks wait)
+            efficiency = 1.0
+            max_rate = (lhd_alloc / c.loader_cycle_time_hours) * c.loader_payload_tonnes * 24.0 # tonnes per day
 
-        max_extraction_rate = (
-            resource_capacity
-            * availability
-            * productive_time
-            * distance_factor
-            * shift_factor
-        )
-        return max(0.0, max_extraction_rate)
+        # Apply availability and allocation fractions
+        allocation_fraction = max(0.0, self.face_shift_allocation_fractions[face_index].value)
+        final_real_extraction_rate = max_rate * availability * allocation_fraction
+
+        # 5. Calculate Extra Trucks for Development
+        # If we are over-trucked (MF > 1), or if real_rate > target_extraction_rate, we have spare trucks
+        if final_real_extraction_rate > target_extraction_rate and target_extraction_rate > 0:
+            # Fraction of fleet actually needed
+            utilization = target_extraction_rate / final_real_extraction_rate
+            unused_trucks = truck_alloc * (1.0 - utilization)
+        else:
+            unused_trucks = 0.0
+            
+        # Accumulate extra trucks to global development pool
+        self.total_extra_trucks.value += unused_trucks 
+
+        return max(0.0, final_real_extraction_rate)
 
     def _reallocate_fleet_for_shift(self):
         mode_name = self.active_operating_mode.value.name
         self.current_shift_allocations = self._get_allocations_for_mode(mode_name)
         self.current_shift_mode_name = mode_name
-        self._refresh_shift_capacity_factors()
+        self._refresh_shift_allocation_fractions()
         self.fleet_shift_count.value += 1
 
     def forward(self):
         c = self.config
+
+        self.total_extra_trucks.value = 0.0
 
         total_extracted = sum(f.cumulative_extracted_mass.value for f in self.faces)
         if abs(total_extracted - c.ore_to_be_extracted_during_warming_period) < 1e-6:
@@ -428,16 +451,18 @@ class MultiFaceConcentratorController(BaseBlendingController):
         fracs = self.current_shift_allocations
         if fracs:
             for i, _face in enumerate(self.faces):
-                required_rate = targets.extraction_rate * fracs[i]
-                max_extraction_rate = self._face_max_extraction_rate(i, required_rate)
-                self.face_required_rates[i].value = required_rate
-                self.face_max_extraction_rates[i].value = max_extraction_rate
-                self.face_actual_rates[i].value = min(
-                    required_rate, max_extraction_rate
+                target_extraction_rate = targets.extraction_rate * fracs[i]
+                real_extraction_rate = self._face_real_extraction_rate(i, target_extraction_rate)
+                self.face_target_extraction_rates[i].value = target_extraction_rate
+                self.face_real_extraction_rates[i].value = real_extraction_rate
+                self.face_achieved_extraction_rates[i].value = min(
+                    target_extraction_rate, real_extraction_rate
                 )
         else:
             for i, _face in enumerate(self.faces):
-                self.face_required_rates[i].value = 0.0
-                self.face_max_extraction_rates[i].value = 0.0
-                self.face_actual_rates[i].value = 0.0
-                self.face_effective_delay_factors[i].value = 0.0
+                self.face_target_extraction_rates[i].value = 0.0
+                self.face_real_extraction_rates[i].value = 0.0
+                self.face_achieved_extraction_rates[i].value = 0.0
+                self.face_operational_downtime_fractions[i].value = 0.0
+
+        self.cumulative_mine_development.rate = self.total_extra_trucks.value * c.development_rate_per_extra_truck

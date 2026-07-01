@@ -143,42 +143,42 @@ def _run_capacity_case(
     df["active_operating_mode_name"] = df["active_operating_mode"].apply(
         lambda x: x.name if x else "None"
     )
-    df["total_required_rate"] = (
-        df["face1_required_rate"] + df["face2_required_rate"]
+    df["total_target_extraction_rate"] = (
+        df["face1_target_extraction_rate"] + df["face2_target_extraction_rate"]
     )
-    df["total_max_extraction_rate"] = (
-        df["face1_max_extraction_rate"] + df["face2_max_extraction_rate"]
+    df["total_real_extraction_rate"] = (
+        df["face1_real_extraction_rate"] + df["face2_real_extraction_rate"]
     )
-    df["total_actual_rate"] = df["face1_actual_rate"] + df["face2_actual_rate"]
+    df["total_achieved_extraction_rate"] = df["face1_achieved_extraction_rate"] + df["face2_achieved_extraction_rate"]
     df["capacity_gap_rate"] = (
-        df["total_required_rate"] - df["total_actual_rate"]
+        df["total_target_extraction_rate"] - df["total_achieved_extraction_rate"]
     ).clip(lower=0.0)
     df["capacity_utilization"] = np.where(
-        df["total_required_rate"] > 1e-12,
-        df["total_actual_rate"] / df["total_required_rate"],
+        df["total_target_extraction_rate"] > 1e-12,
+        df["total_achieved_extraction_rate"] / df["total_target_extraction_rate"],
         0.0,
     )
 
     dt = df["time"].diff().shift(-1).fillna(0.0)
     capacity_lost_mass = float((df["capacity_gap_rate"] * dt).sum())
     active_utilization = df.loc[
-        df["total_required_rate"] > 1e-12, "capacity_utilization"
+        df["total_target_extraction_rate"] > 1e-12, "capacity_utilization"
     ]
     summary = {
         "scenario": label,
         "enable_face_capacity_limit": config.enable_face_capacity_limit,
         "final_time": float(df["time"].iloc[-1]),
         "fleet_shift_count": float(df["fleet_shift_count"].max()),
-        "mean_total_required_rate": float(df["total_required_rate"].mean()),
-        "mean_total_max_extraction_rate": float(
-            df["total_max_extraction_rate"].mean()
+        "mean_total_target_extraction_rate": float(df["total_target_extraction_rate"].mean()),
+        "mean_total_real_extraction_rate": float(
+            df["total_real_extraction_rate"].mean()
         ),
-        "mean_total_actual_rate": float(df["total_actual_rate"].mean()),
-        "mean_face1_effective_delay_factor": float(
-            df["face1_effective_delay_factor"].mean()
+        "mean_total_achieved_extraction_rate": float(df["total_achieved_extraction_rate"].mean()),
+        "mean_face1_operational_downtime_fraction": float(
+            df["face1_operational_downtime_fraction"].mean()
         ),
-        "mean_face2_effective_delay_factor": float(
-            df["face2_effective_delay_factor"].mean()
+        "mean_face2_operational_downtime_fraction": float(
+            df["face2_operational_downtime_fraction"].mean()
         ),
         "mean_capacity_utilization": float(active_utilization.mean()),
         "max_capacity_gap_rate": float(df["capacity_gap_rate"].max()),
@@ -201,15 +201,15 @@ def run_capacity_comparison(
     constrained_config = replace(
         base_config,
         enable_face_capacity_limit=True,
-        face_lhd_allocation=(0.50, 0.50),
-        face_truck_allocation=(0.50, 0.50),
+        face_lhd_count=(2, 3),
+        face_truck_count=(4, 6),
         face_availability=(0.93, 0.91),
         face_haul_distance=(1.0, 1.2),
         face_delay_factor=(0.025, 0.04),
         face_gas_delay_factor=(0.005, 0.01),
         face_truck_congestion_threshold=(0.45, 0.45),
         truck_congestion_delay_sensitivity=0.10,
-        face_shift_capacity_factor=(1.0, 1.0),
+        face_shift_allocation_fraction=(1.0, 1.0),
     )
 
     cases = [
@@ -224,7 +224,7 @@ def run_capacity_comparison(
         frames.append(df)
         summaries.append(summary)
         print(
-            f"{label}: mean actual rate={summary['mean_total_actual_rate']:.1f} t/d, "
+            f"{label}: mean actual rate={summary['mean_total_achieved_extraction_rate']:.1f} t/d, "
             f"capacity lost={summary['capacity_lost_mass']:.1f} t, "
             f"min Ore2={summary['min_ore2_stock']:.1f} t"
         )
@@ -238,17 +238,17 @@ def run_capacity_comparison(
         "active_operating_mode_name",
         "fleet_shift_count",
         "fleet_shift_timer",
-        "face1_required_rate",
-        "face1_max_extraction_rate",
-        "face1_actual_rate",
-        "face1_effective_delay_factor",
-        "face2_required_rate",
-        "face2_max_extraction_rate",
-        "face2_actual_rate",
-        "face2_effective_delay_factor",
-        "total_required_rate",
-        "total_max_extraction_rate",
-        "total_actual_rate",
+        "face1_target_extraction_rate",
+        "face1_real_extraction_rate",
+        "face1_achieved_extraction_rate",
+        "face1_operational_downtime_fraction",
+        "face2_target_extraction_rate",
+        "face2_real_extraction_rate",
+        "face2_achieved_extraction_rate",
+        "face2_operational_downtime_fraction",
+        "total_target_extraction_rate",
+        "total_real_extraction_rate",
+        "total_achieved_extraction_rate",
         "capacity_gap_rate",
         "capacity_utilization",
         "Ore1Stock_mass",
@@ -278,12 +278,12 @@ def run_capacity_comparison(
     for label, group in combined.groupby("scenario"):
         axes[0].plot(
             group["time"],
-            group["total_required_rate"],
+            group["total_target_extraction_rate"],
             linestyle="--",
             label=f"{label} required",
         )
         axes[0].plot(
-            group["time"], group["total_actual_rate"], label=f"{label} actual"
+            group["time"], group["total_achieved_extraction_rate"], label=f"{label} actual"
         )
         axes[1].plot(group["time"], group["capacity_gap_rate"], label=label)
         axes[2].plot(group["time"], group["capacity_utilization"], label=label)
@@ -291,11 +291,11 @@ def run_capacity_comparison(
         mode_y = group["active_operating_mode_name"].map(mode_to_y)
         axes[4].step(group["time"], mode_y, where="post", label=label)
         axes[5].plot(
-            group["time"], group["face1_actual_rate"], label=f"{label} face1"
+            group["time"], group["face1_achieved_extraction_rate"], label=f"{label} face1"
         )
         axes[5].plot(
             group["time"],
-            group["face2_actual_rate"],
+            group["face2_achieved_extraction_rate"],
             linestyle="--",
             label=f"{label} face2",
         )
@@ -408,14 +408,14 @@ def run_capacity_comparison(
 
         axes_diag[2].step(
             diagnostic_df["time"],
-            diagnostic_df["total_required_rate"],
+            diagnostic_df["total_target_extraction_rate"],
             where="post",
             linestyle="--",
             label="Required rate",
         )
         axes_diag[2].step(
             diagnostic_df["time"],
-            diagnostic_df["total_actual_rate"],
+            diagnostic_df["total_achieved_extraction_rate"],
             where="post",
             label="Actual rate",
         )
@@ -455,7 +455,7 @@ def run_capacity_comparison(
     return combined, summary_df
 
 
-def run_and_analyze(config, equal_allocation=False, name="Managed"):
+def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocation"):
     """Run the multi-face simulation and produce full diagnostics dashboard."""
     np.random.seed(42)
     random.seed(11)
@@ -833,15 +833,15 @@ if __name__ == "__main__":
         run_capacity_comparison(config, max_time=args.comparison_max_time)
         raise SystemExit(0)
 
-    df_managed = run_and_analyze(config, equal_allocation=False, name="Managed")
-    df_equal = run_and_analyze(config, equal_allocation=True, name="Equal Allocation")
+    df_managed = run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocation")
+    df_equal = run_and_analyze(config, equal_allocation=True, name="Equal Fleet Allocation")
 
     # Print summary comparison
     print("\n" + "=" * 72)
-    print("COMPARISON SUMMARY: Managed vs Equal Allocation")
+    print("COMPARISON SUMMARY: Dynamic Fleet Allocation vs Equal Fleet Allocation")
     print("=" * 72)
 
-    for label, df in [("Managed", df_managed), ("Equal Allocation", df_equal)]:
+    for label, df in [("Dynamic Fleet Allocation", df_managed), ("Equal Fleet Allocation", df_equal)]:
         dt = df["time"].diff().fillna(0)
         final_ore1 = df["Ore1Stock_mass"].iloc[-1]
         final_ore2 = df["Ore2Stock_mass"].iloc[-1]
