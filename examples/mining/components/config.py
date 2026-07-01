@@ -58,14 +58,33 @@ class ConcentratorConfig(BaseDualStockpileConfig):
     # Face-level fleet capacity model. Disabled by default so Policy 1 stays
     # the current fixed mode-dependent allocation baseline.
     enable_face_capacity_limit: bool = False
-    face_lhd_allocation: tuple = (0.5, 0.5)
-    face_truck_allocation: tuple = (0.5, 0.5)
-    face_availability: tuple = (0.95, 0.95)
-    face_haul_distance: tuple = (1.0, 1.0)
-    face_delay_factor: tuple = (0.0, 0.0)
-    face_gas_delay_factor: tuple = (0.0, 0.0)
-    face_truck_congestion_threshold: tuple = (0.5, 0.5)
-    face_shift_capacity_factor: tuple = (1.0, 1.0)
+
+    # --- New Parameters for Cycle Time & Match Factor ---
+    truck_velocity: float = 20.0  # e.g., km/h
+    loader_cycle_time_hours: float = 0.05  # e.g., 3 mins to load a truck
+    truck_dump_time_hours: float = 0.033   # e.g., 2 mins to dump
+    truck_payload: float = 140.0           # tonnes per truck cycle
+    loader_payload: float = 140.0          # tonnes loaded per loader cycle
+    
+    # --- Traffic Delay Parameters ---
+    # Traffic delay increases cycle time based on the number of trucks at a face
+    traffic_delay_base: float = 0.01 
+    traffic_delay_multiplier: float = 0.005 # Added delay per truck
+
+    # --- Mine Development Parameters ---
+    development_rate_per_extra_truck: float = 50.0 # meters (or tonnes) developed per unused truck per day
+    development_required_per_parcel: float = 100.0 # required development units before extracting a new parcel
+
+    # --- Generalize for N Faces (Change tuples to support > 2 faces) ---
+    num_faces: int = 3  # Increase as needed
+    face_lhd_allocation: tuple = (0.33, 0.33, 0.33)
+    face_truck_allocation: tuple = (0.33, 0.33, 0.33)
+    face_availability: tuple = (0.95, 0.95, 0.95)
+    face_haul_distance: tuple = (1.5, 1.0, 2.0)
+    face_delay_factor: tuple = (0.0, 0.0, 0.0)
+    face_gas_delay_factor: tuple = (0.0, 0.0, 0.0)
+    face_truck_congestion_threshold: tuple = (0.5, 0.5, 0.5)
+    face_shift_capacity_factor: tuple = (1.0, 1.0, 1.0)
     lhd_capacity_per_allocation: float = 13000.0
     truck_capacity_per_allocation: float = 13000.0
     truck_congestion_delay_sensitivity: float = 0.0
