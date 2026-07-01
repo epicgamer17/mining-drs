@@ -93,17 +93,23 @@ class OperatingMode:
             )
             p = model.fleet.stockpile2_routing_fraction.value
             if self._name in ("MODE_A_MINE_SURGING", "MODE_C_MINE_SURGING"):
-                extraction = (ore1 / (1.0 - p)) if (1.0 - p) > 0 else 0.0
+                effective_fraction = max(
+                    1.0 - p, config.min_effective_surging_fraction
+                )
+                raw_extraction = ore1 / effective_fraction
             else:
-                extraction = (ore2 / p) if p > 0 else 0.0
+                effective_fraction = max(p, config.min_effective_surging_fraction)
+                raw_extraction = ore2 / effective_fraction
+            extraction = min(raw_extraction, config.max_surging_extraction_rate)
             return TargetRates(
                 extraction_rate=extraction,
                 ore1_milling_rate=ore1,
                 ore2_milling_rate=ore2,
             )
 
+        extraction = min(ore1 + ore2, config.max_mine_extraction_rate)
         return TargetRates(
-            extraction_rate=ore1 + ore2, ore1_milling_rate=ore1, ore2_milling_rate=ore2
+            extraction_rate=extraction, ore1_milling_rate=ore1, ore2_milling_rate=ore2
         )
 
     def check_end_conditions(

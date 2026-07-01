@@ -16,6 +16,40 @@ from .generators import (
 )
 
 
+def _equipment_schedules(total_units, downtime_start, downtime_duration, schedules):
+    if schedules is not None:
+        return schedules
+    return [(downtime_start, downtime_duration) for _ in range(int(total_units))]
+
+
+def _equipment_availability(
+    name,
+    total_units,
+    downtime_start,
+    downtime_duration,
+    schedules,
+    time_between_failures_hours,
+    repair_time_hours,
+):
+    if time_between_failures_hours is not None and repair_time_hours is not None:
+        return StochasticEquipmentFleetAvailability(
+            name=name,
+            total_units=int(total_units),
+            time_between_failures_hours=time_between_failures_hours,
+            repair_time_hours=repair_time_hours,
+        )
+
+    return EquipmentFleetAvailability(
+        name=name,
+        unit_downtime_schedules=_equipment_schedules(
+            total_units,
+            downtime_start,
+            downtime_duration,
+            schedules,
+        ),
+    )
+
+
 class BaseBlendingModel(drs.Module):
     def __init__(self, config: BaseDualStockpileConfig, enable_telemetry: bool = False):
         super().__init__()
@@ -229,6 +263,50 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
                 "face2_alloc", lambda t, m, s, h: m.controller.face_target_rates[1].value / max(1e-12, m.controller.target_mine_mass_rate.value)
             )
             self.telemetry.register_metric(
+                "face1_required_rate",
+                lambda t, m, s, h: m.controller.face_required_rates[0].value,
+            )
+            self.telemetry.register_metric(
+                "face1_max_extraction_rate",
+                lambda t, m, s, h: m.controller.face_max_extraction_rates[0].value,
+            )
+            self.telemetry.register_metric(
+                "face1_actual_rate",
+                lambda t, m, s, h: m.controller.face_actual_rates[0].value,
+            )
+            self.telemetry.register_metric(
+                "face1_effective_delay_factor",
+                lambda t, m, s, h: m.controller.face_effective_delay_factors[
+                    0
+                ].value,
+            )
+            self.telemetry.register_metric(
+                "face2_required_rate",
+                lambda t, m, s, h: m.controller.face_required_rates[1].value,
+            )
+            self.telemetry.register_metric(
+                "face2_max_extraction_rate",
+                lambda t, m, s, h: m.controller.face_max_extraction_rates[1].value,
+            )
+            self.telemetry.register_metric(
+                "face2_actual_rate",
+                lambda t, m, s, h: m.controller.face_actual_rates[1].value,
+            )
+            self.telemetry.register_metric(
+                "face2_effective_delay_factor",
+                lambda t, m, s, h: m.controller.face_effective_delay_factors[
+                    1
+                ].value,
+            )
+            self.telemetry.register_metric(
+                "fleet_shift_count",
+                lambda t, m, s, h: m.controller.fleet_shift_count.value,
+            )
+            self.telemetry.register_metric(
+                "fleet_shift_timer",
+                lambda t, m, s, h: m.controller.fleet_shift_timer.value,
+            )
+            self.telemetry.register_metric(
                 "ore2_ratio",
                 lambda t, m, s, h: m.ore2_stock.current_mass.value
                 / max(
@@ -262,7 +340,21 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
             )
             self.telemetry.register_metric(
                 "mixed_extraction_rate",
-                lambda t, m, s, h: m.controller.target_mine_mass_rate.value,
+                lambda t, m, s, h: sum(
+                    rate.value for rate in m.controller.face_actual_rates
+                ),
+            )
+            self.telemetry.register_metric(
+                "mixed_required_extraction_rate",
+                lambda t, m, s, h: sum(
+                    rate.value for rate in m.controller.face_required_rates
+                ),
+            )
+            self.telemetry.register_metric(
+                "mixed_max_extraction_rate",
+                lambda t, m, s, h: sum(
+                    rate.value for rate in m.controller.face_max_extraction_rates
+                ),
             )
             self.telemetry.register_metric(
                 "mixed_ore1_fraction",
@@ -289,8 +381,8 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
         self.global_time.rate = 1.0
         self.controller()
         ore1_flow, ore2_flow = self.fleet(
-            self.face1(self.controller.face_target_rates[0]),
-            self.face2(self.controller.face_target_rates[1]),
+            self.face1(self.controller.face_actual_rates[0]),
+            self.face2(self.controller.face_actual_rates[1]),
         )
         out1 = self.ore1_stock(
             self.controller.target_stock1_outflow_rate, inflow=ore1_flow
@@ -310,3 +402,153 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
             + self.face2.cumulative_extracted_mass.value
         )
         return total_extracted >= self.config.total_ore_to_extract
+
+
+class UndergroundMaterialHandlingModel(drs.Module):
+    """Standalone underground material handling sandbox for parcel flow testing."""
+
+    def __init__(
+        self,
+        initial_blasted_rock_mass: float = 2000.0,
+        initial_remuck_mass: float = 0.0,
+        ore1_fraction: float = 0.7,
+        truck_capacity_rate: float = 600.0,
+        drill_units: float = 1.0,
+        lhd_units: float = 1.0,
+        truck_units: float = 1.0,
+        drill_downtime_start: float = float("inf"),
+        drill_downtime_duration: float = 0.0,
+        drill_downtime_schedules=None,
+        drill_time_between_failures_hours=None,
+        drill_repair_time_hours=None,
+        drill_work_required: float = 1.0,
+        drill_rate_per_drill: float = 0.5,
+        blast_tonnage: float = 1000.0,
+        lhd_downtime_start: float = float("inf"),
+        lhd_downtime_duration: float = 0.0,
+        lhd_downtime_schedules=None,
+        lhd_time_between_failures_hours=None,
+        lhd_repair_time_hours=None,
+        truck_downtime_start: float = float("inf"),
+        truck_downtime_duration: float = 0.0,
+        truck_downtime_schedules=None,
+        truck_time_between_failures_hours=None,
+        truck_repair_time_hours=None,
+        aggregate_parcel_mass: float = 300.0,
+        travel_time: float = 0.1,
+        target_received_mass: float = 1200.0,
+    ):
+        raise RuntimeError(
+            "UndergroundMaterialHandlingModel is disabled for now. "
+            "Use ActiveFleetConcentratorModel / many_faces_simulation while the "
+            "model follows face-level allocation and continuous fleet flow."
+        )
+        super().__init__()
+        self.global_time = drs.Timer("GlobalTime", initial_value=0.0)
+        self.nominal_truck_capacity_rate = drs.Variable(
+            "nominal_truck_capacity_rate",
+            truck_capacity_rate,
+        )
+        self.effective_truck_capacity_rate = drs.Variable(
+            "effective_truck_capacity_rate",
+            truck_capacity_rate,
+        )
+        self.flush_loaded_buffer = drs.Variable("flush_loaded_buffer", False)
+        self.target_received_mass = target_received_mass
+
+        self.geology_generator = StochasticFaciesGenerator(
+            mean_fraction=1.0 - ore1_fraction,
+            std_dev=0.075,
+            prob_new_facies=0.3,
+            variation_same_facies=0.01,
+        )
+        self.geology_face = UndergroundGeologyFace(
+            config=ConcentratorConfig(),
+            face_id=1,
+            generator=self.geology_generator,
+        )
+
+        self.face_inventory = UndergroundFaceInventory(
+            face_id=1,
+            initial_blasted_rock_mass=initial_blasted_rock_mass,
+            initial_remuck_mass=initial_remuck_mass,
+            initial_ore1_fraction=ore1_fraction,
+        )
+        self.drill_availability = _equipment_availability(
+            name="DrillAvailability",
+            total_units=drill_units,
+            downtime_start=drill_downtime_start,
+            downtime_duration=drill_downtime_duration,
+            schedules=drill_downtime_schedules,
+            time_between_failures_hours=drill_time_between_failures_hours,
+            repair_time_hours=drill_repair_time_hours,
+        )
+        self.lhd_availability = _equipment_availability(
+            name="LHDAvailability",
+            total_units=lhd_units,
+            downtime_start=lhd_downtime_start,
+            downtime_duration=lhd_downtime_duration,
+            schedules=lhd_downtime_schedules,
+            time_between_failures_hours=lhd_time_between_failures_hours,
+            repair_time_hours=lhd_repair_time_hours,
+        )
+        self.truck_availability = _equipment_availability(
+            name="TruckAvailability",
+            total_units=truck_units,
+            downtime_start=truck_downtime_start,
+            downtime_duration=truck_downtime_duration,
+            schedules=truck_downtime_schedules,
+            time_between_failures_hours=truck_time_between_failures_hours,
+            repair_time_hours=truck_repair_time_hours,
+        )
+        self.drill_blast = DrillBlastModule(
+            drill_work_required=drill_work_required,
+            drill_rate_per_drill=drill_rate_per_drill,
+            blast_tonnage=blast_tonnage,
+        )
+        self.lhd = LHDLoadingModule(
+            available_lhds=lhd_units,
+            remuck_loading_capacity_per_lhd=1000.0,
+            face_tramming_capacity_per_lhd=700.0,
+        )
+        self.haulage = AggregateTruckHaulageModule(
+            source_face=1,
+            aggregate_parcel_mass=aggregate_parcel_mass,
+            travel_time=travel_time,
+        )
+        self.parcel_receiver = ParcelStockpileReceiver()
+
+    def forward(self):
+        self.global_time.rate = 1.0
+
+        available_drills = self.drill_availability()
+        available_lhds = self.lhd_availability()
+        available_trucks = self.truck_availability()
+        requested_blast_mass = self.drill_blast(available_drills)
+        blast_output = self.geology_face(requested_blast_mass)
+        self.effective_truck_capacity_rate.value = (
+            self.nominal_truck_capacity_rate.value
+            * available_trucks.value
+            / max(1e-6, self.truck_availability.total_units.value)
+        )
+        self.flush_loaded_buffer.value = (
+            self.lhd_availability.just_went_down.value
+            or self.truck_availability.just_went_down.value
+        )
+
+        loading_rates = self.lhd(
+            self.face_inventory.blasted_rock_mass,
+            self.face_inventory.remuck_mass,
+            self.effective_truck_capacity_rate,
+            available_lhds,
+        )
+        self.face_inventory(blast_output=blast_output, lhd_loading_rates=loading_rates)
+        arrived_parcels = self.haulage(
+            loading_rates,
+            self.face_inventory.loaded_ore1_fraction,
+            self.flush_loaded_buffer,
+        )
+        self.parcel_receiver(arrived_parcels)
+
+    def is_terminating_condition_met(self):
+        return self.parcel_receiver.total_mass.value >= self.target_received_mass

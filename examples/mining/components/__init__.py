@@ -4,7 +4,11 @@ from .generators import StochasticFaciesGenerator
 from .mine_face import ConcentratorMineFace, ContinuousMineFace
 from .plant import ConcentratorPlant
 from .controllers import ConcentratorController, MultiFaceConcentratorController
-from .models import BaseBlendingModel, ConcentratorModel, ActiveFleetConcentratorModel
+from .models import (
+    ActiveFleetConcentratorModel,
+    BaseBlendingModel,
+    ConcentratorModel,
+)
 from .stockpiles import Stockpile
 
 __all__ = [
