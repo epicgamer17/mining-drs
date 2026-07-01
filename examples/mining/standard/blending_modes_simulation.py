@@ -39,18 +39,7 @@ def evaluate_throughput(config: ConcentratorConfig, N: int) -> tuple[float, floa
         engine.run(max_time=config.replication_length)
 
         # Calculate Throughput manually as the paper defined it
-        # Throughput = Total Processed / Active Production Time (Time - Shutdown Time)
-        total_time = (
-            sim.controller.cumulative_time_mode_a.value
-            + sim.controller.cumulative_time_mode_a_contingency.value
-            + sim.controller.cumulative_time_mode_a_surging.value
-            + sim.controller.cumulative_time_mode_b.value
-            + sim.controller.cumulative_time_mode_b_contingency.value
-            + sim.controller.cumulative_time_mode_b_surging.value
-            + sim.controller.cumulative_time_shutdown.value
-        )
-
-        active_time = total_time - sim.controller.cumulative_time_shutdown.value
+        active_time = engine.current_time - sim.controller.cumulative_time_shutdown.value
         if active_time > 0:
             throughput = (
                 sim.mine.cumulative_extracted_mass.value
@@ -124,7 +113,7 @@ if __name__ == "__main__":
 
     # You can also run it a single time and print out the statistics to evaluate how it spends time
     np.random.seed(42)
-    random.seed(11)
+    random.seed(42)  # 11
     config = ConcentratorConfig(
         replication_length=99999.0,
         target_ore_stock_level=args.total_stockpile_level,
@@ -144,6 +133,7 @@ if __name__ == "__main__":
     sim.print_statistics()
 
     from drs.vis.module_graph import save_module_graph_report
+
     save_module_graph_report(sim, path_prefix="Concentrator_Module_Graph")
 
     df = sim.telemetry.to_dataframe()
@@ -156,9 +146,10 @@ if __name__ == "__main__":
     print(df["active_operating_mode_name"].unique()[:5])
     df["prev_mode_name"] = df["active_operating_mode_name"].shift(1)
     transitions = df[
-        (df["active_operating_mode_name"] != df["prev_mode_name"]) & df["prev_mode_name"].notna()
+        (df["active_operating_mode_name"] != df["prev_mode_name"])
+        & df["prev_mode_name"].notna()
     ]
-    
+
     for idx, row in transitions.iterrows():
         print(
             f"Time: {row['time']:.2f} | Transition: {row['prev_mode_name']} -> {row['active_operating_mode_name']}"

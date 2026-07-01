@@ -53,6 +53,7 @@ class BaseBlendingModel(drs.Module):
             )
 
     def forward(self):
+        # TODO: why do we need to do this, shouldnt it be default? also do this in two places.
         self.global_time.rate = 1.0
 
         self.controller()
@@ -223,10 +224,14 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
         self.setup_telemetry()
         if self.enable_telemetry:
             self.telemetry.register_metric(
-                "face1_alloc", lambda t, m, s, h: m.controller.face_target_rates[0].value / max(1e-12, m.controller.target_mine_mass_rate.value)
+                "face1_alloc",
+                lambda t, m, s, h: m.controller.face_target_rates[0].value
+                / max(1e-12, m.controller.target_mine_mass_rate.value),
             )
             self.telemetry.register_metric(
-                "face2_alloc", lambda t, m, s, h: m.controller.face_target_rates[1].value / max(1e-12, m.controller.target_mine_mass_rate.value)
+                "face2_alloc",
+                lambda t, m, s, h: m.controller.face_target_rates[1].value
+                / max(1e-12, m.controller.target_mine_mass_rate.value),
             )
             self.telemetry.register_metric(
                 "ore2_ratio",

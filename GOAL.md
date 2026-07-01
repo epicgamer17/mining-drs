@@ -430,3 +430,122 @@ Goals:
 ---
 
 *Last updated: June 2026*
+
+# DRS Architecture & Design
+
+## Overall Goal
+Make an "Arena but for Mining". Arena is good for queueing networks, but Geo Statistics are not integrated, and DRS is not native. We want a version of Arena where these things are native.
+
+## Core Design Principles
+- **Time Separation:** Time is a level, but it's separated to make it more easy to understand. Keep this.
+- **Output Statistics:** Some things are just output statistics, make that clear in the code. Track them by default for any mode (users shouldn't need to define them).
+- **Mathematical Correctness:** Use `infinity` in code, not `9999` or `99999`. Maintain semantic shapes (don't represent Nx1 vectors as just N). Avoid hacky arithmetic masks (`min`, `* (X<Y)`); use clean loops, clamps, or size-aware operations.
+- **Fail Fast & Explicit:** Provide clear error checking when sequences don't exist. Implement a good way to say "do nothing".
+- **Default Parameters:** Allow defaults so everything doesn't need to be set explicitly. Distinguish clearly between universally required DRS parameters and model-specific ones. Use a structured initialization (e.g., config objects, init functions) instead of string functions.
+- **Visualization:** Plots should be beautiful.
+
+## Structure Components
+1. **Levels**
+2. **Timers**
+3. **Discretely Dynamic Numerical Variables**
+4. **Categorical Variables**
+
+Different models may have a different number of each. Levels and timers could technically be combined into continuous numerical variables, but it's nice to separate them because timers have a particular interpretation. Provide easy ways to reset specific timers or all timers.
+
+## "nn.Module" Idea for DRS
+- Pitch idea: Similar to `nn.Module` in PyTorch.
+- We have different layers which might be things like the `Rate`, the `Level`, or the `Timer`.
+- Allow for math and interaction between these things.
+- Allow for something like a `Sequential` for sequences.
+- Needs discussion: What are the pros/cons? What are all possible design solutions?
+
+## Eliminating Arena Quirks
+- It would be nice to run with the same spreadsheet but without Arena.
+- **Modes:** Modes show up a lot. Separate them out so there is a nice, easy, error-checked way of defining them.
+- **Sequences:** Need a good, easy way of defining sequences. Avoid Arena-specific sequence logic (e.g., specific assignment for std = 0 on normal dist). These are for a sequence of operations. In the case of the example we had it was mostly around switching modes.
+- **Auto-wiring:** In Arena, setting `drs_Level(1)` is manual. In our code, this should ideally be automatic. Things like incrementing/decrementing timers should also be automatic.
+- **Hold Blocks & Loops:** Arena uses "hold" blocks to wait for conditions and decides/loops for while loops. Our code shouldn't use these hacks. We can check conditions proactively.
+- **Islands:** We use 5 islands in our DRS. Are some of these the same for all DRS models? Can they be provided by default or at least required every time to "fail fast"?
+- **Thresholds:** Scanning thresholds should be easy to implement.
+- **Initialization:** Make initialization more efficient. Don't use a single for-loop and reassign the last element. Instead, make 4 different for-loops for assignments.
+- **Variable Types:** Decide whether to use simple Strings (like the Arena method) or make new custom types.
+- **Matrices/Vectors:** Are they the best way, or just an artifact of Arena?
+
+## Open Architecture Questions & Thoughts
+- **State Transitions & Gym Integration:** Is it better to define transitions as start/end conditions? This would more easily allow for action masking when using DRS in a Gym Env, training an RL agent to select the operational mode on a day-by-day or campaign basis. 
+- **Handling End Conditions:** Is it good practice to have the environment handle the end conditions, or should that be done in the Controller DRS? Intuition says the controller, but from a DRS perspective, there are no fixed timesteps.
+- **Modes as Classes:** Are Modes important enough to be a new class rather than an Enum? If we are adding start conditions, end conditions, and actual operation logic for each mode, it makes sense to encapsulate them. (e.g., "Mode A starts if these conditions are met, ends when this condition is met, and does this"). It should still be easy to preempt a mode (e.g., switch from Mode A to Mode A Contingency).
+- **PyTorch-like Design:** Is a Mode Class PyTorch-like in nature? Is it okay if it isn't, even though the overall goal is a PyTorch-like system for DRS?
+- **Code-defined Equations:** Make it possible to define a set of equations and variable values directly from code.
+- **Hidden Overrides:** PREVENT HIDDEN OVERRIDES. What if one module sets a rate and the next one resets it? Ensure the architecture prevents these hidden conflicts.
+
+--- 
+
+Overall goal. Make Arena but for Mining. Arena is good for queueing networks and stuff. but Geo Statistics are not integrated, and DRS is not native. Make a version of arena where these things are Native. 
+
+time is a level, but its seperated to make it more easy to understand. keep this 
+
+notice some things are just output statistics, make that clear in the code somehow 
+
+99999 or 9999 are often used in place of infinity. use infinity in the code instead. 
+
+vectors are often used, and sometimes a N x 1 is represented as an N. Don’t do this, use the semantic meaning and shapes from the document. 
+
+Allow for defaults? so everything doesnt need to be set explicity? 
+
+Also notice, there are some parameters that are required (ie for all DRS models) and some that exist only for this specific model. have a clear destinction in how these are treated, messages that are sent etc. 
+
+so some should be required and have a nice way of defining those (maybe when making the DRS object if we are using objects, or the init fn for a function approach, or init config for a string approach etc) and some should be done when defining the specific model. im not sure if that makes sense. and need a way to add a parameter. 
+
+Try not to use string fns like milene did, but maybe make a way of converting Arena to python or whatever i am using. 
+
+There is also this idea of Modes that seem to show up a lot. maybe we can seperate that out so there is a nice easy way of defining modes. and nice fail fast error checking for that. 
+
+Good error checking on when we do run sequence X or sequence Y if it doesnt exist, and a good way to say do nothing
+
+Also a good easy way of defining sequences
+
+Easy ways to reset timers or specific timers or all timers.
+
+General structure includes: 
+
+1. levels 
+2. timers 
+3. discretely dynamic numerical variables 
+4. categorical variables 
+
+could have a different number of each of these depending on the model. 
+
+levels and timers could be combined to continuos numerical variables. but its nice to seperate because timers have a particular interpretation. 
+
+would be nice to run with the same spreadsheet but without arena. 
+
+some of the sequence logic used in the example spreadsheet and txt may be specific to arena quirks, that could ideally be removed (ie no need for a specific assignment for std = 0 on normal dist or something like that) 
+
+in arena setting the drs_Level(1) and stuff is done manually. ideally this would be done automatically in the code version. there are likely other things that can be done automatically or more easily. like incrementing vs decrementing timer or things like that. 
+
+the way arena does it is we define our functionality/expressions, and then the rates and all these other things in the labels just call those to update correctly and stuff. is there a cleaner way? good question. 
+
+from what i can see there are a lot of similar eval statements and other things, those can probably be abstracted out to be more semantically understandable? doest his have the downside of making the system less abstract or like less capable of doing ANY kind of DRS with ANY ammount of detail. 
+
+again for many of the output statistics it feels like they should be tracked by default for any mode. and not need to be defined by the user if that makes sense. 
+
+plots should be beautiful. 
+
+we use 5 islands in our DRS. are some of these islands the same for all DRS models? Can these be done by default to decrease load on the user? Can these at least be required every time to “fail fast”?
+
+there are things like scanning thresholds that should be able to be done easily.
+
+also we seem to use decide blocks and loops to do like a while loop. this should not be how its done in our code. it should be a clean implementation with best coding practices that dont use the hacky implementation details of the arena method.
+
+make initialization more efficient than the arena version in the example system. dont use 1 for loop and reassign last, instead make 4 different for loops for the assign part (and other similar parts). 
+
+There is a lot of MN(etc etc) and * by stuff that will be 1 or 0 to do the expressions. this should probably not be the case in our code. it should run safely and not need the min, and if it does it should be a clean clamp. but i think it should be possible without clamping. and i think it should be possible without the addition or multiplcation or whatever we are doing (in update Rate Configuration number for example) 
+
+another hacky thing is the “hold” block which is just there so that arena checks the terminating condintion, but in code would not need to “hold” we could just check the condition proactively unlike arena. 
+
+i notice a lot of masking a lot of if length less than max this, or *X<Y and stuff. i feel these are unecessary in a code version, as looping can just be done knowing the size of the item instead of masking. 
+
+We have our different variable types. should we do what he did and use a simple String to determine that or make new types to represent these? 
+
+the arena method uses matrices and vectors, are these the best way? or is this an artifact of arena?

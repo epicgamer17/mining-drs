@@ -75,6 +75,14 @@ class Variable:
 class Level(Variable):
     """A variable that accumulates over time based on a rate."""
 
+    # TODO: Add a floating-point comparison utility to Level (e.g. is_above(threshold, eps)).
+    # The proper long-term solution would use an AST-based approach (similar to the Expression
+    # system that was removed, see note at top of file) to track variable relationships
+    # symbolically. This would avoid raw float comparisons entirely by deferring to the
+    # engine's event-driven threshold detection instead of comparing .value directly in
+    # user code. Until then, guardrail #1 (orphaned-threshold check in DRSEngine) catches
+    # the most common manifestation: thresholds set without corresponding rates.
+
     def __init__(self, name: str, initial_value: float = 0.0, rate: float = 0.0):
         super().__init__(name, initial_value)
         self._rate = rate

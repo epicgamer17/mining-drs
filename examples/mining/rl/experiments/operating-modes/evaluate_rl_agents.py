@@ -86,16 +86,14 @@ def evaluate_rl_throughput(model, env, seed, device):
     sim = env.sim
     config = env.config
 
-    total_time = (
+    active_time = (
         sim.controller.cumulative_time_mode_a.value
         + sim.controller.cumulative_time_mode_a_contingency.value
         + sim.controller.cumulative_time_mode_a_surging.value
         + sim.controller.cumulative_time_mode_b.value
         + sim.controller.cumulative_time_mode_b_contingency.value
         + sim.controller.cumulative_time_mode_b_surging.value
-        + sim.controller.cumulative_time_shutdown.value
     )
-    active_time = total_time - sim.controller.cumulative_time_shutdown.value
     if active_time > 0:
         throughput = (
             sim.mine.cumulative_extracted_mass.value

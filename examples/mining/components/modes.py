@@ -15,12 +15,6 @@ _MODE_IDS = {
     "MODE_B_CONTINGENCY": 4,
     "MODE_B_MINE_SURGING": 5,
     "SHUTDOWN": 6,
-    "MODE_C": 7,
-    "MODE_C_CONTINGENCY": 8,
-    "MODE_C_MINE_SURGING": 9,
-    "MODE_D": 10,
-    "MODE_D_CONTINGENCY": 11,
-    "MODE_D_MINE_SURGING": 12,
 }
 
 
@@ -31,12 +25,6 @@ _RATE_MAP = {
     "MODE_B": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
     "MODE_B_CONTINGENCY": (None, "mode_b_contingency_ore2_milling_rate"),
     "MODE_B_MINE_SURGING": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
-    "MODE_C": ("mode_c_ore1_milling_rate", "mode_c_ore2_milling_rate"),
-    "MODE_C_CONTINGENCY": ("mode_c_contingency_ore1_milling_rate", None),
-    "MODE_C_MINE_SURGING": ("mode_c_ore1_milling_rate", "mode_c_ore2_milling_rate"),
-    "MODE_D": ("mode_d_ore1_milling_rate", "mode_d_ore2_milling_rate"),
-    "MODE_D_CONTINGENCY": (None, "mode_d_contingency_ore2_milling_rate"),
-    "MODE_D_MINE_SURGING": ("mode_d_ore1_milling_rate", "mode_d_ore2_milling_rate"),
     "SHUTDOWN": (None, None),
 }
 
@@ -46,6 +34,9 @@ def _read_rates(name, config):
     ore1 = getattr(config, ore1_attr, 0.0) if ore1_attr else 0.0
     ore2 = getattr(config, ore2_attr, 0.0) if ore2_attr else 0.0
     return ore1, ore2
+
+
+# TODO: maybe introduce the concept of a Plant or OperatingConfiguration, which consists of many modes, and automatic transitions between those modes, and then the controller decides a configuration. Instead of a Mode directly.
 
 
 class OperatingMode:
@@ -74,15 +65,6 @@ class OperatingMode:
     def __repr__(self):
         return f"OperatingMode({self._name})"
 
-    def is_valid_start(self, model) -> bool:
-        n = self._name
-        ore2 = model.ore2_stock.current_mass.value
-        if n in ("MODE_A", "MODE_C"):
-            return ore2 >= model.plant.config.critical_ore2_level
-        if n in ("MODE_B", "MODE_D"):
-            return ore2 < model.plant.config.critical_ore2_level
-        return True
-
     def get_target_rates(self, model) -> TargetRates:
         config = model.plant.config
         ore1, ore2 = _read_rates(self._name, config)
@@ -92,7 +74,7 @@ class OperatingMode:
                 config.target_ore_stock_level
             )
             p = model.fleet.stockpile2_routing_fraction.value
-            if self._name in ("MODE_A_MINE_SURGING", "MODE_C_MINE_SURGING"):
+            if self._name == "MODE_A_MINE_SURGING":
                 extraction = (ore1 / (1.0 - p)) if (1.0 - p) > 0 else 0.0
             else:
                 extraction = (ore2 / p) if p > 0 else 0.0
@@ -124,31 +106,25 @@ class OperatingMode:
 
         if "_CONTINGENCY" in n:
             if ctrl.is_contingency_complete():
+                # TODO: should the controller be the one deciding here? I think these are artifacts as a mode being kind of a configuration and mode at the same time, and our controller dealing with the configuration part (ie when to end surging or when to end contingency)
                 return RequireDecision()
             base = n.replace("_CONTINGENCY", "")
-            if base in ("MODE_A", "MODE_C") and ore1 <= config.stockout_epsilon:
+            if base == "MODE_A" and ore1 <= config.stockout_epsilon:
                 return MODES[base + "_MINE_SURGING"]
-            if base in ("MODE_B", "MODE_D") and ore2 <= config.stockout_epsilon:
+            if base == "MODE_B" and ore2 <= config.stockout_epsilon:
                 return MODES[base + "_MINE_SURGING"]
             return None
 
         if "_MINE_SURGING" in n:
-            base = n.replace("_MINE_SURGING", "")
-            if base == "MODE_C" and ore2 <= config.stockout_epsilon:
-                ctrl.reset_contingency_timer()
-                return MODES[base + "_CONTINGENCY"]
-            if base == "MODE_D" and ore1 <= config.stockout_epsilon:
-                ctrl.reset_contingency_timer()
-                return MODES[base + "_CONTINGENCY"]
-
             if (
                 model.controller.total_system_ore_mass.value
                 <= config.target_ore_stock_level + 1e-6
             ):
+                # TODO: why do we do this? I think these are artifacts as a mode being kind of a configuration and mode at the same time, and our controller dealing with the configuration part (ie when to end surging or when to end contingency)
                 return RequireDecision()
             return None
 
-        if n in ("MODE_A", "MODE_C"):
+        if n == "MODE_A":
             if ore1 <= config.stockout_epsilon:
                 return MODES[n + "_MINE_SURGING"]
             if ore2 <= config.stockout_epsilon:
@@ -156,7 +132,7 @@ class OperatingMode:
                 return MODES[n + "_CONTINGENCY"]
             return None
 
-        if n in ("MODE_B", "MODE_D"):
+        if n == "MODE_B":
             if ore1 <= config.stockout_epsilon:
                 ctrl.reset_contingency_timer()
                 return MODES[n + "_CONTINGENCY"]

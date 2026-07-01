@@ -1,6 +1,7 @@
 import math
+import warnings
 from typing import Tuple, Optional
-from .variables import Variable
+from .variables import Variable, Level
 from .module import Module
 from .execution_context import ExecutionContext
 
@@ -22,6 +23,7 @@ class DRSEngine:
         self.current_time = 0.0
         self.max_step_size = max_step_size
         self.max_deadlock_steps = max_deadlock_steps
+        self._orphaned_warned_ids = set()
 
     def run(self, max_time: Optional[float] = None):
         """The main simulation loop."""
@@ -43,9 +45,11 @@ class DRSEngine:
             self.model.zero_rates()
             self.model()
 
+            current_variables = list(self.model.variables())
+            self._check_orphaned_thresholds(current_variables)
+
             self.model._run_post_step_hooks(self.current_time)
 
-            current_variables = list(self.model.variables())
             dt, trigger_var, is_upper = self.calculate_min_dt(current_variables)
 
             dt = min(dt, self.max_step_size)
@@ -85,6 +89,28 @@ class DRSEngine:
 
         self.model._run_post_step_hooks(self.current_time)
 
+    def _check_orphaned_thresholds(self, variables: list[Variable]):
+        """Warn once per variable about thresholds set but rate=0."""
+        for var in variables:
+            if not isinstance(var, Level):
+                continue
+            if id(var) in self._orphaned_warned_ids:
+                continue
+            rate = var._rate
+            has_threshold = (
+                var.lower_threshold != -math.inf or
+                var.upper_threshold != math.inf
+            )
+            if has_threshold and rate == 0.0:
+                self._orphaned_warned_ids.add(id(var))
+                owner_name = type(var._owner).__name__ if var._owner else "unknown"
+                warnings.warn(
+                    f"Orphaned threshold: '{var.name}' (owned by {owner_name}) "
+                    f"has lower_threshold={var.lower_threshold}, "
+                    f"upper_threshold={var.upper_threshold} "
+                    f"but rate=0.0. This threshold will never trigger."
+                )
+
     def calculate_min_dt(
         self, variables: list[Variable]
     ) -> Tuple[float, Optional[Variable], bool]:
@@ -114,6 +140,26 @@ class DRSEngine:
                 is_upper = var_is_upper
 
         if min_dt == math.inf:
+            orphaned = []
+            for var in variables:
+                if not isinstance(var, Level):
+                    continue
+                rate = var._rate
+                has_threshold = (
+                    var.lower_threshold != -math.inf or
+                    var.upper_threshold != math.inf
+                )
+                if has_threshold and rate == 0.0:
+                    owner_name = type(var._owner).__name__ if var._owner else "unknown"
+                    orphaned.append(f"'{var.name}' ({owner_name})")
+            if orphaned and id(None) not in self._orphaned_warned_ids:
+                self._orphaned_warned_ids.add(id(None))
+                warnings.warn(
+                    f"No threshold events pending. "
+                    f"Variables with thresholds but rate=0: "
+                    f"{', '.join(orphaned)}. "
+                    f"Simulation will advance at max_step_size={self.max_step_size}."
+                )
             return 1.0, None, True
 
         return min_dt, trigger_var, is_upper

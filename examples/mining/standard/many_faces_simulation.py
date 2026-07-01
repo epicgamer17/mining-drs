@@ -17,7 +17,9 @@ sys.path.append(
 )
 
 import random
+import types
 import numpy as np
+import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
@@ -26,6 +28,7 @@ from examples.mining.components import (
     ConcentratorModel,
     ActiveFleetConcentratorModel,
 )
+from examples.mining.components.controllers import MultiFaceConcentratorController
 from drs import DRSEngine
 
 
@@ -50,18 +53,7 @@ def evaluate_throughput(config: ConcentratorConfig, N: int) -> tuple[float, floa
         engine.run(max_time=config.replication_length)
 
         # Calculate Throughput manually as the paper defined it
-        # Throughput = Total Processed / Active Production Time (Time - Shutdown Time)
-        total_time = (
-            sim.controller.cumulative_time_mode_a.value
-            + sim.controller.cumulative_time_mode_a_contingency.value
-            + sim.controller.cumulative_time_mode_a_surging.value
-            + sim.controller.cumulative_time_mode_b.value
-            + sim.controller.cumulative_time_mode_b_contingency.value
-            + sim.controller.cumulative_time_mode_b_surging.value
-            + sim.controller.cumulative_time_shutdown.value
-        )
-
-        active_time = total_time - sim.controller.cumulative_time_shutdown.value
+        active_time = engine.current_time - sim.controller.cumulative_time_shutdown.value
         if active_time > 0:
             throughput = (
                 (
@@ -127,30 +119,24 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
     print("Saved 'Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
 
 
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--total_stockpile_level", type=float, default=60000.0)
-    parser.add_argument("--std_dev_ore_fraction", type=float, default=0.05)
-    parser.add_argument("--N", type=int, default=1)
-    args = parser.parse_args()
-
-    # You can also run it a single time and print out the statistics to evaluate how it spends time
+def run_and_analyze(config, equal_allocation=False, name="Managed"):
+    """Run the multi-face simulation and produce full diagnostics dashboard."""
     np.random.seed(42)
     random.seed(11)
-    config = ConcentratorConfig(
-        replication_length=99999.0,
-        target_ore_stock_level=args.total_stockpile_level,
-        std_dev_ore_fraction=args.std_dev_ore_fraction,
-        prob_new_facies=0.3,
-    )
     sim = ActiveFleetConcentratorModel(config, enable_telemetry=True)
 
-    # Generates an interactive dashboard spanning all operating modes
+    if equal_allocation:
+        orig_forward = MultiFaceConcentratorController.forward
+        def _equal_forward(self):
+            orig_forward(self)
+            n = len(self.faces)
+            rate = self.target_mine_mass_rate.value / n
+            for i in range(n):
+                self.face_target_rates[i].value = rate
+        sim.controller.forward = types.MethodType(_equal_forward, sim.controller)
+
     from examples.mining.components.modes import MODES
 
-    # Run your massive Monte Carlo simulation at lightning speed
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine(sim)
@@ -159,12 +145,13 @@ if __name__ == "__main__":
 
     from drs.vis.module_graph import save_module_graph_report
 
-    save_module_graph_report(sim, path_prefix="Concentrator_Module_Graph")
+    prefix = name.replace(" ", "_")
+    save_module_graph_report(sim, path_prefix=f"Concentrator_Module_Graph_{prefix}")
 
     df = sim.telemetry.to_dataframe()
 
     # --- Mode Transition Log ---
-    print("\n--- Mode Transition Log ---")
+    print(f"\n--- Mode Transition Log ({name}) ---")
     df["active_operating_mode_name"] = df["active_operating_mode"].apply(
         lambda x: x.name if x else "None"
     )
@@ -188,8 +175,6 @@ if __name__ == "__main__":
     print("---------------------------\n")
 
     # --- Cumulative Deficit by Mode Log ---
-    import pandas as pd
-
     dt = df["time"].diff().fillna(0)
     actual_extraction_step = (
         (df["face1_extracted_mass"] + df["face2_extracted_mass"]).diff().fillna(0)
@@ -205,7 +190,7 @@ if __name__ == "__main__":
         deficit_df.groupby("mode")["deficit"].sum().sort_values(ascending=False)
     )
 
-    print("\n--- Cumulative Lost Production (Deficit) by Mode ---")
+    print(f"\n--- Cumulative Lost Production (Deficit) by Mode ({name}) ---")
     total_lost = total_deficit_by_mode.sum()
     for mode, lost in total_deficit_by_mode.items():
         mode_name = str(mode).split(".")[-1]
@@ -467,9 +452,54 @@ if __name__ == "__main__":
     ]
 
     fig_comp = build_dashboard(
-        df, configs, title="Comprehensive Mine Diagnostics", figsize=(18, 69)
+        df, configs, title=f"Comprehensive Mine Diagnostics ({name})", figsize=(18, 69)
     )
-    fig_comp.savefig("Comprehensive_Diagnostics_Plot.png")
+    fig_comp.savefig(f"Comprehensive_Diagnostics_Plot_{prefix}.png")
+    plt.close(fig_comp)
+
+    return df
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--total_stockpile_level", type=float, default=60000.0)
+    parser.add_argument("--std_dev_ore_fraction", type=float, default=0.05)
+    parser.add_argument("--N", type=int, default=1)
+    args = parser.parse_args()
+
+    config = ConcentratorConfig(
+        replication_length=99999.0,
+        target_ore_stock_level=args.total_stockpile_level,
+        std_dev_ore_fraction=args.std_dev_ore_fraction,
+        prob_new_facies=0.3,
+    )
+
+    df_managed = run_and_analyze(config, equal_allocation=False, name="Managed")
+    df_equal = run_and_analyze(config, equal_allocation=True, name="Equal Allocation")
+
+    # Print summary comparison
+    print("\n" + "=" * 72)
+    print("COMPARISON SUMMARY: Managed vs Equal Allocation")
+    print("=" * 72)
+
+    for label, df in [("Managed", df_managed), ("Equal Allocation", df_equal)]:
+        dt = df["time"].diff().fillna(0)
+        final_ore1 = df["Ore1Stock_mass"].iloc[-1]
+        final_ore2 = df["Ore2Stock_mass"].iloc[-1]
+        total_extracted = (
+            df["face1_extracted_mass"].iloc[-1] + df["face2_extracted_mass"].iloc[-1]
+        )
+        print(f"\n--- {label} ---")
+        print(f"  Total extracted: {total_extracted:,.0f} tons")
+        print(f"  Final Ore1 stock: {final_ore1:,.0f} t | Final Ore2 stock: {final_ore2:,.0f} t")
+        print(f"  Mode breakdown:")
+        for mode_name in df["active_operating_mode_name"].unique():
+            mode_dt = dt[df["active_operating_mode_name"] == mode_name].sum()
+            pct = (mode_dt / dt.sum() * 100) if dt.sum() > 0 else 0
+            print(f"    {str(mode_name):35s}: {mode_dt:8.2f} days ({pct:5.1f}%)")
+    print("=" * 72 + "\n")
 
     # Recreate Figure 5 from paper
     plot_monte_carlo_throughput(
