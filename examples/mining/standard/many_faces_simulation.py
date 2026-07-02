@@ -203,12 +203,8 @@ def run_capacity_comparison(
         enable_face_capacity_limit=True,
         face_lhd_count=(2, 3),
         face_truck_count=(4, 6),
-        face_availability=(0.93, 0.91),
+        face_accessibility_fraction=(0.93, 0.91),
         face_haul_distance=(1.0, 1.2),
-        face_delay_factor=(0.025, 0.04),
-        face_gas_delay_factor=(0.005, 0.01),
-        face_truck_congestion_threshold=(0.45, 0.45),
-        truck_congestion_delay_sensitivity=0.10,
         face_shift_allocation_fraction=(1.0, 1.0),
     )
 
@@ -579,8 +575,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     )
     from examples.mining.components.plot import (
         plot_ore_with_modes,
-        plot_state_space,
-        plot_cumulative_throughput,
+
         plot_normalized_deviation_violin,
         plot_attributed_deficit,
         plot_deficit_disparity,

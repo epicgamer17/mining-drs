@@ -32,7 +32,6 @@ class DRSEngine:
         self.model.initialize_state()
         ExecutionContext.pop()
 
-        last_trigger_var = None
         consecutive_zero_dt_count = 0
 
         while True:
@@ -74,10 +73,8 @@ class DRSEngine:
                         f"(value={trigger_var.value if trigger_var else 'None'}, "
                         f"rate={getattr(trigger_var, 'rate', 'N/A') if trigger_var else 'None'}).\n{state_dump}"
                     )
-                last_trigger_var = trigger_var
             else:
                 consecutive_zero_dt_count = 0
-                last_trigger_var = None
 
             if dt < 0:
                 raise ValueError("Time delta (dt) cannot be negative.")

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+
 @dataclass
 class TargetRates:
     """Requested production rates returned by the Controller."""
@@ -25,7 +26,6 @@ class OreParcel:
     source_face: int
     mass: float
     ore1_fraction: float
-    dispatch_time: float
     arrival_time: float
 
 

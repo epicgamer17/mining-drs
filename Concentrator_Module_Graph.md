@@ -13,7 +13,7 @@
 | `ore1_stock` | `ore1_stock` | `current_mass, actual_outflow_rate, contained_ore_fraction_mass` |
 | `ore2_stock` | `ore2_stock` | `current_mass, actual_outflow_rate, contained_ore_fraction_mass` |
 | `plant` | `plant` | `cumulative_milled_mass` |
-| `controller` | `controller` | `active_operating_mode, total_system_ore_mass, current_campaign_duration, current_contingency_duration, cumulative_time_mode_a, +13 more` |
+| `controller` | `controller` | `active_operating_mode, total_system_ore_mass, current_campaign_duration, current_contingency_duration, cumulative_time_mode_a, +9 more` |
 
 ## Flowchart
 
@@ -31,7 +31,7 @@ subgraph root["<b>ConcentratorModel</b>"]
     ore1_stock(["<b>ore1_stock</b><br><i>current_mass</i><br><i>actual_outflow_rate</i><br><i>contained_ore_fraction_mass</i>"])
     ore2_stock(["<b>ore2_stock</b><br><i>current_mass</i><br><i>actual_outflow_rate</i><br><i>contained_ore_fraction_mass</i>"])
     plant(["<b>plant</b><br><i>cumulative_milled_mass</i>"])
-    controller(["<b>controller</b><br><i>active_operating_mode</i><br><i>total_system_ore_mass</i><br><i>current_campaign_duration</i><br><i>current_contingency_duration</i><br><i>cumulative_time_mode_a</i><br><i>+13 more</i>"])
+    controller(["<b>controller</b><br><i>active_operating_mode</i><br><i>total_system_ore_mass</i><br><i>current_campaign_duration</i><br><i>current_contingency_duration</i><br><i>cumulative_time_mode_a</i><br><i>+9 more</i>"])
 end
     controller -->|target_mine_mass_rate| mine
     controller -->|target_stock1_outflow_rate| ore1_stock
@@ -39,6 +39,7 @@ end
     mine -->|cumulative_extracted_mass| controller
     ore1_stock -->|Ore1Stock_mass| controller
     ore2_stock -->|Ore2Stock_mass| controller
+    fleet -->|stockpile2_routing_fraction| controller
     mine ==>|flow| fleet
     fleet ==>|flow| ore1_stock
     fleet ==>|flow| ore2_stock
@@ -59,6 +60,7 @@ The following read-dependencies were recorded during the simulation. An arrow `A
   - `mine` → `controller` reads `cumulative_extracted_mass`
   - `ore1_stock` → `controller` reads `Ore1Stock_mass`
   - `ore2_stock` → `controller` reads `Ore2Stock_mass`
+  - `fleet` → `controller` reads `stockpile2_routing_fraction`
 
 ## Data Flow (transient)
 

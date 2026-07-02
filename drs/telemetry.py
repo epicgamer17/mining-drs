@@ -23,14 +23,6 @@ class Telemetry:
         ]  # default to all variables
         self.derived_metrics: Dict[str, Callable] = {}
 
-    def set_tracked_vars(self, var_names: list[str]):
-        """Set the variables to track.
-
-        Args:
-            var_names (list): A list of variable names to track.
-        """
-        self.tracked_vars = var_names
-
     def register_metric(
         self, name: str, calc_fn: Callable[[float, Module, dict, list], float]
     ):

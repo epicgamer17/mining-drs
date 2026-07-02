@@ -39,7 +39,9 @@ def evaluate_throughput(config: ConcentratorConfig, N: int) -> tuple[float, floa
         engine.run(max_time=config.replication_length)
 
         # Calculate Throughput manually as the paper defined it
-        active_time = engine.current_time - sim.controller.cumulative_time_shutdown.value
+        active_time = (
+            engine.current_time - sim.controller.cumulative_time_shutdown.value
+        )
         if active_time > 0:
             throughput = (
                 sim.mine.cumulative_extracted_mass.value
@@ -113,7 +115,7 @@ if __name__ == "__main__":
 
     # You can also run it a single time and print out the statistics to evaluate how it spends time
     np.random.seed(42)
-    random.seed(42)  # 11
+    random.seed(11)  # 11
     config = ConcentratorConfig(
         replication_length=99999.0,
         target_ore_stock_level=args.total_stockpile_level,
@@ -231,8 +233,7 @@ if __name__ == "__main__":
     )
     from examples.mining.components.plot import (
         plot_ore_with_modes,
-        plot_state_space,
-        plot_cumulative_throughput,
+
         plot_normalized_deviation_violin,
         plot_attributed_deficit,
         plot_deficit_disparity,

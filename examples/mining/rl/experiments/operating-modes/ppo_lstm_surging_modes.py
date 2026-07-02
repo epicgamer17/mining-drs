@@ -45,13 +45,13 @@ from functional.rollout_buffer import (
     yield_sequential_minibatches,
 )
 from functional.utils import (
-    ema_update,
+
     standardize_tensor,
     to_tensor,
     to_numpy_action,
     extract_vector_env_final_obs,
 )
-from envs.wrappers import VecNormalizeObservation
+
 
 # Import the custom environment and config
 from examples.mining.rl.environments import MiningRLEnv, RLMineConfig

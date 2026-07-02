@@ -64,46 +64,6 @@ def plot_time_series(
     return ax
 
 
-def plot_chattering(
-    df,
-    action_cols: list,
-    state_col: str = None,
-    time_col: str = "time",
-    title: str = "Action Chattering Diagnostic",
-):
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    if state_col and state_col in df.columns:
-        ax.plot(
-            df[time_col],
-            df[state_col],
-            label=f"{state_col} (actual)",
-            color="black",
-            linewidth=2,
-            alpha=0.6,
-        )
-
-    colors = plt.cm.Set1.colors
-    for i, col in enumerate(action_cols):
-        if col in df.columns:
-            color = colors[i % len(colors)]
-            ax.step(
-                df[time_col],
-                df[col],
-                label=f"{col} (action)",
-                linewidth=1.5,
-                where="post",
-                color=color,
-                alpha=0.85,
-            )
-
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.set_xlabel("Time", fontsize=12)
-    ax.set_ylabel("Value", fontsize=12)
-    ax.legend(loc="best", frameon=True)
-    fig.tight_layout()
-    return fig
-
 
 def plot_safety_margin(
     df,

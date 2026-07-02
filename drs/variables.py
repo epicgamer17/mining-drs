@@ -63,9 +63,6 @@ class Variable:
             f"Only drs.Level supports .rate."
         )
 
-    def get_sources(self) -> list:
-        return [self]
-
     def __hash__(self):
         return id(self)
 

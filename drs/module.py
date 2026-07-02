@@ -121,7 +121,6 @@ class Module:
                 )
             self._variables[name] = value
             value._owner = self
-            value._var_name_in_module = name
         elif isinstance(value, Module) and name != "parent":
             if not hasattr(self, "_modules"):
                 raise AttributeError(
@@ -218,15 +217,6 @@ class Module:
         """Called by the engine after dt is integrated."""
         for hook in self._post_step_hooks:
             hook(current_time)
-
-    def clear_dependencies(self):
-        """Reset the recorded dependency graph."""
-        self._dependencies.clear()
-        self._dep_seen.clear()
-        self._flow_dependencies.clear()
-        self._flow_dep_seen.clear()
-        self._data_dependencies.clear()
-        self._data_dep_seen.clear()
 
     def get_dependency_graph(self) -> list:
         """Return all recorded read dependencies from this module and all sub-modules

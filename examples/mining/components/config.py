@@ -73,9 +73,6 @@ class ConcentratorConfig(BaseDualStockpileConfig):
     development_rate_per_extra_truck: float = (
         50.0  # meters (or tonnes) developed per unused truck per day
     )
-    development_required_per_parcel: float = (
-        100.0  # required development units before extracting a new parcel
-    )
 
     # --- Generalize for N Faces (Change tuples to support > 2 faces) ---
     num_faces: int = 3  # Increase as needed
@@ -85,14 +82,10 @@ class ConcentratorConfig(BaseDualStockpileConfig):
         0.33,
     )  # TODO: count of 0.33 doesnt really make sense.
     face_truck_count: tuple = (0.33, 0.33, 0.33)
-    face_availability: tuple = (0.95, 0.95, 0.95)
-    face_haul_distance: tuple = (1.5, 1.0, 2.0)
-    face_delay_factor: tuple = (0.0, 0.0, 0.0)
-    face_gas_delay_factor: tuple = (0.0, 0.0, 0.0)
-    face_truck_congestion_threshold: tuple = (0.5, 0.5, 0.5)
+    # Underground Logistics
+    fleet_mechanical_availability: float = 0.85
+    face_accessibility_fraction: tuple = (0.95, 0.95, 0.95)
+    face_haul_distance: tuple = (4.5, 3.0, 6.0)
     face_shift_allocation_fraction: tuple = (1.0, 1.0, 1.0)
     loader_payload_tonnes: float = 13000.0
     truck_payload_tonnes: float = 13000.0
-    truck_congestion_delay_sensitivity: float = 0.0
-    haul_distance_reference: float = 1.0
-    haul_distance_sensitivity: float = 0.10

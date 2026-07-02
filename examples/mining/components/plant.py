@@ -19,9 +19,6 @@ class BaseMetallurgicalPlant(drs.Module):
             "cumulative_milled_mass", initial_value=0.0
         )
 
-        self._ore1_stock = ore1_stock
-        self._ore2_stock = ore2_stock
-
     def forward(self, ore1_outflow, ore2_outflow):
         o1 = ore1_outflow.value if isinstance(ore1_outflow, Flow) else ore1_outflow
         o2 = ore2_outflow.value if isinstance(ore2_outflow, Flow) else ore2_outflow

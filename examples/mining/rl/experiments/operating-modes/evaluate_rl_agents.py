@@ -649,8 +649,7 @@ def generate_rl_dashboard(
     )
     from examples.mining.components.plot import (
         plot_ore_with_modes,
-        plot_state_space,
-        plot_cumulative_throughput,
+
         plot_normalized_deviation_violin,
         plot_attributed_deficit,
         plot_deficit_disparity,

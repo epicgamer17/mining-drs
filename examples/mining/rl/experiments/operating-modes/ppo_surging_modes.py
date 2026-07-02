@@ -41,13 +41,13 @@ from functional.rollout_buffer import (
     yield_shuffled_minibatches,
 )
 from functional.utils import (
-    ema_update,
+
     standardize_tensor,
     to_tensor,
     to_numpy_action,
 )
 from tensordict import TensorDict
-from envs.wrappers import VecNormalizeObservation
+
 
 # Import the custom environment and config
 from examples.mining.rl.environments import MiningRLEnv, RLMineConfig
