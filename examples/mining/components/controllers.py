@@ -295,7 +295,16 @@ class MultiFaceConcentratorController(BaseBlendingController):
                 self.config.mode_b_contingency_ore2_milling_rate,
             ),
         }
-
+        c = self.config
+        total_lhd = getattr(c, "total_lhd_count", float('inf'))
+        max_lhds = getattr(c, "max_lhds_per_face", float('inf'))
+        
+        # What is the maximum fraction of the total fleet that can be sent to a single face
+        # without exceeding its physical LHD capacity limit?
+        max_fleet_fraction = 1.0
+        if total_lhd > 0:
+            max_fleet_fraction = min(1.0, max_lhds / total_lhd)
+            
         result = {}
         for mode_name, (ore1, ore2) in modes_to_compute.items():
             total = ore1 + ore2
@@ -305,18 +314,30 @@ class MultiFaceConcentratorController(BaseBlendingController):
                 r1 = (ore1 - total * f2) / (f1 - f2)
                 r1 = max(0.0, min(total, r1))
                 r2 = total - r1
-                fracs = [r1 / total, r2 / total]
+                
+                # Raw ideal allocation fractions
+                f1_target = r1 / total
+                f2_target = r2 / total
+                
+                # Apply capacity awareness: do not over-allocate beyond the face's physical limit.
+                # If Face 1 demands more fleet than it can physically hold, spill the excess to Face 2.
+                if f1_target > max_fleet_fraction:
+                    f1_target = max_fleet_fraction
+                    f2_target = 1.0 - f1_target
+                elif f2_target > max_fleet_fraction:
+                    f2_target = max_fleet_fraction
+                    f1_target = 1.0 - f2_target
+                    
+                fracs = [f1_target, f2_target]
+                
             result[mode_name] = fracs
 
-        # Surging modes use extreme allocations to correct the imbalance.
+        # Surging modes use extreme allocations to correct the imbalance,
+        # but they still must respect the maximum physical capacity of a single face!
         # MODE_A_MINE_SURGING (ore1 stockout): maximize ore1 → all to face1 (85% ore1)
         # MODE_B_MINE_SURGING (ore2 stockout): maximize ore2 → all to face2 (45% ore2)
-        # This ensures surging produces a blend different from the base mode target,
-        # letting the stockpile drain and surging exit quickly. Without this, surging
-        # would produce the same blend as the base mode (e.g. 60/40 for Mode A),
-        # making extraction = milling and the system stuck in surging forever.
-        result["MODE_A_MINE_SURGING"] = [1.0, 0.0]
-        result["MODE_B_MINE_SURGING"] = [0.0, 1.0]
+        result["MODE_A_MINE_SURGING"] = [max_fleet_fraction, 1.0 - max_fleet_fraction]
+        result["MODE_B_MINE_SURGING"] = [1.0 - max_fleet_fraction, max_fleet_fraction]
 
         return result
 
@@ -339,15 +360,30 @@ class MultiFaceConcentratorController(BaseBlendingController):
         return max(lower, min(upper, value))
 
     def _refresh_shift_allocation_fractions(self):
+        if not self.current_shift_allocations:
+            return
         for i, factor in enumerate(self.face_shift_allocation_fractions):
-            factor.value = self._face_config_value(
-                "face_shift_allocation_fraction", i, 1.0
-            )
+            factor.value = self.current_shift_allocations[i]
 
     def _face_real_extraction_rate(self, face_index, target_extraction_rate):
         c = self.config
-        lhd_alloc = self._face_config_value("face_lhd_count", face_index, 0.0)
-        truck_alloc = self._face_config_value("face_truck_count", face_index, 0.0)
+        total_lhd = getattr(c, "total_lhd_count", 5.0)
+        total_truck = getattr(c, "total_truck_count", 10.0)
+        
+        allocation_fraction = max(
+            0.0, self.face_shift_allocation_fractions[face_index].value
+        )
+        
+        lhd_alloc = total_lhd * allocation_fraction
+        truck_alloc = total_truck * allocation_fraction
+        
+        # Apply physical face constraints
+        max_lhds = getattr(c, "max_lhds_per_face", float('inf'))
+        max_trucks = getattr(c, "max_trucks_per_face", float('inf'))
+        
+        lhd_alloc = min(lhd_alloc, max_lhds)
+        truck_alloc = min(truck_alloc, max_trucks)
+        
         distance = self._face_config_value("face_haul_distance", face_index, 0.0)
         accessibility = self._clamp(
             self._face_config_value("face_accessibility_fraction", face_index, 1.0),
@@ -357,13 +393,26 @@ class MultiFaceConcentratorController(BaseBlendingController):
         mechanical_availability = getattr(c, "fleet_mechanical_availability", 1.0)
 
         # 1. Calculate Traffic Delay (function of number of trucks)
+        # TODO: Implement non-linear gridlock delay. Currently traffic delay is linear,
+        # meaning adding trucks always strictly increases throughput asymptotically.
+        # In reality, cramming too many trucks into a face causes gridlock where
+        # marginal throughput becomes negative.
         traffic_delay = c.traffic_delay_per_truck_hours * truck_alloc
 
         # 2. Calculate Truck Cycle Time (Travel + Load + Dump + Traffic Delay)
         travel_time = (2 * distance) / c.truck_velocity
+        
+        # Calculate how long it takes to completely fill one truck
+        truck_loading_time_hours = c.loader_cycle_time_hours * (c.truck_payload_tonnes / c.loader_payload_tonnes)
+        
+        # TODO: Implement blasted inventory limits (drill & blast cycle).
+        # Currently the face is assumed to have infinite blasted muck ready.
+        # Surging 100% of production from one face should rapidly deplete the blasted 
+        # inventory, forcing downtime for drilling and blasting.
+        
         truck_cycle_time = (
             travel_time
-            + c.loader_cycle_time_hours
+            + truck_loading_time_hours
             + c.truck_dump_time_hours
             + traffic_delay
         )
@@ -374,8 +423,8 @@ class MultiFaceConcentratorController(BaseBlendingController):
             return 0.0
 
         # 3. Calculate Match Factor
-        # MF = (Number of Trucks * Loader Cycle Time) / (Number of Loaders * Truck Cycle Time)
-        match_factor = (truck_alloc * c.loader_cycle_time_hours) / (
+        # MF = (Number of Trucks * Time to Load One Truck) / (Number of Loaders * Truck Cycle Time)
+        match_factor = (truck_alloc * truck_loading_time_hours) / (
             lhd_alloc * truck_cycle_time
         )
         self.face_match_factors[face_index].value = match_factor
@@ -394,11 +443,8 @@ class MultiFaceConcentratorController(BaseBlendingController):
             )  # tonnes per day
 
         # Apply accessibility, mechanical availability, and allocation fractions
-        allocation_fraction = max(
-            0.0, self.face_shift_allocation_fractions[face_index].value
-        )
         final_real_extraction_rate = (
-            max_rate * accessibility * mechanical_availability * allocation_fraction
+            max_rate * accessibility * mechanical_availability
         )
 
         # 5. Calculate Extra Trucks for Development

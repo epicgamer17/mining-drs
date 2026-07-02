@@ -120,10 +120,47 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
     print("Saved 'Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
 
 
+import types
+
+def _apply_equal_allocation(sim):
+    n = len(sim.controller.faces)
+    fracs = [1.0 / n] * n
+    # Force the physical fleet dispatch to always be evenly split
+    for k in sim.controller._mode_allocations.keys():
+        sim.controller._mode_allocations[k] = fracs
+        
+    orig_forward = sim.controller.forward
+    def _equal_forward(self):
+        orig_forward() # wait, orig_forward is bound method?
+        # If we use types.MethodType, orig_forward is an unbound function?
+        # Actually in run_and_analyze we did orig_forward = MultiFaceConcentratorController.forward
+        pass
+
+# Let's write it cleaner.
+def _apply_equal_allocation_to_sim(sim):
+    from examples.mining.components.controllers import MultiFaceConcentratorController
+    import types
+    n = len(sim.controller.faces)
+    fracs = [1.0 / n] * n
+    # Force the physical fleet dispatch to always be evenly split
+    for k in sim.controller._mode_allocations.keys():
+        sim.controller._mode_allocations[k] = fracs
+        
+    orig_forward = MultiFaceConcentratorController.forward
+    def _equal_forward(self):
+        orig_forward(self)
+        rate = self.target_mine_mass_rate.value / n
+        for i in range(n):
+            self.face_target_rates[i].value = rate
+            self.face_shift_allocation_fractions[i].value = fracs[i]
+    sim.controller.forward = types.MethodType(_equal_forward, sim.controller)
+
+
 def _run_capacity_case(
     label: str,
     config: ConcentratorConfig,
     max_time: float,
+    equal_allocation: bool = False,
     np_seed: int = 42,
     random_seed: int = 11,
 ):
@@ -133,6 +170,9 @@ def _run_capacity_case(
     random.seed(random_seed)
 
     sim = ActiveFleetConcentratorModel(config, enable_telemetry=True)
+    if equal_allocation:
+        _apply_equal_allocation_to_sim(sim)
+
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine(sim)
@@ -196,30 +236,18 @@ def run_capacity_comparison(
     import pandas as pd
     from examples.mining.components.plot import plot_ore_with_modes
 
-    baseline_config = replace(
-        base_config,
-        face_lhd_count=(100, 100),
-        face_truck_count=(100, 100),
-        traffic_delay_per_truck_hours=0.0,
-    )
-    constrained_config = replace(
-        base_config,
-        face_lhd_count=(2, 3),
-        face_truck_count=(4, 6),
-        face_accessibility_fraction=(0.93, 0.91),
-        face_haul_distance=(1.0, 1.2),
-        face_shift_allocation_fraction=(1.0, 1.0),
-    )
-
+    # Both configurations are physically identical, we only change the control strategy
     cases = [
-        ("Policy 1 baseline", baseline_config),
-        ("Policy 1 + fleet capacity limit", constrained_config),
+        ("Dynamic Fleet Allocation", False),
+        ("Equal Fleet Allocation", True),
     ]
 
     frames = []
     summaries = []
-    for label, config in cases:
-        df, summary = _run_capacity_case(label, config, max_time=max_time)
+    for label, is_equal in cases:
+        df, summary = _run_capacity_case(
+            label, base_config, max_time=max_time, equal_allocation=is_equal
+        )
         frames.append(df)
         summaries.append(summary)
         print(
@@ -461,14 +489,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     sim = ActiveFleetConcentratorModel(config, enable_telemetry=True)
 
     if equal_allocation:
-        orig_forward = MultiFaceConcentratorController.forward
-        def _equal_forward(self):
-            orig_forward(self)
-            n = len(self.faces)
-            rate = self.target_mine_mass_rate.value / n
-            for i in range(n):
-                self.face_target_rates[i].value = rate
-        sim.controller.forward = types.MethodType(_equal_forward, sim.controller)
+        _apply_equal_allocation_to_sim(sim)
 
     from examples.mining.components.modes import MODES
 
