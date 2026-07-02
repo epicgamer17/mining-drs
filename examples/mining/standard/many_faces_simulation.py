@@ -166,7 +166,6 @@ def _run_capacity_case(
     ]
     summary = {
         "scenario": label,
-        "enable_face_capacity_limit": config.enable_face_capacity_limit,
         "final_time": float(df["time"].iloc[-1]),
         "fleet_shift_count": float(df["fleet_shift_count"].max()),
         "mean_total_target_extraction_rate": float(df["total_target_extraction_rate"].mean()),
@@ -197,10 +196,14 @@ def run_capacity_comparison(
     import pandas as pd
     from examples.mining.components.plot import plot_ore_with_modes
 
-    baseline_config = replace(base_config, enable_face_capacity_limit=False)
+    baseline_config = replace(
+        base_config,
+        face_lhd_count=(100, 100),
+        face_truck_count=(100, 100),
+        traffic_delay_per_truck_hours=0.0,
+    )
     constrained_config = replace(
         base_config,
-        enable_face_capacity_limit=True,
         face_lhd_count=(2, 3),
         face_truck_count=(4, 6),
         face_accessibility_fraction=(0.93, 0.91),
@@ -692,6 +695,46 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
             "kwargs": {
                 "y_columns": ["face1_alloc", "face2_alloc", "ore2_ratio"],
                 "title": "Active Fleet Allocation & Stockpile Ratio",
+                "is_step": True,
+            },
+        },
+        {
+            "func": plot_time_series,
+            "kwargs": {
+                "y_columns": ["face1_real_capacity", "face1_target_rate"],
+                "title": "Face 1 Real Capacity vs Target Rate (Headroom)",
+                "is_step": True,
+            },
+        },
+        {
+            "func": plot_time_series,
+            "kwargs": {
+                "y_columns": ["face2_real_capacity", "face2_target_rate"],
+                "title": "Face 2 Real Capacity vs Target Rate (Headroom)",
+                "is_step": True,
+            },
+        },
+        {
+            "func": plot_time_series,
+            "kwargs": {
+                "y_columns": ["face1_match_factor", "face2_match_factor"],
+                "title": "Match Factor per Face (1.0 = balanced)",
+                "is_step": True,
+            },
+        },
+        {
+            "func": plot_time_series,
+            "kwargs": {
+                "y_columns": ["total_unused_trucks"],
+                "title": "Total Unused Trucks (Spare Fleet Capacity)",
+                "is_step": True,
+            },
+        },
+        {
+            "func": plot_time_series,
+            "kwargs": {
+                "y_columns": ["face1_truck_cycle_time_hours", "face2_truck_cycle_time_hours"],
+                "title": "Truck Cycle Times (Hours) & Traffic Delays",
                 "is_step": True,
             },
         },

@@ -30,6 +30,6 @@ class ContinuousFleetLogistics(drs.Module):
             self.stockpile2_routing_fraction.value = 0.0
 
         # Output pure Ore 1 rate and pure Ore 2 rate
-        return Flow(value=MineOutput(total_ore1_rate, 0, 1.0)), Flow(
-            value=MineOutput(total_ore2_rate, 0, 0.0)
+        return Flow(value=MineOutput(extraction_rate=total_ore1_rate, attr_value=1.0)), Flow(
+            value=MineOutput(extraction_rate=total_ore2_rate, attr_value=0.0)
         )

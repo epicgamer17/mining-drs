@@ -268,11 +268,6 @@ The moderate comparison case currently uses LHD allocation = 0.50, truck allocat
 
 Mine-side surging previously could request unrealistic extraction rates when the desired ore fraction was near zero. A physical cap and a minimum effective fraction were added. 
 
-max_mine_extraction_rate = 6000 t/d 
-
-max_surging_extraction_rate = 8000 t/d 
-
-min_effective_surging_fraction = 0.05 
 
 4. Latest Comparison Results 
 

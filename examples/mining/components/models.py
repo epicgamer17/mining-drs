@@ -284,6 +284,42 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
                 lambda t, m, s, _: m.controller.fleet_shift_timer.value,
             )
             self.telemetry.register_metric(
+                "face1_real_capacity",
+                lambda t, m, s, h: m.controller.face_real_extraction_rates[0].value
+            )
+            self.telemetry.register_metric(
+                "face1_target_rate",
+                lambda t, m, s, h: m.controller.face_target_rates[0].value
+            )
+            self.telemetry.register_metric(
+                "face1_match_factor",
+                lambda t, m, s, h: m.controller.face_match_factors[0].value 
+            )
+            self.telemetry.register_metric(
+                "face1_truck_cycle_time_hours",
+                lambda t, m, s, h: m.controller.face_truck_cycle_times[0].value
+            )
+            self.telemetry.register_metric(
+                "face2_real_capacity",
+                lambda t, m, s, h: m.controller.face_real_extraction_rates[1].value
+            )
+            self.telemetry.register_metric(
+                "face2_target_rate",
+                lambda t, m, s, h: m.controller.face_target_rates[1].value
+            )
+            self.telemetry.register_metric(
+                "face2_match_factor",
+                lambda t, m, s, h: m.controller.face_match_factors[1].value 
+            )
+            self.telemetry.register_metric(
+                "face2_truck_cycle_time_hours",
+                lambda t, m, s, h: m.controller.face_truck_cycle_times[1].value
+            )
+            self.telemetry.register_metric(
+                "total_unused_trucks",
+                lambda t, m, s, h: m.controller.total_extra_trucks.value
+            )
+            self.telemetry.register_metric(
                 "ore2_ratio",
                 lambda t, m, s, _: m.ore2_stock.current_mass.value
                 / max(

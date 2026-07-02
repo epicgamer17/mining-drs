@@ -234,6 +234,8 @@ class MultiFaceConcentratorController(BaseBlendingController):
         self.face_achieved_extraction_rates = []
         self.face_operational_downtime_fractions = []
         self.face_shift_allocation_fractions = []
+        self.face_match_factors = []
+        self.face_truck_cycle_times = []
         self.face_target_rates = self.face_achieved_extraction_rates
         for i in range(len(self.faces)):
             target = drs.Variable(f"face{i}_target_extraction_rate", 0.0)
@@ -252,11 +254,18 @@ class MultiFaceConcentratorController(BaseBlendingController):
                 self, f"face{i}_operational_downtime_fraction", operational_downtime
             )
             setattr(self, f"face{i}_shift_allocation_fraction", allocation_fraction)
+            match_factor = drs.Variable(f"face{i}_match_factor", 0.0)
+            truck_cycle = drs.Variable(f"face{i}_truck_cycle_time", 0.0)
+            setattr(self, f"face{i}_match_factor", match_factor)
+            setattr(self, f"face{i}_truck_cycle_time", truck_cycle)
+            
             self.face_target_extraction_rates.append(target)
             self.face_real_extraction_rates.append(real_extraction)
             self.face_achieved_extraction_rates.append(achieved)
             self.face_operational_downtime_fractions.append(operational_downtime)
             self.face_shift_allocation_fractions.append(allocation_fraction)
+            self.face_match_factors.append(match_factor)
+            self.face_truck_cycle_times.append(truck_cycle)
         self._mode_allocations = self._precompute_allocations()
         self.current_shift_allocations = None
         self.current_shift_mode_name = None
@@ -337,10 +346,6 @@ class MultiFaceConcentratorController(BaseBlendingController):
 
     def _face_real_extraction_rate(self, face_index, target_extraction_rate):
         c = self.config
-        if not getattr(c, "enable_face_capacity_limit", False):
-            self.face_operational_downtime_fractions[face_index].value = 0.0
-            return target_extraction_rate
-
         lhd_alloc = self._face_config_value("face_lhd_count", face_index, 0.0)
         truck_alloc = self._face_config_value("face_truck_count", face_index, 0.0)
         distance = self._face_config_value("face_haul_distance", face_index, 0.0)
@@ -352,9 +357,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
         mechanical_availability = getattr(c, "fleet_mechanical_availability", 1.0)
 
         # 1. Calculate Traffic Delay (function of number of trucks)
-        traffic_delay = c.traffic_delay_base + (
-            c.traffic_delay_multiplier * truck_alloc
-        )
+        traffic_delay = c.traffic_delay_per_truck_hours * truck_alloc
 
         # 2. Calculate Truck Cycle Time (Travel + Load + Dump + Traffic Delay)
         travel_time = (2 * distance) / c.truck_velocity
@@ -366,6 +369,8 @@ class MultiFaceConcentratorController(BaseBlendingController):
         )
 
         if truck_cycle_time <= 0 or lhd_alloc <= 0:
+            self.face_match_factors[face_index].value = 0.0
+            self.face_truck_cycle_times[face_index].value = truck_cycle_time
             return 0.0
 
         # 3. Calculate Match Factor
@@ -373,6 +378,8 @@ class MultiFaceConcentratorController(BaseBlendingController):
         match_factor = (truck_alloc * c.loader_cycle_time_hours) / (
             lhd_alloc * truck_cycle_time
         )
+        self.face_match_factors[face_index].value = match_factor
+        self.face_truck_cycle_times[face_index].value = truck_cycle_time
 
         # 4. Calculate Efficiency & Throughput based on Match Factor
         if match_factor < 1.0:

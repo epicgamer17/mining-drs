@@ -22,10 +22,6 @@ class BaseDualStockpileConfig:
     duration_of_contingency_segments: float = 1.0
     fleet_shift_duration: float = 0.5  # 12 hours; simulation time is in days.
 
-    # Physical operating bounds for mine-side surging targets.
-    max_mine_extraction_rate: float = 6000.0
-    max_surging_extraction_rate: float = 8000.0
-    min_effective_surging_fraction: float = 0.05
 
     # Helper Constants
     stockout_epsilon: float = 1e-9
@@ -55,10 +51,6 @@ class ConcentratorConfig(BaseDualStockpileConfig):
     mode_b_ore2_milling_rate: float = 800.0
     mode_b_contingency_ore2_milling_rate: float = 2500.0
 
-    # Face-level fleet capacity model. Disabled by default so Policy 1 stays
-    # the current fixed mode-dependent allocation baseline.
-    enable_face_capacity_limit: bool = False
-
     # --- New Parameters for Cycle Time & Match Factor ---
     truck_velocity: float = 20.0  # e.g., km/h
     loader_cycle_time_hours: float = 0.05  # e.g., 3 mins to load a truck
@@ -66,8 +58,7 @@ class ConcentratorConfig(BaseDualStockpileConfig):
 
     # --- Traffic Delay Parameters ---
     # Traffic delay increases cycle time based on the number of trucks at a face
-    traffic_delay_base: float = 0.01
-    traffic_delay_multiplier: float = 0.005  # Added delay per truck
+    traffic_delay_per_truck_hours: float = 0.005  # Added delay per truck
 
     # --- Mine Development Parameters ---
     development_rate_per_extra_truck: float = (
