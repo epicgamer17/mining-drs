@@ -234,6 +234,8 @@ class MultiFaceConcentratorController(BaseBlendingController):
         self.face_achieved_extraction_rates = []
         self.face_operational_downtime_fractions = []
         self.face_shift_allocation_fractions = []
+        self.face_lhd_allocations = []
+        self.face_truck_allocations = []
         self.face_match_factors = []
         self.face_truck_cycle_times = []
         self.face_target_rates = self.face_achieved_extraction_rates
@@ -254,6 +256,12 @@ class MultiFaceConcentratorController(BaseBlendingController):
                 self, f"face{i}_operational_downtime_fraction", operational_downtime
             )
             setattr(self, f"face{i}_shift_allocation_fraction", allocation_fraction)
+            
+            lhd_alloc = drs.Variable(f"face{i}_lhd_allocation", 0.0)
+            truck_alloc = drs.Variable(f"face{i}_truck_allocation", 0.0)
+            setattr(self, f"face{i}_lhd_allocation", lhd_alloc)
+            setattr(self, f"face{i}_truck_allocation", truck_alloc)
+            
             match_factor = drs.Variable(f"face{i}_match_factor", 0.0)
             truck_cycle = drs.Variable(f"face{i}_truck_cycle_time", 0.0)
             setattr(self, f"face{i}_match_factor", match_factor)
@@ -264,6 +272,8 @@ class MultiFaceConcentratorController(BaseBlendingController):
             self.face_achieved_extraction_rates.append(achieved)
             self.face_operational_downtime_fractions.append(operational_downtime)
             self.face_shift_allocation_fractions.append(allocation_fraction)
+            self.face_lhd_allocations.append(lhd_alloc)
+            self.face_truck_allocations.append(truck_alloc)
             self.face_match_factors.append(match_factor)
             self.face_truck_cycle_times.append(truck_cycle)
         self._mode_allocations = self._precompute_allocations()
@@ -295,16 +305,6 @@ class MultiFaceConcentratorController(BaseBlendingController):
                 self.config.mode_b_contingency_ore2_milling_rate,
             ),
         }
-        c = self.config
-        total_lhd = getattr(c, "total_lhd_count", float('inf'))
-        max_lhds = getattr(c, "max_lhds_per_face", float('inf'))
-        
-        # What is the maximum fraction of the total fleet that can be sent to a single face
-        # without exceeding its physical LHD capacity limit?
-        max_fleet_fraction = 1.0
-        if total_lhd > 0:
-            max_fleet_fraction = min(1.0, max_lhds / total_lhd)
-            
         result = {}
         for mode_name, (ore1, ore2) in modes_to_compute.items():
             total = ore1 + ore2
@@ -314,30 +314,18 @@ class MultiFaceConcentratorController(BaseBlendingController):
                 r1 = (ore1 - total * f2) / (f1 - f2)
                 r1 = max(0.0, min(total, r1))
                 r2 = total - r1
-                
-                # Raw ideal allocation fractions
-                f1_target = r1 / total
-                f2_target = r2 / total
-                
-                # Apply capacity awareness: do not over-allocate beyond the face's physical limit.
-                # If Face 1 demands more fleet than it can physically hold, spill the excess to Face 2.
-                if f1_target > max_fleet_fraction:
-                    f1_target = max_fleet_fraction
-                    f2_target = 1.0 - f1_target
-                elif f2_target > max_fleet_fraction:
-                    f2_target = max_fleet_fraction
-                    f1_target = 1.0 - f2_target
-                    
-                fracs = [f1_target, f2_target]
-                
+                fracs = [r1 / total, r2 / total]
             result[mode_name] = fracs
 
-        # Surging modes use extreme allocations to correct the imbalance,
-        # but they still must respect the maximum physical capacity of a single face!
+        # Surging modes use extreme allocations to correct the imbalance.
         # MODE_A_MINE_SURGING (ore1 stockout): maximize ore1 → all to face1 (85% ore1)
         # MODE_B_MINE_SURGING (ore2 stockout): maximize ore2 → all to face2 (45% ore2)
-        result["MODE_A_MINE_SURGING"] = [max_fleet_fraction, 1.0 - max_fleet_fraction]
-        result["MODE_B_MINE_SURGING"] = [1.0 - max_fleet_fraction, max_fleet_fraction]
+        # This ensures surging produces a blend different from the base mode target,
+        # letting the stockpile drain and surging exit quickly. Without this, surging
+        # would produce the same blend as the base mode (e.g. 60/40 for Mode A),
+        # making extraction = milling and the system stuck in surging forever.
+        result["MODE_A_MINE_SURGING"] = [1.0, 0.0]
+        result["MODE_B_MINE_SURGING"] = [0.0, 1.0]
 
         return result
 
@@ -364,25 +352,74 @@ class MultiFaceConcentratorController(BaseBlendingController):
             return
         for i, factor in enumerate(self.face_shift_allocation_fractions):
             factor.value = self.current_shift_allocations[i]
+            
+        self._distribute_discrete_fleet(self.current_shift_allocations)
+
+    def _distribute_discrete_fleet(self, fracs):
+        import math
+        c = self.config
+        total_lhd = int(getattr(c, "total_lhd_count", 5.0))
+        total_truck = int(getattr(c, "total_truck_count", 10.0))
+        max_lhds = int(getattr(c, "max_lhds_per_face", float('inf')))
+        max_trucks = int(getattr(c, "max_trucks_per_face", float('inf')))
+        
+        num_faces = len(self.faces)
+        if num_faces == 0:
+            return
+            
+        # Distribute LHDs
+        unassigned_lhds = total_lhd
+        lhd_assignments = [0] * num_faces
+        
+        # Sort faces by their target fraction, descending
+        # so the face that wants the most gets priority for rounding
+        face_priorities = sorted(range(num_faces), key=lambda i: fracs[i], reverse=True)
+        
+        # Base assignment: integer floor, clamped to physical limits
+        for i in face_priorities:
+            target = math.floor(total_lhd * fracs[i])
+            assigned = min(target, max_lhds, unassigned_lhds)
+            lhd_assignments[i] = assigned
+            unassigned_lhds -= assigned
+            
+        # Distribute remaining unassigned LHDs sequentially
+        for i in face_priorities:
+            if unassigned_lhds <= 0:
+                break
+            if lhd_assignments[i] < max_lhds:
+                lhd_assignments[i] += 1
+                unassigned_lhds -= 1
+                
+        # Update DRS variables
+        for i in range(num_faces):
+            self.face_lhd_allocations[i].value = float(lhd_assignments[i])
+            
+        # Distribute Trucks
+        unassigned_trucks = total_truck
+        truck_assignments = [0] * num_faces
+        
+        for i in face_priorities:
+            target = math.floor(total_truck * fracs[i])
+            assigned = min(target, max_trucks, unassigned_trucks)
+            truck_assignments[i] = assigned
+            unassigned_trucks -= assigned
+            
+        for i in face_priorities:
+            if unassigned_trucks <= 0:
+                break
+            if truck_assignments[i] < max_trucks:
+                truck_assignments[i] += 1
+                unassigned_trucks -= 1
+                
+        for i in range(num_faces):
+            self.face_truck_allocations[i].value = float(truck_assignments[i])
 
     def _face_real_extraction_rate(self, face_index, target_extraction_rate):
         c = self.config
-        total_lhd = getattr(c, "total_lhd_count", 5.0)
-        total_truck = getattr(c, "total_truck_count", 10.0)
         
-        allocation_fraction = max(
-            0.0, self.face_shift_allocation_fractions[face_index].value
-        )
-        
-        lhd_alloc = total_lhd * allocation_fraction
-        truck_alloc = total_truck * allocation_fraction
-        
-        # Apply physical face constraints
-        max_lhds = getattr(c, "max_lhds_per_face", float('inf'))
-        max_trucks = getattr(c, "max_trucks_per_face", float('inf'))
-        
-        lhd_alloc = min(lhd_alloc, max_lhds)
-        truck_alloc = min(truck_alloc, max_trucks)
+        # Read the discrete integer assignments
+        lhd_alloc = self.face_lhd_allocations[face_index].value
+        truck_alloc = self.face_truck_allocations[face_index].value
         
         distance = self._face_config_value("face_haul_distance", face_index, 0.0)
         accessibility = self._clamp(
