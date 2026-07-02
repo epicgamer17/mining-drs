@@ -4,12 +4,12 @@ This file consolidates all action items, open questions, and tasks across the mi
 
 ## 1. Immediate Tasks (Before Monday)
 * [ ] Get Visualizations Working
-* [ ] Get Fleet Simulation Example Working
+* [x] Get Fleet Simulation Example Working
 * [ ] Get SGS (Sequential Gaussian Simulation) working
 * [ ] RENAME PAPERS LIKE I DID WITH RL!
 
 ## 2. Core DRS Architecture & Engine
-* [ ] **Hidden Overrides:** PREVENT HIDDEN OVERRIDES AND STUFF. LIKE WHAT IF ONE MODULE SETS A RATE AND THE NEXT ONE RESETS IT. OR OTHER THINGS LIKE THAT.
+* [ ] **Hidden Overrides:** PREVENT HIDDEN OVERRIDES AND STUFF. LIKE WHAT IF ONE MODULE SETS A RATE AND THE NEXT ONE RESETS IT. OR OTHER THINGS LIKE THAT. DO THIS BUY ADDING A GUARDRAIL IF POSSIBLE
 * [ ] **Code Generation:** Make it possible to make a set of equations and variable values from code.
 * [ ] **Modes as Classes:** Do you think that Modes are important enough that instead of using an Enum we could make a new class? (Start conditions, end conditions, actual operation logic for each mode). It should still be easy to preempt modes (e.g. switch from Mode A to Mode A Contingency). Is a Mode Class PyTorch like in nature? Is it okay that it isn't even though my goal was a PyTorch like system for DRS?
 * [ ] **Transitions:** I'm curious if it could be better to define my transitions as start conditions and end conditions, or somehow have that ability to more easily allow for action masking when using my DRS in a Gym Env.
