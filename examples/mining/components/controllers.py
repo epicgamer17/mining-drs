@@ -377,13 +377,11 @@ class MultiFaceConcentratorController(BaseBlendingController):
         # 4. Calculate Efficiency & Throughput based on Match Factor
         if match_factor < 1.0:
             # Under-trucked: Trucks dictate production
-            efficiency = match_factor
             max_rate = (
                 (truck_alloc / truck_cycle_time) * c.truck_payload_tonnes * 24.0
             )  # tonnes per day
         else:
             # Over-trucked: Loaders dictate production (trucks wait)
-            efficiency = 1.0
             max_rate = (
                 (lhd_alloc / c.loader_cycle_time_hours) * c.loader_payload_tonnes * 24.0
             )  # tonnes per day

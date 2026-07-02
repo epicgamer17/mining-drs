@@ -18,7 +18,6 @@ from typing import Tuple
 import numpy as np
 import random
 import wandb
-from functools import partial
 
 from functional.action_selection import sample_distribution
 from functional.optimizer import apply_gradients
@@ -284,7 +283,7 @@ if __name__ == "__main__":
         clip_fractions = []
         approx_kls = []
 
-        for epoch in range(UPDATE_EPOCHS):
+        for _ in range(UPDATE_EPOCHS):
             epoch_kls = []
             for mb in yield_shuffled_minibatches(
                 flat_data, MINIBATCH_SIZE, generator=rng_key

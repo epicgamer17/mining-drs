@@ -62,7 +62,6 @@ class BaseMineFace(drs.Module):
         return Flow(
             value=MineOutput(
                 extraction_rate=target_extraction_rate,
-                parcel_mass=self.active_parcel_initial_mass.value,
                 attr_value=self._get_current_attr_value(),
             )
         )
@@ -159,7 +158,6 @@ class ContinuousMineFace(BaseMineFace):
         return Flow(
             value=MineOutput(
                 extraction_rate=target_extraction_rate,
-                parcel_mass=self.active_parcel_initial_mass.value,
                 attr_value=self.active_parcel_ore_fraction.value,
             )
         )

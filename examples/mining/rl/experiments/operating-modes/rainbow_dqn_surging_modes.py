@@ -18,7 +18,6 @@ from typing import Tuple, Dict, Any, Optional
 import numpy as np
 import random
 import wandb
-from functools import partial
 
 from functional.replay_buffer import (
     init_per_buffer,

@@ -19,7 +19,6 @@ import numpy as np
 import random
 import wandb
 from tensordict import TensorDict
-from functools import partial
 
 from functional.replay_buffer import (
     init_buffer,

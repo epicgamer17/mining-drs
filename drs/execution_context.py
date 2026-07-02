@@ -8,7 +8,6 @@ class ExecutionContext:
     def push(cls, module):
         if not hasattr(cls._local, "stack"):
             cls._local.stack = []
-            cls._local.tracing = False
             cls._local.flow_edges = []
         cls._local.stack.append(module)
 
@@ -21,9 +20,7 @@ class ExecutionContext:
         stack = getattr(cls._local, "stack", [])
         return stack[-1] if stack else None
 
-    @classmethod
-    def set_tracing(cls, enabled: bool = True):
-        cls._local.tracing = enabled
+
 
     @classmethod
     def record_flow_edge(cls, source, target):

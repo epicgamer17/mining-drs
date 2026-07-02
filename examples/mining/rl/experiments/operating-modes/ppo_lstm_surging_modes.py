@@ -19,7 +19,6 @@ from typing import Tuple
 import numpy as np
 import random
 import wandb
-from functools import partial
 from einops import rearrange
 from tensordict import TensorDict
 
@@ -411,7 +410,7 @@ if __name__ == "__main__":
         clip_fractions = []
         approx_kls = []
 
-        for epoch in range(UPDATE_EPOCHS):
+        for _ in range(UPDATE_EPOCHS):
             epoch_kls = []
             minibatch_generator = yield_sequential_minibatches(
                 buffer.data,

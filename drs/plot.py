@@ -210,12 +210,12 @@ def build_dashboard(df, plot_configs, title="Simulation Dashboard", figsize=(16,
     for i, config in enumerate(plot_configs):
         func = config["func"]
         is_time_series = func.__name__ not in [
-            "plot_state_space",
+
             "plot_mode_distribution",
             "plot_mode_dwell_times",
             "plot_normalized_deviation_violin",
             "plot_deficit_disparity",
-            "plot_geology_impact",
+
             "plot_deficit_breakdown_pie",
             "plot_deficit_breakdown_bar",
             "plot_structural_vs_operational_by_mode",

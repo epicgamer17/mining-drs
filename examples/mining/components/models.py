@@ -22,34 +22,6 @@ def _equipment_schedules(total_units, downtime_start, downtime_duration, schedul
     return [(downtime_start, downtime_duration) for _ in range(int(total_units))]
 
 
-def _equipment_availability(
-    name,
-    total_units,
-    downtime_start,
-    downtime_duration,
-    schedules,
-    time_between_failures_hours,
-    repair_time_hours,
-):
-    if time_between_failures_hours is not None and repair_time_hours is not None:
-        return StochasticEquipmentFleetAvailability(
-            name=name,
-            total_units=int(total_units),
-            time_between_failures_hours=time_between_failures_hours,
-            repair_time_hours=repair_time_hours,
-        )
-
-    return EquipmentFleetAvailability(
-        name=name,
-        unit_downtime_schedules=_equipment_schedules(
-            total_units,
-            downtime_start,
-            downtime_duration,
-            schedules,
-        ),
-    )
-
-
 class BaseBlendingModel(drs.Module):
     def __init__(self, config: BaseDualStockpileConfig, enable_telemetry: bool = False):
         super().__init__()
@@ -71,19 +43,19 @@ class BaseBlendingModel(drs.Module):
 
             self.telemetry.register_metric(
                 "MassOfCurrentParcel",
-                lambda t, m, s, h: m.mine.active_parcel_initial_mass.value,
+                lambda t, m, s, _: m.mine.active_parcel_initial_mass.value,
             )
             self.telemetry.register_metric(
                 "CurrentParcelRoutingFraction",
-                lambda t, m, s, h: m.fleet.stockpile2_routing_fraction.value,
+                lambda t, m, s, _: m.fleet.stockpile2_routing_fraction.value,
             )
             self.telemetry.register_metric(
                 "Campaign_Shutdown",
-                lambda t, m, s, h: m.controller.current_campaign_duration.value,
+                lambda t, m, s, _: m.controller.current_campaign_duration.value,
             )
             self.telemetry.register_metric(
                 "Contingency",
-                lambda t, m, s, h: m.controller.current_contingency_duration.value,
+                lambda t, m, s, _: m.controller.current_contingency_duration.value,
             )
 
     def forward(self):
@@ -259,61 +231,61 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
         if self.enable_telemetry:
             self.telemetry.register_metric(
                 "face1_alloc",
-                lambda t, m, s, h: m.controller.face_target_rates[0].value
+                lambda t, m, s, _: m.controller.face_target_rates[0].value
                 / max(1e-12, m.controller.target_mine_mass_rate.value),
             )
             self.telemetry.register_metric(
                 "face2_alloc",
-                lambda t, m, s, h: m.controller.face_target_rates[1].value
+                lambda t, m, s, _: m.controller.face_target_rates[1].value
                 / max(1e-12, m.controller.target_mine_mass_rate.value),
             )
             self.telemetry.register_metric(
                 "face1_target_extraction_rate",
-                lambda t, m, s, h: m.controller.face_target_extraction_rates[0].value,
+                lambda t, m, s, _: m.controller.face_target_extraction_rates[0].value,
             )
             self.telemetry.register_metric(
                 "face1_real_extraction_rate",
-                lambda t, m, s, h: m.controller.face_real_extraction_rates[0].value,
+                lambda t, m, s, _: m.controller.face_real_extraction_rates[0].value,
             )
             self.telemetry.register_metric(
                 "face1_achieved_extraction_rate",
-                lambda t, m, s, h: m.controller.face_achieved_extraction_rates[0].value,
+                lambda t, m, s, _: m.controller.face_achieved_extraction_rates[0].value,
             )
             self.telemetry.register_metric(
                 "face1_operational_downtime_fraction",
-                lambda t, m, s, h: m.controller.face_operational_downtime_fractions[
+                lambda t, m, s, _: m.controller.face_operational_downtime_fractions[
                     0
                 ].value,
             )
             self.telemetry.register_metric(
                 "face2_target_extraction_rate",
-                lambda t, m, s, h: m.controller.face_target_extraction_rates[1].value,
+                lambda t, m, s, _: m.controller.face_target_extraction_rates[1].value,
             )
             self.telemetry.register_metric(
                 "face2_real_extraction_rate",
-                lambda t, m, s, h: m.controller.face_real_extraction_rates[1].value,
+                lambda t, m, s, _: m.controller.face_real_extraction_rates[1].value,
             )
             self.telemetry.register_metric(
                 "face2_achieved_extraction_rate",
-                lambda t, m, s, h: m.controller.face_achieved_extraction_rates[1].value,
+                lambda t, m, s, _: m.controller.face_achieved_extraction_rates[1].value,
             )
             self.telemetry.register_metric(
                 "face2_operational_downtime_fraction",
-                lambda t, m, s, h: m.controller.face_operational_downtime_fractions[
+                lambda t, m, s, _: m.controller.face_operational_downtime_fractions[
                     1
                 ].value,
             )
             self.telemetry.register_metric(
                 "fleet_shift_count",
-                lambda t, m, s, h: m.controller.fleet_shift_count.value,
+                lambda t, m, s, _: m.controller.fleet_shift_count.value,
             )
             self.telemetry.register_metric(
                 "fleet_shift_timer",
-                lambda t, m, s, h: m.controller.fleet_shift_timer.value,
+                lambda t, m, s, _: m.controller.fleet_shift_timer.value,
             )
             self.telemetry.register_metric(
                 "ore2_ratio",
-                lambda t, m, s, h: m.ore2_stock.current_mass.value
+                lambda t, m, s, _: m.ore2_stock.current_mass.value
                 / max(
                     1e-6,
                     m.ore1_stock.current_mass.value + m.ore2_stock.current_mass.value,
@@ -321,49 +293,49 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
             )
             self.telemetry.register_metric(
                 "face1_extracted_mass",
-                lambda t, m, s, h: m.face1.cumulative_extracted_mass.value,
+                lambda t, m, s, _: m.face1.cumulative_extracted_mass.value,
             )
             self.telemetry.register_metric(
                 "face2_extracted_mass",
-                lambda t, m, s, h: m.face2.cumulative_extracted_mass.value,
+                lambda t, m, s, _: m.face2.cumulative_extracted_mass.value,
             )
             self.telemetry.register_metric(
                 "face1_parcel_mass",
-                lambda t, m, s, h: m.face1.active_parcel_initial_mass.value,
+                lambda t, m, s, _: m.face1.active_parcel_initial_mass.value,
             )
             self.telemetry.register_metric(
                 "face1_parcel_ratio",
-                lambda t, m, s, h: m.face1.active_parcel_ore_fraction.value,
+                lambda t, m, s, _: m.face1.active_parcel_ore_fraction.value,
             )
             self.telemetry.register_metric(
                 "face2_parcel_mass",
-                lambda t, m, s, h: m.face2.active_parcel_initial_mass.value,
+                lambda t, m, s, _: m.face2.active_parcel_initial_mass.value,
             )
             self.telemetry.register_metric(
                 "face2_parcel_ratio",
-                lambda t, m, s, h: m.face2.active_parcel_ore_fraction.value,
+                lambda t, m, s, _: m.face2.active_parcel_ore_fraction.value,
             )
             self.telemetry.register_metric(
                 "mixed_achieved_extraction_rate",
-                lambda t, m, s, h: sum(
+                lambda t, m, s, _: sum(
                     rate.value for rate in m.controller.face_achieved_extraction_rates
                 ),
             )
             self.telemetry.register_metric(
                 "mixed_target_extraction_rate",
-                lambda t, m, s, h: sum(
+                lambda t, m, s, _: sum(
                     rate.value for rate in m.controller.face_target_extraction_rates
                 ),
             )
             self.telemetry.register_metric(
                 "mixed_real_extraction_rate",
-                lambda t, m, s, h: sum(
+                lambda t, m, s, _: sum(
                     rate.value for rate in m.controller.face_real_extraction_rates
                 ),
             )
             self.telemetry.register_metric(
                 "mixed_ore1_fraction",
-                lambda t, m, s, h: 1.0 - m.fleet.stockpile2_routing_fraction.value,
+                lambda t, m, s, _: 1.0 - m.fleet.stockpile2_routing_fraction.value,
             )
 
     def setup_telemetry(self):
@@ -375,11 +347,11 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
             self.register_post_step_hook(self.telemetry.snapshot)
             self.telemetry.register_metric(
                 "Campaign_Shutdown",
-                lambda t, m, s, h: m.controller.current_campaign_duration.value,
+                lambda t, m, s, _: m.controller.current_campaign_duration.value,
             )
             self.telemetry.register_metric(
                 "Contingency",
-                lambda t, m, s, h: m.controller.current_contingency_duration.value,
+                lambda t, m, s, _: m.controller.current_contingency_duration.value,
             )
 
     def forward(self):

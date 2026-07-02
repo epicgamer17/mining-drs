@@ -74,18 +74,7 @@ class ConcentratorConfig(BaseDualStockpileConfig):
         50.0  # meters (or tonnes) developed per unused truck per day
     )
 
-    # --- Generalize for N Faces (Change tuples to support > 2 faces) ---
-    num_faces: int = 3  # Increase as needed
-    face_lhd_count: tuple = (
-        0.33,
-        0.33,
-        0.33,
-    )  # TODO: count of 0.33 doesnt really make sense.
-    face_truck_count: tuple = (0.33, 0.33, 0.33)
     # Underground Logistics
     fleet_mechanical_availability: float = 0.85
-    face_accessibility_fraction: tuple = (0.95, 0.95, 0.95)
-    face_haul_distance: tuple = (4.5, 3.0, 6.0)
-    face_shift_allocation_fraction: tuple = (1.0, 1.0, 1.0)
     loader_payload_tonnes: float = 13000.0
     truck_payload_tonnes: float = 13000.0

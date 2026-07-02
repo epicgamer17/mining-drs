@@ -30,28 +30,6 @@ clock.rate = 1.0
 print(f"1c. Timer initial value: {clock.value}")
 
 
-# ── Part 2: Expression System ──────────────────────────────────────────
-
-# In simulation mode, operators evaluate immediately:
-a = drs.Variable("a", 10.0)
-b = drs.Variable("b", 20.0)
-sim_result = a.value + b.value
-print(f"2a. Simulation mode: {a.name}+{b.name} = {sim_result}")
-
-# In tracing mode, operators return Expression ASTs instead of floats:
-ExecutionContext.set_tracing(True)
-expr = a + b
-print(f"2b. Tracing mode: {expr.get_equation()} = {expr.evaluate()}")
-ExecutionContext.set_tracing(False)
-
-# Expressions compose naturally:
-ExecutionContext.set_tracing(True)
-expr2 = (a + b) * 2.0
-print(f"2c. Composed expression: {expr2.get_equation()}")
-ExecutionContext.set_tracing(False)
-
-
-# ── Part 3: Building a Module ──────────────────────────────────────────
 
 class Stockpile(drs.Module):
     """A stockpile that receives ore and feeds a mill."""

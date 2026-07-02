@@ -76,7 +76,7 @@ def evaluate_rl_throughput(model, env, seed, device):
                 logits, _ = model(obs_tensor)
                 action = logits.argmax(dim=-1).item()
 
-        obs, reward, terminated, truncated, info = env.step(action)
+        obs, reward, terminated, truncated, _ = env.step(action)
         if isinstance(model, ActorCriticLSTM):
             dones = torch.tensor(
                 [terminated or truncated], dtype=torch.float32, device=device
@@ -282,7 +282,7 @@ def plot_policy_decision_heatmap(
             ax_cont.set_ylabel("Parcel Ore Fraction (%)")
 
         # --- Bottom Plot (Discrete) ---
-        c2 = ax_disc.pcolormesh(
+        _ = ax_disc.pcolormesh(
             X,
             Y,
             action_map_disc,
@@ -425,7 +425,7 @@ def plot_non_stationary_time_slice(
             ax_cont.set_ylabel("Ore 1 Stockpile")
 
         # --- Bottom Plot (Discrete) ---
-        c2 = ax_disc.pcolormesh(
+        _ = ax_disc.pcolormesh(
             X,
             Y,
             action_map_disc,
@@ -529,7 +529,7 @@ def generate_rl_dashboard(
                     f"[Step {step_count:4d}] PPO Value: {value.item():.2f} | Action Probs: {np.round(probs.cpu().numpy()[0], 3)} | Selected Action: {action}"
                 )
 
-        obs, reward, terminated, truncated, info = env.step(action)
+        obs, reward, terminated, truncated, _ = env.step(action)
         step_count += 1
         if isinstance(model, ActorCriticLSTM):
             dones = torch.tensor(
@@ -902,7 +902,7 @@ def generate_policy_decision_video(
 
         trajectory.append((t_day, ore1, ore_fraction, action))
 
-        obs, reward, terminated, truncated, info = env.step(action)
+        obs, reward, terminated, truncated, _ = env.step(action)
         if isinstance(model, ActorCriticLSTM):
             dones = torch.tensor(
                 [terminated or truncated], dtype=torch.float32, device=device
@@ -1011,7 +1011,7 @@ def generate_policy_decision_video(
             fig.colorbar(c1, ax=ax1, label="P(Mode B)")
 
         # --- Right Plot (Discrete) ---
-        c2 = ax2.pcolormesh(
+        _ = ax2.pcolormesh(
             X,
             Y,
             action_map_disc,

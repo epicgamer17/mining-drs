@@ -446,61 +446,7 @@ def plot_deficit_disparity(df, time_col="time", mode_col="active_operating_mode"
     return ax
 
 
-def plot_geology_impact(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", grade_col="percentage_of_ore2", ideal_rate=6000.0, bottleneck_mode="MODE_A", max_rate_ore1=3600, max_rate_ore2=2400, ax=None):
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        own_ax = True
-    else:
-        own_ax = False
 
-    df = df.copy()
-
-    df['dt'] = df[time_col].diff().shift(-1)
-    df['dx'] = df[extraction_col].diff().shift(-1)
-
-    valid_mask = df['dt'] > 0.001
-    df = df[valid_mask].copy()
-
-    df['rate'] = df['dx'] / df['dt']
-    df['deficit_rate'] = (ideal_rate - df['rate']).clip(lower=0)
-
-    mode_a = df[(df[mode_col].astype(str).str.contains(bottleneck_mode)) &
-                (~df[mode_col].astype(str).str.contains("CONTINGENCY|SURGING"))]
-
-    ore1_grade_pct = 100.0 - mode_a[grade_col]
-
-    sns.scatterplot(x=ore1_grade_pct, y=mode_a['deficit_rate'], color="#2ca02c",
-                    alpha=0.7, s=50, label="Actual Lost Tonnage (Mode A)", ax=ax)
-
-    x_ideal = np.linspace(20, 90, 200)
-    y_limit = []
-
-    for pct1 in x_ideal:
-        pct2 = 100.0 - pct1
-        max_rate_for_ore1 = max_rate_ore1 / (pct1 / 100.0) if pct1 > 0 else float('inf')
-        max_rate_for_ore2 = max_rate_ore2 / (pct2 / 100.0) if pct2 > 0 else float('inf')
-
-        max_extraction = min(max_rate_for_ore1, max_rate_for_ore2)
-
-        max_extraction = min(max_extraction, 6000)
-
-        y_limit.append(ideal_rate - max_extraction)
-
-    ax.plot(x_ideal, y_limit, color="black", linestyle="--", linewidth=2, label="Theoretical Geological Physics")
-
-    ax.set_title("Geological Bottleneck (The 'V' Curve)", fontsize=14, pad=15)
-    ax.set_xlabel("Ore 1 Grade in Current Parcel (%)", fontsize=12)
-    ax.set_ylabel("Lost Production Rate (Tons/Day)", fontsize=12)
-
-    ax.plot([60], [0], marker='*', color='gold', markersize=15, markeredgecolor='black', label="Perfect Geological Blend (60/40)")
-
-    ax.legend(loc="upper center")
-    ax.grid(True, alpha=0.3)
-
-    if own_ax:
-        fig.tight_layout()
-        return fig
-    return ax
 
 
 def plot_deficit_breakdown_bar(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate_per_day=6000.0, title="Final Deficit Breakdown by Mode (%)", ax=None, palette=None, verbose=True):

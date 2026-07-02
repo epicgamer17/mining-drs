@@ -11,7 +11,7 @@ def test_module_variable_list_registration():
                 setattr(self, f"truck_{i}", Level(f"truck_{i}", 0.0))
             self.single = Timer("single_timer", 0.0)
 
-        def update_rates(self):
+        def forward(self):
             pass
 
     mod = TestModule()
@@ -36,7 +36,7 @@ def test_semantic_modules_can_own_nested_physical_state():
             self.payload = Level("Payload")
             self.capacity = capacity
 
-        def update_rates(self):
+        def forward(self):
             pass
 
     class Fleet(Module):
@@ -46,7 +46,7 @@ def test_semantic_modules_can_own_nested_physical_state():
                 setattr(self, f"truck_{i}", Truck(capacity=50))
             self.total_delivered = Level("Total_Delivered")
 
-        def update_rates(self):
+        def forward(self):
             for truck in self._modules.values():
                 if truck.payload.value == truck.capacity:
                     self.total_delivered.rate += truck.payload.value
@@ -69,7 +69,7 @@ def test_module_registers_variable_and_module_direct_assignment():
             super().__init__()
             self.level = Level(name)
 
-        def update_rates(self):
+        def forward(self):
             pass
 
     class Plant(Module):
@@ -80,7 +80,7 @@ def test_module_registers_variable_and_module_direct_assignment():
             self.crusher = Leaf("Crusher")
             self.mill = Leaf("Mill")
 
-        def update_rates(self):
+        def forward(self):
             pass
 
     plant = Plant()
