@@ -1,6 +1,6 @@
 from typing import Tuple
 import math
-from drs.module import drs
+import drs
 from drs.flow import Flow
 from .data import MineOutput
 

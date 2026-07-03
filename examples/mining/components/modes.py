@@ -1,5 +1,5 @@
 from typing import Optional, Union
-from drs.module import drs
+import drs
 from .data import TargetRates
 
 

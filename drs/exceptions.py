@@ -14,4 +14,6 @@ class StateMutationError(DRSError):
 class DeadlockError(DRSError):
     """Raised when the engine fails to advance time."""
 
-    pass
+    def __init__(self, message: str, state_dump: str = ""):
+        super().__init__(message)
+        self.state_dump = state_dump

@@ -1,4 +1,4 @@
-from drs.module import drs
+import drs
 from drs.flow import Flow
 from .config import ConcentratorConfig
 from .fleet import ContinuousFleetLogistics

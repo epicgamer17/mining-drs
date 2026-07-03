@@ -1,10 +1,12 @@
 import math
-import warnings
+import logging
 from typing import Tuple, Optional
 from .variables import Variable, Level
 from .module import Module
 from ._execution_context import ExecutionContext
 from .exceptions import DeadlockError
+
+logger = logging.getLogger(__name__)
 
 
 class DRSEngine:
@@ -104,13 +106,16 @@ class DRSEngine:
                         f"The simulation is ping-ponging between states without advancing time. "
                         f"Last trigger: '{trigger_var.name if trigger_var else 'None'}' "
                         f"(value={trigger_var.value if trigger_var else 'None'}, "
-                        f"rate={getattr(trigger_var, 'rate', 'N/A') if trigger_var else 'None'}).\n{state_dump}"
+                        f"rate={getattr(trigger_var, 'rate', 'N/A') if trigger_var else 'None'}).\n{state_dump}",
+                        state_dump=state_dump
                     )
             else:
                 consecutive_zero_dt_count = 0
 
             if dt < 0:
                 raise ValueError("Time delta (dt) cannot be negative.")
+
+            logger.debug(f"Advancing time by {dt:.4f} to {self.current_time + dt:.4f} (Trigger: {trigger_var.name if trigger_var else 'None'})")
 
             self.current_time += dt
             for var in current_variables:
@@ -140,7 +145,7 @@ class DRSEngine:
             if has_threshold and rate == 0.0:
                 self._orphaned_warned_ids.add(id(var))
                 owner_name = type(var._owner).__name__ if var._owner else "unknown"
-                warnings.warn(
+                logger.warning(
                     f"Orphaned threshold: '{var.name}' (owned by {owner_name}) "
                     f"has lower_threshold={var.lower_threshold}, "
                     f"upper_threshold={var.upper_threshold} "
@@ -201,7 +206,7 @@ class DRSEngine:
                     orphaned.append(f"'{var.name}' ({owner_name})")
             if orphaned and id(None) not in self._orphaned_warned_ids:
                 self._orphaned_warned_ids.add(id(None))
-                warnings.warn(
+                logger.warning(
                     f"No threshold events pending. "
                     f"Variables with thresholds but rate=0: "
                     f"{', '.join(orphaned)}. "

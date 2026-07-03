@@ -1,6 +1,6 @@
 from typing import List, Dict, Optional
 
-from drs.module import drs
+import drs
 from drs.flow import Flow
 
 

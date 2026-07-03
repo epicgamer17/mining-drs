@@ -9,7 +9,7 @@ Welcome to the **Discrete Rate Simulation (DRS)** framework! This step-by-step g
 At the heart of the framework are three primary data types that hold your simulation's state: `Variable`, `Level`, and `Timer`.
 
 ```python
-from drs.module import drs
+import drs
 
 # Variables hold named state. They are owned by whatever Module creates them.
 rate = drs.Variable("extraction_rate", 5000.0)

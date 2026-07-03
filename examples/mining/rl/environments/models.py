@@ -1,4 +1,4 @@
-from drs.module import drs
+import drs
 from examples.mining.components.models import ConcentratorModel
 from examples.mining.components.config import ConcentratorConfig
 from .controllers import RL_MineController

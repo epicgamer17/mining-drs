@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 # ── Part 1: Core Types ──────────────────────────────────────────────────
 
-from drs.module import drs
+import drs
 from drs._execution_context import ExecutionContext
 
 # Variables hold named state. They are owned by whatever Module creates them.

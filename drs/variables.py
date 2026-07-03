@@ -96,7 +96,7 @@ class Variable:
         )
 
     @rate.setter
-    def rate(self, val: Any) -> None:
+    def rate(self, val: Union[float, tuple[float, float, float]]) -> None:
         raise AttributeError(
             f"Cannot set .rate on '{type(self).__name__}'. "
             f"Only drs.Level supports .rate."
@@ -141,6 +141,7 @@ class Level(Variable):
         self._rate = rate
         self.upper_threshold = math.inf
         self.lower_threshold = -math.inf
+        self._rate_set_by = None
 
     @property
     def rate(self) -> float:
@@ -154,7 +155,7 @@ class Level(Variable):
         return self._rate
 
     @rate.setter
-    def rate(self, val: Any) -> None:
+    def rate(self, val: Union[float, tuple[float, float, float]]) -> None:
         """
         Set the rate of change.
 
@@ -169,6 +170,15 @@ class Level(Variable):
         if current_actor is not None and current_actor is not self._owner:
             if hasattr(current_actor, "_record_incoming_edge"):
                 current_actor._record_incoming_edge(self)
+
+        # Rate override guardrail
+        if current_actor is not None and self._rate_set_by is not None and self._rate_set_by is not current_actor:
+            raise StateMutationError(
+                f"Rate Conflict: '{type(current_actor).__name__}' attempted to set the rate of "
+                f"'{self.name}', but it was already set by '{type(self._rate_set_by).__name__}' "
+                f"during this time step. Multiple modules cannot control the rate of the same Level."
+            )
+        self._rate_set_by = current_actor
 
         if isinstance(val, tuple):
             if len(val) == 3:

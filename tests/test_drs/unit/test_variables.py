@@ -17,7 +17,7 @@ def test_level_initialization_and_update():
     assert level.value == 100.0
     assert level.rate == -5.0
 
-    level.update(2.0)  # dt = 2.0
+    level._update(2.0)  # dt = 2.0
     assert level.value == 90.0
 
 
@@ -27,7 +27,7 @@ def test_timer_initialization_update_and_reset():
     assert timer.value == 0.0
     assert timer.rate == 1.0
 
-    timer.update(5.5)
+    timer._update(5.5)
     assert timer.value == 5.5
 
     timer.reset()
@@ -36,5 +36,5 @@ def test_timer_initialization_update_and_reset():
 
 def test_timer_countdown():
     timer = Timer("countdown", initial_value=10.0, rate=-1.0)
-    timer.update(3.0)
+    timer._update(3.0)
     assert timer.value == 7.0

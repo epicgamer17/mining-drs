@@ -1,4 +1,4 @@
-from drs.module import drs
+import drs
 from drs.telemetry import Telemetry
 
 from .config import BaseDualStockpileConfig, ConcentratorConfig

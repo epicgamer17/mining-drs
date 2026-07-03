@@ -24,12 +24,12 @@ def test_telemetry_snapshot():
     telemetry.snapshot(current_time=1.0)
 
     # Engine updates
-    engine._variables[0].update(
+    engine._variables[0]._update(
         2.0
     )  # Ore stock changes to 1000 + (0 * 2) = 1000.0 (rate is 0)
     engine._variables[0].rate = 50.0
-    engine._variables[0].update(1.0)  # Ore stock changes to 1050.0
-    engine._variables[1].update(1.0)  # Runtime changes to 1.0
+    engine._variables[0]._update(1.0)  # Ore stock changes to 1050.0
+    engine._variables[1]._update(1.0)  # Runtime changes to 1.0
     engine._variables[2].value = 6  # Trucks to 6
 
     # Take a snapshot at t=2.0

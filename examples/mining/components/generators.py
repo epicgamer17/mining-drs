@@ -1,5 +1,5 @@
 import random
-from drs.module import drs
+import drs
 from drs.flow import Flow
 
 

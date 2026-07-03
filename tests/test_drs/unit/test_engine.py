@@ -51,7 +51,7 @@ def test_engine_negative_dt_raises_error():
     model = CountingModule(target_ticks=1)
     engine = DRSEngine(model)
 
-    engine.calculate_min_dt = lambda variables: (-1.0, None, True)
+    engine._calculate_min_dt = lambda variables: (-1.0, None, True)
 
     with pytest.raises(ValueError, match="Time delta \\(dt\\) cannot be negative."):
         engine.run()

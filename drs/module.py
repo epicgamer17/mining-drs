@@ -261,6 +261,7 @@ class Module:
                 var._rate = 0.0
                 var.upper_threshold = math.inf
                 var.lower_threshold = -math.inf
+                var._rate_set_by = None
 
     def initialize_state(self) -> None:
         """
@@ -340,13 +341,3 @@ class DataSource(Module):
         return next(self)
 
 
-class drs:
-    """A namespace to mimic PyTorch's structure"""
-
-    Module = Module
-    Variable = Variable
-    Level = Level
-    Timer = Timer
-    DataPoint = DataPoint
-    DataSource = DataSource
-    Flow = Flow

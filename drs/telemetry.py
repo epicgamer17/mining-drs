@@ -19,7 +19,7 @@ class Telemetry:
         derived_metrics (Dict[str, Callable]): Custom metrics calculated at each step.
     """
 
-    def __init__(self, model):
+    def __init__(self, model: Module) -> None:
         """
         Initializes the telemetry system attached to a specific model.
         
@@ -28,11 +28,11 @@ class Telemetry:
                 expected to provide a `variables()` method yielding Variable objects.
         """
         self.model = model
-        self.history = []
-        self.tracked_vars = [
+        self.history: list[dict[str, Any]] = []
+        self.tracked_vars: list[str] = [
             var.name for var in self.model.variables()
         ]  # default to all variables
-        self.derived_metrics: Dict[str, Callable] = {}
+        self.derived_metrics: Dict[str, Callable[[float, Module, dict[str, Any], list[dict[str, Any]]], float]] = {}
 
     def register_metric(
         self, name: str, calc_fn: Callable[[float, Module, dict, list], float]

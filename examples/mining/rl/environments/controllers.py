@@ -1,4 +1,4 @@
-from drs.module import drs
+import drs
 from examples.mining.components.modes import RequireDecision
 from examples.mining.components.config import ConcentratorConfig
 from examples.mining.components.controllers import ConcentratorController
