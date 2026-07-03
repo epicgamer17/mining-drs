@@ -19,6 +19,14 @@ class DRSEngine:
         max_step_size: float = 0.5,
         max_deadlock_steps: int = 20,
     ) -> None:
+        """
+        Initialize the DRS Engine.
+        
+        Args:
+            model: The root Module of your simulation.
+            max_step_size: The maximum time delta (dt) the engine is allowed to take in a single step.
+            max_deadlock_steps: The maximum consecutive zero-time steps allowed before raising an error.
+        """
         self.model = model
         self.current_time = 0.0
         self.max_step_size = max_step_size

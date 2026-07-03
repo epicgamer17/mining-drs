@@ -13,6 +13,7 @@ class Module:
     """
 
     def __init__(self) -> None:
+        """Initialize the module and its internal registries."""
         self._variables = {}
         self._modules = {}
         self.parent = None
@@ -25,6 +26,10 @@ class Module:
         self._data_dep_seen = set()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """
+        Execute the forward pass while managing the ExecutionContext.
+        Validates that inter-module communication only uses drs.Flow or drs.DataPoint.
+        """
         caller = ExecutionContext.get_current()
         ExecutionContext.push(self)
         try:
@@ -102,6 +107,10 @@ class Module:
             ExecutionContext.pop()
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
+        """
+        Define the physics and logic of the module.
+        Must be implemented by all subclasses.
+        """
         raise NotImplementedError("Module subclasses must implement forward()")
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -249,15 +258,19 @@ class DataSource(Module):
     """
 
     def __init__(self) -> None:
+        """Initialize the DataSource."""
         super().__init__()
 
     def __iter__(self) -> Iterator[DataPoint]:
+        """Return the iterator object itself."""
         return self
 
     def __next__(self) -> DataPoint:
+        """Yield the next DataPoint in the sequence."""
         raise StopIteration
 
     def next(self) -> DataPoint:
+        """Alias for __next__."""
         return next(self)
 
 

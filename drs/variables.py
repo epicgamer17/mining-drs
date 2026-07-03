@@ -23,6 +23,13 @@ class Variable:
     """Base class for all domain variables."""
 
     def __init__(self, name: str, initial_value: Any = 0.0) -> None:
+        """
+        Initialize a new Variable.
+
+        Args:
+            name: The unique name of the variable.
+            initial_value: The starting value (default: 0.0).
+        """
         self.name = name
         self._value = initial_value
         self._owner = None
@@ -35,11 +42,13 @@ class Variable:
 
     @property
     def value(self) -> Any:
+        """Get the current value of the variable. Reading this automatically records a dependency edge."""
         self._record_read_dependency()
         return self._value
 
     @value.setter
     def value(self, val: Any) -> None:
+        """Set the value of the variable. Fails fast if mutated by a non-owner module."""
         current = ExecutionContext.get_current()
         if current is not None and current is not self._owner:
             raise RuntimeError(
@@ -81,6 +90,14 @@ class Level(Variable):
     # the most common manifestation: thresholds set without corresponding rates.
 
     def __init__(self, name: str, initial_value: float = 0.0, rate: float = 0.0) -> None:
+        """
+        Initialize a new Level.
+
+        Args:
+            name: The unique name of the level.
+            initial_value: The starting value (default: 0.0).
+            rate: The initial rate of change (default: 0.0).
+        """
         super().__init__(name, initial_value)
         self._rate = rate
         self.upper_threshold = math.inf
@@ -88,11 +105,16 @@ class Level(Variable):
 
     @property
     def rate(self) -> float:
+        """Get the current rate of change."""
         self._record_read_dependency()
         return self._rate
 
     @rate.setter
     def rate(self, val: Any) -> None:
+        """
+        Set the rate of change. 
+        Can accept a single float, or a tuple of (rate, lower_threshold, upper_threshold).
+        """
         current_actor = ExecutionContext.get_current()
         if current_actor is not None and current_actor is not self._owner:
             if hasattr(current_actor, "_record_incoming_edge"):
@@ -114,7 +136,16 @@ class Timer(Level):
     """A specialized level used to track time, typically with a rate of 1.0 or -1.0."""
 
     def __init__(self, name: str, initial_value: float = 0.0, rate: float = 1.0) -> None:
+        """
+        Initialize a Timer.
+
+        Args:
+            name: The unique name of the timer.
+            initial_value: The starting time value (default: 0.0).
+            rate: The speed of time (default: 1.0).
+        """
         super().__init__(name, initial_value, rate)
 
     def reset(self) -> None:
+        """Reset the timer value back to 0.0."""
         self.value = 0.0

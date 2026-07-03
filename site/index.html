@@ -1,0 +1,1281 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A dynamic simulation engine for mining operations.">
+      
+      
+      
+      
+      
+        <link rel="next" href="api/engine/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Mining-DRS</title>
+      
+    
+    
+      <link rel="stylesheet" href="assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL(".",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#mining-drs-discrete-rate-simulation-framework" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="." title="Mining-DRS" class="md-header__button md-logo" aria-label="Mining-DRS" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Mining-DRS
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Home
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="." title="Mining-DRS" class="md-nav__button md-logo" aria-label="Mining-DRS" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Mining-DRS
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="." class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-the-basics-demystifying-the-jargon" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. The Basics: Demystifying the Jargon
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1. The Basics: Demystifying the Jargon">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#for-the-non-programmers-what-is-a-drs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        For the Non-Programmers: What is a "DRS"?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#for-the-non-miners-what-are-we-simulating" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        For the Non-Miners: What are we simulating?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-features-pros-and-cons" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Features: Pros and Cons
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. Features: Pros and Cons">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pros" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pros:
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cons" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cons:
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-the-pytorch-parallels-dictionary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. The PyTorch Parallels Dictionary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-how-the-engine-works-the-core-logic" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. How the Engine Works (The Core Logic)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-building-your-first-simulator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Building Your First Simulator
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Building Your First Simulator">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#step-1-define-the-physical-modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1: Define the Physical Modules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-2-define-operating-modes-the-strategy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2: Define Operating Modes (The Strategy)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-3-handling-data-streams-for-realism" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3: Handling Data Streams (For Realism)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-4-run-the-simulation-and-plot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4: Run the Simulation and Plot
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-advanced-design-choices-philosophy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Advanced Design Choices &amp; Philosophy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Advanced Design Choices &amp; Philosophy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#implicit-graph-emergence-vs-explicit-ports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implicit Graph Emergence vs. Explicit Ports
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fail-fast-guardrails-vs-silent-bugs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fail-Fast Guardrails vs. Silent Bugs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ast-expression-tracing-vs-python-truthiness" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AST Expression Tracing vs. Python Truthiness
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unification-of-logic-forward" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Unification of Logic (forward())
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deterministic-monte-carlo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deterministic Monte Carlo
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-whats-next-roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. What's Next? (Roadmap)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="api/engine/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="api/module/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Module
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="api/variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="api/flow_telemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flow & Telemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-the-basics-demystifying-the-jargon" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. The Basics: Demystifying the Jargon
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1. The Basics: Demystifying the Jargon">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#for-the-non-programmers-what-is-a-drs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        For the Non-Programmers: What is a "DRS"?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#for-the-non-miners-what-are-we-simulating" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        For the Non-Miners: What are we simulating?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-features-pros-and-cons" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Features: Pros and Cons
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. Features: Pros and Cons">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pros" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pros:
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cons" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cons:
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-the-pytorch-parallels-dictionary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. The PyTorch Parallels Dictionary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-how-the-engine-works-the-core-logic" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. How the Engine Works (The Core Logic)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-building-your-first-simulator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Building Your First Simulator
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Building Your First Simulator">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#step-1-define-the-physical-modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1: Define the Physical Modules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-2-define-operating-modes-the-strategy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2: Define Operating Modes (The Strategy)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-3-handling-data-streams-for-realism" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3: Handling Data Streams (For Realism)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-4-run-the-simulation-and-plot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4: Run the Simulation and Plot
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-advanced-design-choices-philosophy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Advanced Design Choices &amp; Philosophy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Advanced Design Choices &amp; Philosophy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#implicit-graph-emergence-vs-explicit-ports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implicit Graph Emergence vs. Explicit Ports
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fail-fast-guardrails-vs-silent-bugs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fail-Fast Guardrails vs. Silent Bugs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ast-expression-tracing-vs-python-truthiness" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AST Expression Tracing vs. Python Truthiness
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unification-of-logic-forward" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Unification of Logic (forward())
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deterministic-monte-carlo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deterministic Monte Carlo
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-whats-next-roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. What's Next? (Roadmap)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="mining-drs-discrete-rate-simulation-framework">Mining-DRS: Discrete Rate Simulation Framework</h1>
+<p>Welcome to <strong>Mining-DRS</strong>! Whether you are a mining engineer who has never written a line of Python, or a Python developer who thinks "milling" has something to do with flour, this guide is for you.</p>
+<p>This is an object-oriented framework for simulating complex supply chains where material flows continuously over time. We specifically focus on mining operations, but the underlying engine can model any system with continuous flows (like water pipes, electrical grids, or traffic). This library is a Python-based, using concepts similar to PyTorch. </p>
+<hr />
+<h2 id="1-the-basics-demystifying-the-jargon">1. The Basics: Demystifying the Jargon</h2>
+<h3 id="for-the-non-programmers-what-is-a-drs">For the Non-Programmers: What is a "DRS"?</h3>
+<p>Most simulations use a <strong>Fixed-Step</strong> approach. Imagine watching a bathtub fill up, and you check it exactly once every minute. 
+- <em>The Problem:</em> What if it overflows at 1 minute and 30 seconds? You won't notice until minute 2, and by then, water is on the floor. 
+- <em>The Solution:</em> Make your checks shorter (every second). But checking every second takes forever to run on a computer!</p>
+<p><strong>Discrete Rate Simulation (DRS)</strong> is different. Instead of checking every minute, the computer looks at the flow rate of the faucet and calculates <em>exactly</em> when the tub will be full. It then sets an alarm for that exact moment and lets the simulation "jump" forward in time.
+- <strong>The Result:</strong> It runs incredibly fast and never misses a threshold. </p>
+<h3 id="for-the-non-miners-what-are-we-simulating">For the Non-Miners: What are we simulating?</h3>
+<p>In this simulation, "mining" is just a continuous supply chain puzzle:
+1. <strong>Extraction (Faces):</strong> Digging up "parcels" of rock from the earth.
+2. <strong>Transport (Fleets):</strong> Trucks or conveyors that move the rock. Think of them as pipes.
+3. <strong>Stockpiles:</strong> Giant piles of rock. These act like buffer tanks (or bathtubs) so that if a truck breaks down, the factory doesn't immediately stop.
+4. <strong>Processing (Mills/Plants):</strong> The factory that grinds the rock to get the valuable metal out.</p>
+<p>The goal of the simulation is usually to test different <strong>Operating Modes</strong> (strategies). For example, "If Stockpile A gets too full, tell the trucks to drive to Stockpile B instead."</p>
+<hr />
+<h2 id="2-features-pros-and-cons">2. Features: Pros and Cons</h2>
+<p>Why use Mining-DRS instead of commercial software like Arena, or standard Python loops?</p>
+<h3 id="pros">Pros:</h3>
+<ul>
+<li><strong>Blazing Fast:</strong> Because time "jumps" from event to event, it can simulate years of operations in a fraction of a second.</li>
+<li><strong>Fail-Fast Safety:</strong> The framework is designed to stop and warn you with clear error messages if you break the laws of physics (like trying to drain an empty stockpile).</li>
+<li><strong>PyTorch-Inspired Architecture:</strong> For programmers, the system feels exactly like building a neural network in PyTorch. Everything is a "Module" that automatically keeps track of its own data.</li>
+<li><strong>Built-in Telemetry:</strong> Every single change in the system is automatically tracked. You can plot beautiful graphs of your stockpiles over time without writing custom tracking code.</li>
+</ul>
+<h3 id="cons">Cons:</h3>
+<ul>
+<li><strong>No Visual UI (Yet):</strong> Currently, you have to write Python code to build a model. We are actively planning an Arena-style drag-and-drop visual interface.</li>
+<li><strong>Mindset Shift:</strong> Thinking in continuous "rates" (tons per hour) instead of discrete "events" (a truck arrived) takes some getting used to.</li>
+</ul>
+<hr />
+<h2 id="3-the-pytorch-parallels-dictionary">3. The PyTorch Parallels Dictionary</h2>
+<p>Mining-DRS was fundamentally designed to be the "PyTorch of DRS." If you are familiar with deep learning, the architecture of this simulation engine will feel like home. Here is how the concepts map 1:1:</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>PyTorch Equivalent</th>
+<th>Mining-DRS Equivalent</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Components</strong></td>
+<td><code>nn.Module</code></td>
+<td><code>drs.Module</code></td>
+<td>Base class for your physical and logical components (e.g., a Plant, Fleet, or Controller).</td>
+</tr>
+<tr>
+<td><strong>Hierarchies</strong></td>
+<td><code>nn.Sequential</code></td>
+<td>Nested <code>drs.Module</code>s</td>
+<td>You compose simulations as trees. Modules automatically register any sub-modules assigned to them via <code>__setattr__</code>. No manual <code>register_module()</code> calls required.</td>
+</tr>
+<tr>
+<td><strong>State/Data</strong></td>
+<td><code>nn.Parameter</code> / <code>Tensor</code></td>
+<td><code>drs.Variable</code> / <code>drs.Level</code></td>
+<td>The underlying objects holding your state. Just like tensors, assigning <code>self.my_stock = drs.Level()</code> automatically registers it to the module.</td>
+</tr>
+<tr>
+<td><strong>Logic Step</strong></td>
+<td><code>model.forward()</code></td>
+<td><code>model.forward()</code></td>
+<td>The unified pass where you define all physical routing, state assignments, and mode transitions.</td>
+</tr>
+<tr>
+<td><strong>Logging</strong></td>
+<td><code>TensorBoard</code></td>
+<td><code>Telemetry</code></td>
+<td>Automatically tracks and logs the values of all variables at every time step for plotting.</td>
+</tr>
+<tr>
+<td><strong>Optimization</strong></td>
+<td><code>torch.optim.Optimizer</code></td>
+<td><code>OperatingMode</code></td>
+<td>Applies specific rules, targets, or constraints to the state (e.g., target milling rates, fleet routing splits).</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="4-how-the-engine-works-the-core-logic">4. How the Engine Works (The Core Logic)</h2>
+<p>Every simulation in Mining-DRS follows a simple, repeating loop:</p>
+<ol>
+<li><strong>Evaluate <code>forward()</code> Passes:</strong> </li>
+<li>The engine calls <code>forward()</code> on all modules to get the instantaneous rates.</li>
+<li>Controllers look at the system and set targets (e.g., "Send 100 tons/hour to Stockpile A").</li>
+<li>Physical components update their internal flow rates based on those targets.</li>
+<li><strong>Find the Next Event ($dt_{min}$):</strong> The engine calculates exactly how long it will take for any physical variable (Level) to hit a limit (e.g., Stockpile A reaches maximum capacity).</li>
+<li><strong>Jump Time:</strong> The simulation clock jumps forward by that exact amount of time ($dt_{min}$). All stockpiles and variables are mathematically updated instantly.</li>
+<li><strong>Trigger Transitions:</strong> The system realizes a limit was hit and changes its Operating Mode (e.g., "Stockpile A is full! Switch trucks to Stockpile B!").</li>
+<li><strong>Repeat.</strong></li>
+</ol>
+<hr />
+<h2 id="5-building-your-first-simulator">5. Building Your First Simulator</h2>
+<p>Here is a simple example of how to build and run a simulation. We compose physical <strong>Modules</strong> together, just like building blocks.</p>
+<h3 id="step-1-define-the-physical-modules">Step 1: Define the Physical Modules</h3>
+<p>Every component is a <code>drs.Module</code>. It owns its physical state, usually represented as a <code>drs.Level</code> (something that can fill up or empty out).</p>
+<pre><code class="language-python">from drs import drs
+
+class SimpleStockpile(drs.Module):
+    def __init__(self, max_capacity):
+        super().__init__()
+        # A Level represents a quantity that changes continuously over time
+        self.ore_level = drs.Level(&quot;Ore_Level&quot;)
+        self.max_capacity = max_capacity
+
+    def forward(self, inflow_rate, outflow_rate):
+        # Physics: The rate of change is simply what comes in minus what goes out
+        self.ore_level.rate = inflow_rate - outflow_rate
+</code></pre>
+<h3 id="step-2-define-operating-modes-the-strategy">Step 2: Define Operating Modes (The Strategy)</h3>
+<p>Modes tell the simulation what the current goal is. They are grouped under a Controller.</p>
+<pre><code class="language-python">from drs.modes import OperatingMode, RequireDecision
+
+class NormalMode(OperatingMode):
+    @property
+    def name(self): return &quot;NORMAL&quot;
+
+    def apply_dynamics(self, model):
+        # Tell the model to flow at 100 tons per hour
+        model.inflow_rate = 100.0 
+
+    def check_end_conditions(self, model):
+        # If the stockpile hits its capacity, we need to make a decision!
+        if model.stockpile.ore_level.value &gt;= model.stockpile.max_capacity:
+            return RequireDecision() 
+</code></pre>
+<h3 id="step-3-handling-data-streams-for-realism">Step 3: Handling Data Streams (For Realism)</h3>
+<p>In real operations, rock isn't generic; it arrives in batches with different grades of metal. The <code>drs.DataSource</code> and <code>drs.DataPoint</code> classes let you stream these parcels into your simulation.</p>
+<pre><code class="language-python">import random
+from drs import drs
+
+class TruckDataSource(drs.DataSource):
+    def __next__(self) -&gt; drs.DataPoint:
+        # Generate a random truckload of rock
+        mass = random.uniform(40.0, 60.0) 
+        grade = random.uniform(0.5, 1.5)
+        return drs.DataPoint(mass=mass, grade=grade)
+</code></pre>
+<h3 id="step-4-run-the-simulation-and-plot">Step 4: Run the Simulation and Plot</h3>
+<p>We put it all together inside a <code>DRSEngine</code>, run it, and plot the results!</p>
+<pre><code class="language-python">from drs import DRSEngine
+from drs.plot import build_dashboard, plot_time_series
+
+# 1. Initialize the physical components
+my_stockpile = SimpleStockpile(max_capacity=5000)
+
+# 2. Give it to the simulation engine
+engine = DRSEngine(my_stockpile)
+
+# 3. Run for 365 simulated days
+engine.run(max_time=365.0)
+
+# 4. Plot the results! Telemetry happens automatically.
+df = my_stockpile.telemetry.to_dataframe()
+dashboard = build_dashboard(df, configs=[
+    {&quot;func&quot;: plot_time_series, &quot;kwargs&quot;: {&quot;y_columns&quot;: [&quot;Ore_Level&quot;]}}
+])
+dashboard.savefig(&quot;results.png&quot;)
+</code></pre>
+<hr />
+<h2 id="6-advanced-design-choices-philosophy">6. Advanced Design Choices &amp; Philosophy</h2>
+<p>If you are a developer looking under the hood, here is why we built Mining-DRS this way, along with the pros and cons of these decisions:</p>
+<h3 id="implicit-graph-emergence-vs-explicit-ports">Implicit Graph Emergence vs. Explicit Ports</h3>
+<p>Instead of explicitly wiring "Output Port A" to "Input Port B", connections emerge implicitly from behavior. <code>ExecutionContext</code> tracks which module is currently executing. When <code>Module A</code> sets a rate that affects <code>Module B</code>, an edge is recorded automatically.
+- <strong>Pros:</strong> Maximum flexibility, drastically cleaner code, extremely "PyTorchy". No need to write boilerplate port definitions.
+- <strong>Cons:</strong> Harder to determine the strict direction of flow, graph tracing is implicit and can be fragile if users circumvent the standard API.</p>
+<h3 id="fail-fast-guardrails-vs-silent-bugs">Fail-Fast Guardrails vs. Silent Bugs</h3>
+<p>We strictly enforce a "Rule of Ownership." If a Controller tries to magically modify a Stockpile it doesn't own (e.g. <code>self.stockpile.ore_level.value = 5</code>), the <code>ExecutionContext</code> detects the cross-module mutation and throws a <code>RuntimeError</code>. 
+- <strong>Pros:</strong> Prevents users from silently destroying the physics of the simulation (e.g. creating matter out of nowhere). Forces communication through explicit rates and flows.
+- <strong>Cons:</strong> Requires discipline. Users cannot take hacky shortcuts.</p>
+<h3 id="ast-expression-tracing-vs-python-truthiness">AST Expression Tracing vs. Python Truthiness</h3>
+<p>Under the hood, operations like <code>level &gt; 200</code> return Abstract Syntax Trees (ASTs) rather than booleans. Attempting to use this in an <code>if</code> statement raises a <code>TypeError</code>.
+- <strong>Pros:</strong> Prevents the classic PyTorch/JAX trap of silent truthiness bugs. The engine can mathematically track conditions perfectly without the user writing complex math formulas. It also acts as the foundation for exporting the system to a JSON UI blueprint.
+- <strong>Cons:</strong> Users must explicitly use <code>.value</code> (e.g., <code>if level.value &gt; 200:</code>) for dynamic Python control flow, which can sometimes trip up beginners.</p>
+<h3 id="unification-of-logic-forward">Unification of Logic (<code>forward()</code>)</h3>
+<p>In previous designs, calculating rates and stepping state were separate. Now, all physical routing, state assignments, and mode transitions are unified under the <code>forward()</code> pass.
+- <strong>Pros:</strong> Eliminates boilerplate and closely mirrors PyTorch's architecture. 
+- <strong>Cons:</strong> Sometimes a module returns something, sometimes it doesn't. Can be mildly confusing to distinguish pure physical modules from controllers without looking at the code.</p>
+<h3 id="deterministic-monte-carlo">Deterministic Monte Carlo</h3>
+<p>The system is built to support parallel execution for Monte Carlo simulations. 
+- <strong>Pros:</strong> By passing localized Random Number Generators (RNGs) instead of using global random states, every simulation run is perfectly reproducible, enabling robust parallelization.
+- <strong>Cons:</strong> Requires explicit tracking and passing of RNG seeds, preventing the use of simple <code>import random</code> calls globally.</p>
+<hr />
+<h2 id="7-whats-next-roadmap">7. What's Next? (Roadmap)</h2>
+<p>We have big plans for the future of Mining-DRS:
+- <strong>Visual Interface:</strong> A web-based, Arena-style drag-and-drop UI where non-programmers can build physical flow networks visually, which automatically translates into Python code (and vice versa).
+- <strong>Compiler Optimization (<code>drs.compile</code>):</strong> Compiling the AST math operations down to raw bytecode to make large-scale Monte Carlo simulations even faster.
+- <strong>Parallel Monte Carlo:</strong> Out-of-the-box support for spinning up thousands of scenarios across multiple CPU cores.
+- <strong>Automated Mass Balance:</strong> Automatically calculating the flow balancing between multiple child stockpiles in complex supply chains without manual arithmetic.</p>
+<hr />
+<p><em>Enjoy building your simulations! If you hit an error, remember: it's a feature, not a bug—the system is protecting the laws of physics.</em></p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": ".", "features": [], "search": "assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

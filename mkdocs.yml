@@ -1,0 +1,40 @@
+site_name: Mining-DRS
+site_description: A dynamic simulation engine for mining operations.
+
+theme:
+  name: material
+  palette:
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            show_source: true
+            show_root_heading: true
+
+nav:
+  - Home: index.md
+  - Tutorial: tutorial.md
+  - API Reference:
+      - Engine: api/engine.md
+      - Module: api/module.md
+      - Variables: api/variables.md
+      - Flow & Telemetry: api/flow_telemetry.md
+  - Roadmap: roadmap.md
