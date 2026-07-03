@@ -7,9 +7,14 @@ from .flow import Flow
 
 
 class Module:
-    """
-    Base class for all DRS models and sub-components.
-    Automatically registers variables and sub-modules upon assignment.
+    """Base class for all DRS models and sub-components.
+
+    Modules are the fundamental building blocks of a simulation. They automatically
+    register any `Variable` or `Module` assigned as an attribute, mimicking the
+    behavior of PyTorch's `nn.Module`.
+
+    Attributes:
+        parent (Optional[Module]): The parent module that owns this module.
     """
 
     def __init__(self) -> None:
@@ -28,7 +33,21 @@ class Module:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """
         Execute the forward pass while managing the ExecutionContext.
-        Validates that inter-module communication only uses drs.Flow or drs.DataPoint.
+
+        This method acts as a wrapper around `forward()`. It pushes this module
+        onto the execution stack, validates that inter-module communication uses
+        only `drs.Flow` or `drs.DataPoint`, records dependency edges, and then
+        pops the execution stack.
+
+        Args:
+            *args: Positional arguments passed to `forward()`.
+            **kwargs: Keyword arguments passed to `forward()`.
+
+        Returns:
+            Any: The result of the `forward()` pass.
+
+        Raises:
+            RuntimeError: If invalid types are passed or returned.
         """
         caller = ExecutionContext.get_current()
         ExecutionContext.push(self)
@@ -109,7 +128,16 @@ class Module:
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """
         Define the physics and logic of the module.
-        Must be implemented by all subclasses.
+
+        This method must be implemented by all subclasses. It is called on every
+        time step to update rates and determine flows.
+
+        Args:
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
+
+        Returns:
+            Any: Typically a `drs.Flow`, `drs.DataPoint`, or a tuple of them.
         """
         raise NotImplementedError("Module subclasses must implement forward()")
 
@@ -142,7 +170,11 @@ class Module:
         super().__setattr__(name, value)
 
     def _record_incoming_edge(self, variable: Variable) -> None:
-        """Record that this module reads 'variable' (owned by another module)."""
+        """
+        [INTERNAL] Record that this module reads 'variable' (owned by another module).
+        
+        Power User Note: Automatically called by the ExecutionContext to build graphs.
+        """
         if variable._owner is not None and variable._owner is not self:
             key = (id(variable._owner), id(variable))
             if key not in self._dep_seen:
@@ -166,7 +198,12 @@ class Module:
                 self._data_dependencies.append(source_module)
 
     def variables(self) -> Iterator[Variable]:
-        """Recursively yield all variables without duplicates."""
+        """
+        Recursively yield all variables owned by this module and its sub-modules.
+
+        Returns:
+            Iterator[Variable]: An iterator over all unique variables in the hierarchy.
+        """
         seen = set()
 
         def _get_vars(module):
@@ -181,12 +218,25 @@ class Module:
         yield from _get_vars(self)
 
     def modules(self) -> Iterator["Module"]:
-        """Recursively yield this module and all nested modules."""
+        """
+        Recursively yield this module and all nested sub-modules.
+
+        Returns:
+            Iterator[Module]: An iterator over the module hierarchy.
+        """
         for _, module in self.named_modules():
             yield module
 
     def named_modules(self, prefix: str = "") -> Iterator[tuple[str, "Module"]]:
-        """Recursively yield ``(path, module)`` pairs using PyTorch-style names."""
+        """
+        Recursively yield `(path, module)` pairs using PyTorch-style names.
+
+        Args:
+            prefix (str): The prefix to prepend to the paths.
+
+        Returns:
+            Iterator[tuple[str, Module]]: An iterator of `(path, module)` tuples.
+        """
         seen = set()
 
         def _get_modules(module, module_prefix):
@@ -203,7 +253,9 @@ class Module:
         yield from _get_modules(self, prefix)
 
     def _zero_rates(self) -> None:
-        """Zero out rates and remove thresholds for all Levels before the next rate update."""
+        """
+        [INTERNAL] Zero out rates and remove thresholds for all Levels before the next rate update.
+        """
         for var in self.variables():
             if isinstance(var, Level):
                 var._rate = 0.0
@@ -211,11 +263,20 @@ class Module:
                 var.lower_threshold = -math.inf
 
     def initialize_state(self) -> None:
-        """Override this to set up initial state before the simulation starts."""
+        """
+        Override this to set up initial state before the simulation starts.
+        
+        This is called once by the engine before the first time step.
+        """
         pass
 
     def is_terminating_condition_met(self) -> bool:
-        """Override this to define custom stopping conditions."""
+        """
+        Override this to define custom stopping conditions.
+
+        Returns:
+            bool: True if the simulation should stop, False otherwise.
+        """
         return False
 
     def register_post_step_hook(self, hook_fn: Any) -> None:
@@ -228,8 +289,13 @@ class Module:
             hook(current_time)
 
     def get_dependency_graph(self) -> list:
-        """Return all recorded read dependencies from this module and all sub-modules
-        as (source_module, variable) pairs."""
+        """
+        Get all recorded read dependencies from this module and all sub-modules.
+
+        Returns:
+            list[tuple[Module, Variable]]: A list of `(source_module, variable)` pairs
+                representing cross-module reads.
+        """
         result = []
         for mod in self.modules():
             result.extend(mod._dependencies)

@@ -20,7 +20,15 @@ from ._execution_context import ExecutionContext
 
 
 class Variable:
-    """Base class for all domain variables."""
+    """Base class for all domain variables.
+
+    Variables hold named state and belong to a specific `Module` owner. They ensure
+    that state is tracked properly through the execution context and prevent
+    cross-module mutation.
+
+    Attributes:
+        name (str): The unique name of the variable.
+    """
 
     def __init__(self, name: str, initial_value: Any = 0.0) -> None:
         """
@@ -36,19 +44,41 @@ class Variable:
 
 
     def _record_read_dependency(self) -> None:
+        """
+        [INTERNAL] Record that the current executing module has read this variable.
+
+        Power User Note: This is called automatically by the `value` getter. It
+        interfaces with the ExecutionContext to build the dependency graph.
+        """
         current = ExecutionContext.get_current()
         if current is not None and current is not self._owner:
             current._record_incoming_edge(self)
 
     @property
     def value(self) -> Any:
-        """Get the current value of the variable. Reading this automatically records a dependency edge."""
+        """
+        Get the current value of the variable. 
+        
+        Reading this automatically records a dependency edge in the execution context,
+        linking the module that read it to the module that owns it.
+
+        Returns:
+            Any: The underlying value of the variable.
+        """
         self._record_read_dependency()
         return self._value
 
     @value.setter
     def value(self, val: Any) -> None:
-        """Set the value of the variable. Fails fast if mutated by a non-owner module."""
+        """
+        Set the value of the variable.
+
+        Args:
+            val (Any): The new value to set.
+
+        Raises:
+            RuntimeError: If a module attempts to mutate a variable it does not own.
+        """
         current = ExecutionContext.get_current()
         if current is not None and current is not self._owner:
             raise RuntimeError(
@@ -79,7 +109,16 @@ class Variable:
 
 
 class Level(Variable):
-    """A variable that accumulates over time based on a rate."""
+    """A variable that accumulates over time based on a rate.
+
+    Levels are the primary way to model physical quantities that flow or change
+    continuously over time (e.g., mass in a stockpile, energy in a battery).
+
+    Attributes:
+        upper_threshold (float): The maximum limit for the level. The engine will
+            stop exactly at this boundary. Defaults to math.inf.
+        lower_threshold (float): The minimum limit for the level. Defaults to -math.inf.
+    """
 
     # TODO: Add a floating-point comparison utility to Level (e.g. is_above(threshold, eps)).
     # The proper long-term solution would use an AST-based approach (similar to the Expression
@@ -105,7 +144,12 @@ class Level(Variable):
 
     @property
     def rate(self) -> float:
-        """Get the current rate of change."""
+        """
+        Get the current rate of change.
+        
+        Returns:
+            float: The rate at which the level is currently accumulating per time unit.
+        """
         self._record_read_dependency()
         return self._rate
 
@@ -113,7 +157,13 @@ class Level(Variable):
     def rate(self, val: Any) -> None:
         """
         Set the rate of change. 
-        Can accept a single float, or a tuple of (rate, lower_threshold, upper_threshold).
+        
+        Args:
+            val (Any): Can be a single float representing the new rate, or a tuple 
+                of `(rate, lower_threshold, upper_threshold)`.
+                
+        Raises:
+            ValueError: If a tuple is provided but it does not have exactly 3 elements.
         """
         current_actor = ExecutionContext.get_current()
         if current_actor is not None and current_actor is not self._owner:
@@ -129,11 +179,23 @@ class Level(Variable):
             self._rate = val
 
     def _update(self, dt: float) -> None:
+        """
+        [INTERNAL] Step the level forward in time based on its current rate.
+
+        Power User Note: This is called automatically by the DRSEngine. Do not call this
+        manually unless you are implementing a custom time-stepping loop.
+
+        Args:
+            dt (float): The amount of time to simulate.
+        """
         self.value += self.rate * dt
 
 
 class Timer(Level):
-    """A specialized level used to track time, typically with a rate of 1.0 or -1.0."""
+    """A specialized level used to track time.
+    
+    Timers are simply Levels that accumulate at a default rate of 1.0 (or -1.0 for countdowns).
+    """
 
     def __init__(self, name: str, initial_value: float = 0.0, rate: float = 1.0) -> None:
         """
@@ -147,5 +209,9 @@ class Timer(Level):
         super().__init__(name, initial_value, rate)
 
     def reset(self) -> None:
-        """Reset the timer value back to 0.0."""
+        """
+        Reset the timer value back to 0.0.
+        
+        This sets the absolute value of the timer to 0, but does not modify the rate.
+        """
         self.value = 0.0

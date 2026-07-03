@@ -7,10 +7,17 @@ from ._execution_context import ExecutionContext
 
 
 class DRSEngine:
-    """
-    The runner that manages the external simulation loop.
-    It takes a DRS module, steps time forward to the next threshold,
-    and asks the module to process transitions.
+    """The runner that manages the external simulation loop.
+
+    The DRSEngine drives the simulation forward. It evaluates the model to
+    determine rates and thresholds, calculates the time until the next event,
+    and advances the system state to that precise moment in time.
+
+    Attributes:
+        model (Module): The root module of the simulation.
+        current_time (float): The current simulation time.
+        max_step_size (float): The maximum allowed time step (dt).
+        max_deadlock_steps (int): The maximum consecutive zero-time steps allowed.
     """
 
     def __init__(
@@ -21,11 +28,13 @@ class DRSEngine:
     ) -> None:
         """
         Initialize the DRS Engine.
-        
+
         Args:
-            model: The root Module of your simulation.
-            max_step_size: The maximum time delta (dt) the engine is allowed to take in a single step.
-            max_deadlock_steps: The maximum consecutive zero-time steps allowed before raising an error.
+            model (Module): The root Module of your simulation.
+            max_step_size (float): The maximum time delta (dt) the engine is allowed 
+                to take in a single step (default: 0.5).
+            max_deadlock_steps (int): The maximum consecutive zero-time steps allowed 
+                before raising a deadlock error (default: 20).
         """
         self.model = model
         self.current_time = 0.0
@@ -34,7 +43,22 @@ class DRSEngine:
         self._orphaned_warned_ids = set()
 
     def run(self, max_time: Optional[float] = None) -> None:
-        """The main simulation loop."""
+        """
+        Execute the main simulation loop.
+
+        The loop repeatedly zeros rates, calls the model's `forward()` pass to
+        evaluate states, calculates the time until the next threshold is hit
+        (`dt`), and integrates all variables forward by `dt`.
+
+        Args:
+            max_time (Optional[float]): The maximum simulation time to run until. 
+                If None, the engine runs until a custom terminating condition is met.
+
+        Raises:
+            RuntimeError: If the engine encounters a deadlock (too many consecutive
+                zero-time steps).
+            ValueError: If the calculated time delta (`dt`) is negative.
+        """
 
         ExecutionContext.push(self.model)
         self.model.initialize_state()
@@ -95,7 +119,13 @@ class DRSEngine:
         self.model._run_post_step_hooks(self.current_time)
 
     def _check_orphaned_thresholds(self, variables: list[Variable]) -> None:
-        """Warn once per variable about thresholds set but rate=0."""
+        """
+        [INTERNAL] Warn once per variable about thresholds set but rate=0.
+        
+        Power User Note: This helps catch logic bugs where a state transition 
+        threshold is set but the state is not actually changing, meaning the 
+        event will never fire.
+        """
         for var in variables:
             if not isinstance(var, Level):
                 continue
@@ -120,8 +150,19 @@ class DRSEngine:
         self, variables: list[Variable]
     ) -> Tuple[float, Optional[Variable], bool]:
         """
-        Determine the time step (dt) to the next event/threshold.
-        Returns a tuple of (min_dt, trigger_var, is_upper).
+        [INTERNAL] Determine the time step (dt) to the next event/threshold.
+        
+        Power User Note: Evaluates all variables in the system to find the 
+        closest future threshold hit based on current rates.
+
+        Args:
+            variables (list[Variable]): A list of all variables in the system.
+
+        Returns:
+            Tuple[float, Optional[Variable], bool]: 
+                - min_dt: The time until the next event.
+                - trigger_var: The variable that will hit its threshold.
+                - is_upper: True if hitting upper_threshold, False if lower_threshold.
         """
         min_dt = math.inf
         trigger_var = None

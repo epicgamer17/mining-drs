@@ -4,17 +4,28 @@ from .module import Module
 
 
 class Telemetry:
-    """
-    Automates the recording of all simulation variables over time.
+    """Automates the recording of all simulation variables over time.
+    
     Provides methods to export the recorded history into analysis-ready formats.
 
-    NOTE: this is probably what we should be using to "make" our observations. The telemetry data or sensor data in a way. For MDP just track all variables. For POMDP only some of them.
+    NOTE: this is probably what we should be using to "make" our observations. 
+    The telemetry data or sensor data in a way. For MDP just track all variables. 
+    For POMDP only some of them.
+    
+    Attributes:
+        model (Module): The root module being tracked.
+        history (list[dict]): The recorded history of states.
+        tracked_vars (list[str]): The names of variables being tracked.
+        derived_metrics (Dict[str, Callable]): Custom metrics calculated at each step.
     """
 
     def __init__(self, model):
         """
         Initializes the telemetry system attached to a specific model.
-        The model is expected to provide a `variables()` method (an iterator of Variable objects).
+        
+        Args:
+            model (Module): The root Module of your simulation. The model is 
+                expected to provide a `variables()` method yielding Variable objects.
         """
         self.model = model
         self.history = []
@@ -26,17 +37,23 @@ class Telemetry:
     def register_metric(
         self, name: str, calc_fn: Callable[[float, Module, dict, list], float]
     ):
-        """Register a custom metric. For things like NPV
+        """Register a custom metric calculated dynamically at each time step.
+        
+        Useful for tracking derived metrics like NPV, utilization, or efficiency.
 
         Args:
             name (str): The name of the metric.
-            calc_fn (Callable): The metric function. Signature: calc_fn(current_time, model, state, history) -> metric_value
+            calc_fn (Callable): The metric function. 
+                Signature: `calc_fn(current_time, model, state, history) -> float`
         """
         self.derived_metrics[name] = calc_fn
 
     def snapshot(self, current_time: float):
         """
         Called automatically at the end of every simulation tick to record the state.
+
+        Args:
+            current_time (float): The current simulation time.
         """
         state = {"time": current_time}
 
@@ -51,6 +68,10 @@ class Telemetry:
 
     def to_dataframe(self):
         """
-        Converts the entire simulation history into a Pandas DataFrame for plotting/analysis.
+        Converts the entire simulation history into a Pandas DataFrame.
+        
+        Returns:
+            pd.DataFrame: A DataFrame where each row is a time step and columns 
+                are tracked variables and derived metrics.
         """
         return pd.DataFrame(self.history)

@@ -28,6 +28,10 @@ plugins:
           options:
             show_source: true
             show_root_heading: true
+            merge_init_into_class: true
+            filters:
+              - "!^__(?!init|call|iter|next)" # Exclude magic methods EXCEPT init, call, iter, next
+              # By not excluding single `_`, internal methods with docstrings will now render.
 
 nav:
   - Home: index.md

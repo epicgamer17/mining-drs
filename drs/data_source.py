@@ -15,12 +15,19 @@ class DataPoint:
     Fields are accessed as attributes. Any keyword argument passed to
     ``__init__`` is stored and accessible via ``.name``::
 
-        point = DataPoint(mass=40000.0, grade=30.0)
-        point.mass    # → 40000.0
-        point.grade   # → 30.0
+        point = DataPoint(weight=40000.0, priority=1)
+        point.weight    # → 40000.0
+        point.priority  # → 1
     """
 
     def __init__(self, **kwargs):
+        """
+        Initialize a new DataPoint with arbitrary attributes.
+
+        Args:
+            **kwargs: Arbitrary keyword arguments that will be stored and exposed 
+                as attributes on the DataPoint instance.
+        """
         self._data = dict(kwargs)
         self._source = None
 
