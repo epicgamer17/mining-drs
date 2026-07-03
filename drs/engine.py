@@ -140,7 +140,7 @@ class DRSEngine:
         """
         self.telemetry = telemetry
 
-    def run(self, max_time: Optional[float] = None) -> SimulationResult:
+    def run(self, max_time: float) -> SimulationResult:
         """
         Execute the main simulation loop.
 
@@ -149,8 +149,7 @@ class DRSEngine:
         (`dt`), and integrates all variables forward by `dt`.
 
         Args:
-            max_time (Optional[float]): The maximum simulation time to run until.
-                If None, the engine runs until a custom terminating condition is met.
+            max_time (float): The maximum simulation time to run until.
 
         Raises:
             RuntimeError: If the engine encounters a deadlock (too many consecutive
@@ -179,7 +178,7 @@ class DRSEngine:
             for cb in self.callbacks:
                 cb.on_step_start(self)
 
-            if max_time is not None and self.current_time >= max_time:
+            if self.current_time >= max_time:
                 termination_reason = "max_time_reached"
                 break
 
@@ -208,7 +207,7 @@ class DRSEngine:
             
         return result
 
-    def _step(self, max_time: Optional[float] = None) -> None:
+    def _step(self, max_time: float) -> None:
         """
         [INTERNAL] Perform a single tick of the engine.
         
@@ -233,9 +232,7 @@ class DRSEngine:
                 cb.on_threshold(self, trigger_var, is_upper)
 
         dt = min(dt, self.max_step_size)
-
-        if max_time is not None:
-            dt = min(dt, max_time - self.current_time)
+        dt = min(dt, max_time - self.current_time)
 
         if dt == 0.0:
             self._consecutive_zero_dt_count += 1

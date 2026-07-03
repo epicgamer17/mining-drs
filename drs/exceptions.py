@@ -7,7 +7,16 @@ class DRSError(Exception):
 class StateMutationError(DRSError):
     """Raised when a module attempts to illegally mutate state."""
 
-    pass
+    def __init__(self, message: str):
+        # Capture the call stack from ExecutionContext
+        from ._execution_context import ExecutionContext
+        stack = getattr(ExecutionContext._local, "stack", [])
+        if stack:
+            stack_str = " -> ".join([type(mod).__name__ for mod in stack])
+            self.message = f"{message}\n\nModule Call Stack:\n{stack_str}"
+        else:
+            self.message = message
+        super().__init__(self.message)
 
 
 class DeadlockError(DRSError):

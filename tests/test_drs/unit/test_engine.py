@@ -30,7 +30,7 @@ class CountingModule(Module):
 def test_engine_execution_order():
     model = CountingModule(target_ticks=1)
     engine = DRSEngine(model, max_step_size=10.0)
-    engine.run()
+    engine.run(max_time=100.0)
 
     assert model.log == ["init", "forward"]
     assert engine.current_time == 1.0
@@ -39,7 +39,7 @@ def test_engine_execution_order():
 def test_engine_multiple_ticks():
     model = CountingModule(target_ticks=3)
     engine = DRSEngine(model, max_step_size=10.0)
-    engine.run()
+    engine.run(max_time=100.0)
 
     assert engine.current_time == 3.0
     assert model.tick_count == 3
@@ -54,4 +54,4 @@ def test_engine_negative_dt_raises_error():
     engine._calculate_min_dt = lambda variables: (-1.0, None, True)
 
     with pytest.raises(ValueError, match="Time delta \\(dt\\) cannot be negative."):
-        engine.run()
+        engine.run(max_time=100.0)

@@ -659,3 +659,157 @@ def plot_structural_vs_operational_by_mode(df, time_col="time", mode_col="active
         fig.tight_layout()
         return fig
     return ax
+
+
+def plot_mode_distribution(
+    df,
+    mode_col="current_mode",
+    time_col="time",
+    title="Mode Distribution (% Time)",
+    ax=None,
+    palette=None,
+    verbose=True,
+):
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        own_ax = True
+    else:
+        own_ax = False
+
+    if mode_col not in df.columns or time_col not in df.columns:
+        if own_ax:
+            return fig
+        return ax
+
+    df_sorted = df.copy()
+    df_sorted["dt"] = df_sorted[time_col].diff().shift(-1).fillna(0)
+
+    df_sorted["mode_str"] = df_sorted[mode_col].apply(
+        lambda x: getattr(x, "name", str(x))
+    )
+
+    durations = df_sorted.groupby("mode_str")["dt"].sum()
+    total_time = durations.sum()
+
+    if total_time > 0:
+        percentages = (durations / total_time) * 100
+    else:
+        percentages = durations * 0
+
+    percentages = percentages.sort_values(ascending=True)
+
+    if verbose:
+        print(f"\n--- {title} ---")
+        for mode, pct in percentages.items():
+            print(f"{mode}: {pct:.1f}%")
+        print("-" * (8 + len(title)))
+
+    import matplotlib
+
+    cmap = matplotlib.colormaps["tab10"]
+    palette = palette or {}
+
+    colors = []
+    for mode in percentages.index:
+        mode_name = getattr(mode, "name", str(mode))
+        mode_str = str(mode).split(".")[-1].upper()
+        if mode_name in palette:
+            colors.append(palette[mode_name])
+        elif mode_str in palette:
+            colors.append(palette[mode_str])
+        else:
+            idx = sum(ord(c) for c in str(mode)) % 10
+            colors.append(cmap(idx))
+
+    bars = ax.barh(
+        percentages.index.astype(str), percentages.values, color=colors, alpha=0.8
+    )
+
+    for bar in bars:
+        width = bar.get_width()
+        ax.text(
+            width + 0.5,
+            bar.get_y() + bar.get_height() / 2,
+            f"{width:.1f}%",
+            va="center",
+            ha="left",
+            fontsize=10,
+            fontweight="bold",
+        )
+
+    ax.set_title(title, fontsize=14, pad=15)
+    ax.set_xlabel("% of Total Simulation Time", fontsize=12)
+    ax.set_xlim(0, max(100, percentages.max() + 10))
+    ax.grid(axis="x", linestyle="--", alpha=0.7)
+
+    if own_ax:
+        fig.tight_layout()
+        return fig
+    return ax
+
+
+def plot_mode_dwell_times(
+    df,
+    time_col="time",
+    mode_col="current_mode",
+    title="Mode Stability (Dwell Times)",
+    ax=None,
+    verbose=True,
+):
+    df = df.copy()
+    df[mode_col] = df[mode_col].astype(str)
+
+    blocks = (df[mode_col] != df[mode_col].shift(1)).cumsum().rename("block")
+
+    df["dt"] = df[time_col].diff().shift(-1).fillna(0)
+
+    durations = df.groupby([blocks, mode_col])["dt"].sum().reset_index()
+    durations.columns = ["block", "mode", "duration"]
+
+    durations = durations[durations["duration"] > 0.01]
+
+    if verbose:
+        print(f"\n--- {title} ---")
+        dwell_summary = durations.groupby("mode")["duration"].agg(
+            ["count", "mean", "median", "max"]
+        )
+        print(dwell_summary.round(2).to_string())
+        print("-" * (8 + len(title)))
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        own_ax = True
+    else:
+        own_ax = False
+
+    sns.boxplot(
+        data=durations,
+        x="duration",
+        y="mode",
+        ax=ax,
+        palette="Set2",
+        hue="mode",
+        legend=False,
+    )
+    sns.stripplot(
+        data=durations, x="duration", y="mode", color="black", alpha=0.4, size=4, ax=ax
+    )
+
+    ax.set_title(title, fontsize=14, pad=15)
+    ax.set_xlabel("Duration Before Switch (Days)", fontsize=12)
+    ax.set_ylabel("")
+
+    ax.axvline(
+        x=2.0,
+        color="red",
+        linestyle="--",
+        alpha=0.5,
+        label="Chattering Threshold (<2 days)",
+    )
+    ax.legend(loc="lower right")
+
+    if own_ax:
+        fig = ax.figure
+        fig.tight_layout()
+        return fig
+    return ax

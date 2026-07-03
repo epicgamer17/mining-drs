@@ -17,9 +17,7 @@ class DRSConfig:
 class EngineConfig(DRSConfig):
     """Configuration for the DRS Engine."""
 
-    max_step_size: float = (
-        0.5  # TODO: this seems really low? i dont think we want this.
-    )
+    max_step_size: float = float("inf")
     max_deadlock_steps: int = 20
     max_time: float = None
     strict_mode: bool = False
