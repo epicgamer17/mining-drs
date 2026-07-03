@@ -24,7 +24,11 @@ def export_architecture(model: Module, filepath: str) -> None:
 
 
 def _serialize_val(val: Any) -> Any:
-    """Helper to convert floats that are infinity or NaN to string representations."""
+    """
+    [INTERNAL] Convert floats that are infinity or NaN to string representations.
+
+    Power User Note: Used to ensure valid JSON representation of float limits in checkpoints.
+    """
     if isinstance(val, float):
         if math.isinf(val):
             return "Infinity" if val > 0 else "-Infinity"
@@ -34,7 +38,11 @@ def _serialize_val(val: Any) -> Any:
 
 
 def _deserialize_val(val: Any) -> Any:
-    """Helper to convert string-represented infinities and NaNs back to float."""
+    """
+    [INTERNAL] Convert string-represented infinities and NaNs back to float.
+
+    Power User Note: Used to restore float limits when loading checkpoints.
+    """
     if val == "Infinity":
         return math.inf
     elif val == "-Infinity":
@@ -45,7 +53,11 @@ def _deserialize_val(val: Any) -> Any:
 
 
 def _serialize_module_structure(model: Module) -> dict[str, Any]:
-    """Helper to recursively build a structural representation of modules and hooks."""
+    """
+    [INTERNAL] Recursively build a structural representation of modules and hooks.
+
+    Power User Note: Used during checkpointing to validate schema structure on resume.
+    """
     def _build_struct(mod):
         serialized_hooks = []
         for hook in mod._post_step_hooks:
@@ -89,7 +101,11 @@ def _serialize_module_structure(model: Module) -> dict[str, Any]:
 
 
 def _validate_structure(current: dict[str, Any], saved: dict[str, Any], path: str = "") -> None:
-    """Helper to ensure the module class and variable structure matches the checkpoint."""
+    """
+    [INTERNAL] Ensure the module class and variable structure matches the checkpoint.
+
+    Power User Note: Validates compatibility before restoring a saved state/checkpoint.
+    """
     if current.get("class") != saved.get("class"):
         raise ValueError(
             f"Structural mismatch at '{path or 'root'}': class names do not match. "
@@ -115,7 +131,11 @@ def _validate_structure(current: dict[str, Any], saved: dict[str, Any], path: st
 
 
 def _restore_module_attributes(mod: Module, saved_struct: dict[str, Any]) -> None:
-    """Helper to recursively restore saved custom module primitive attributes."""
+    """
+    [INTERNAL] Recursively restore saved custom module primitive attributes.
+
+    Power User Note: Restores non-Variable instance fields from checkpoint structure.
+    """
     saved_attrs = saved_struct.get("attributes", {})
     for k, v in saved_attrs.items():
         setattr(mod, k, v)

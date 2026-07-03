@@ -2,13 +2,30 @@ import os
 import urllib.request
 import urllib.error
 
-def _node_id(path):
+def _node_id(path: str) -> str:
+    """
+    [INTERNAL] Convert a dotted module path to a valid Mermaid node ID.
+
+    Power User Note: Replaces dots with underscores (e.g., 'submodule.fleet' to 'submodule_fleet').
+    """
     return "root" if not path else path.replace(".", "_")
 
-def _node_label(path, mod):
+
+def _node_label(path: str, mod) -> str:
+    """
+    [INTERNAL] Determine the visual label to display for a module node.
+
+    Power User Note: Uses the class name if at root, or the final module name segment.
+    """
     return path.split(".")[-1] if path else type(mod).__name__
 
+
 def _generate_mermaid(model, show_vars=False) -> str:
+    """
+    [INTERNAL] Generate the raw Mermaid flowchart code representing the model architecture.
+
+    Power User Note: Traverses the module tree and builds parent/child subgraphs and dependency edges.
+    """
     lines = []
     lines.append("flowchart TD")
 
@@ -30,6 +47,9 @@ def _generate_mermaid(model, show_vars=False) -> str:
     rendered_mods = set()
 
     def _render_children(parent_mod_id, depth=0):
+        """
+        [INTERNAL] Recursively render children subgraphs and leaf nodes.
+        """
         prefix = "    " * depth
         for child_id in tree.get(parent_mod_id, []):
             if child_id in rendered_mods:

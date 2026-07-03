@@ -187,7 +187,11 @@ class Module:
                 self._dependencies.append((variable._owner, variable))
 
     def _record_flow_edge(self, source_module: "Module") -> None:
-        """Record that this module received a Flow from source_module."""
+        """
+        [INTERNAL] Record that this module received a Flow from source_module.
+
+        Power User Note: Automatically called by the ExecutionContext to build flow graphs.
+        """
         if source_module is not None and source_module is not self:
             key = id(source_module)
             if key not in self._flow_dep_seen:
@@ -195,7 +199,11 @@ class Module:
                 self._flow_dependencies.append(source_module)
 
     def _record_data_edge(self, source_module: "Module") -> None:
-        """Record that this module received a DataPoint from source_module."""
+        """
+        [INTERNAL] Record that this module received a DataPoint from source_module.
+
+        Power User Note: Automatically called by the ExecutionContext to build data graphs.
+        """
         if source_module is not None and source_module is not self:
             key = id(source_module)
             if key not in self._data_dep_seen:
@@ -345,7 +353,11 @@ class Module:
         self._post_step_hooks.append(hook_fn)
 
     def _run_post_step_hooks(self, current_time: float) -> None:
-        """Called by the engine after dt is integrated."""
+        """
+        [INTERNAL] Execute all registered post-step callback functions.
+
+        Power User Note: Called automatically by the DRSEngine after time integration.
+        """
         for hook in self._post_step_hooks:
             hook(current_time)
 
