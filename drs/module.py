@@ -1,5 +1,5 @@
 import math
-from typing import Iterator, Any
+from typing import Iterator, Any, Optional
 from .variables import Variable, Level, Timer
 from ._execution_context import ExecutionContext
 from .data_source import DataPoint
@@ -333,22 +333,81 @@ class Module:
                     f"Key '{key}' found in state_dict but not in module hierarchy."
                 )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, root: Optional["Module"] = None) -> dict[str, Any]:
         """
         Returns a structural JSON-serializable representation of the module architecture.
         """
+        import math
+        from .variables import Level, Expression
+
+        if root is None:
+            root = self
+
+        def _to_dict_serialize_val(val: Any) -> Any:
+            if isinstance(val, Expression):
+                return {"equation": val.get_equation()}
+            if isinstance(val, float):
+                if math.isinf(val):
+                    return "Infinity" if val > 0 else "-Infinity"
+                elif math.isnan(val):
+                    return "NaN"
+            return val
+
+        def get_module_path(rt: Module, target: Module) -> str:
+            if target is rt:
+                return ""
+            for path, mod in rt.named_modules():
+                if mod is target:
+                    return path
+            return getattr(target, "name", type(target).__name__)
+
         children = {}
         for name, mod in self._modules.items():
-            children[name] = mod.to_dict()
+            children[name] = mod.to_dict(root)
 
         variables = {}
         for name, var in self._variables.items():
-            variables[name] = type(var).__name__
+            var_info = {
+                "class": type(var).__name__,
+                "value": _to_dict_serialize_val(var._value)
+            }
+            if isinstance(var, Level):
+                var_info["rate"] = _to_dict_serialize_val(var._rate)
+                var_info["lower_threshold"] = _to_dict_serialize_val(var.lower_threshold)
+                var_info["upper_threshold"] = _to_dict_serialize_val(var.upper_threshold)
+            variables[name] = var_info
+
+        layout = getattr(self, "layout", getattr(self, "metadata", {}))
+        if not isinstance(layout, dict):
+            layout = {"value": str(layout)}
+
+        flow_inputs = []
+        for src in self._flow_dependencies:
+            flow_inputs.append(get_module_path(root, src))
+
+        data_inputs = []
+        for src in self._data_dependencies:
+            data_inputs.append(get_module_path(root, src))
+
+        variable_reads = []
+        for src_mod, var in self._dependencies:
+            variable_reads.append({
+                "module": get_module_path(root, src_mod),
+                "variable": var.name
+            })
+
+        connections = {
+            "flow_inputs": flow_inputs,
+            "data_inputs": data_inputs,
+            "variable_reads": variable_reads
+        }
 
         return {
             "class": type(self).__name__,
-            "children": children,
+            "layout": layout,
             "variables": variables,
+            "children": children,
+            "connections": connections
         }
 
     def register_post_step_hook(self, hook_fn: Any) -> None:

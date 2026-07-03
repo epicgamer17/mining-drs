@@ -24,6 +24,24 @@ class ExecutionContext:
         cls._local.stack.append(module)
 
     @classmethod
+    def set_tracing(cls, enabled: bool = True):
+        """
+        [INTERNAL] Toggle symbolic tracing mode.
+
+        Power User Note: Enables AST expression recording instead of eager evaluation.
+        """
+        cls._local.tracing = enabled
+
+    @classmethod
+    def is_tracing(cls) -> bool:
+        """
+        [INTERNAL] Check if symbolic tracing mode is active.
+
+        Power User Note: Used by Variable to decide whether to return expressions.
+        """
+        return getattr(cls._local, "tracing", False)
+
+    @classmethod
     def pop(cls):
         """
         [INTERNAL] Pop the top module from the execution stack.

@@ -1,7 +1,7 @@
 import json
 import math
 import random
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from .module import Module
 
 def save_state(model: Module, filepath: str) -> None:
@@ -21,6 +21,147 @@ def export_architecture(model: Module, filepath: str) -> None:
     arch = model.to_dict()
     with open(filepath, 'w') as f:
         json.dump(arch, f, indent=2)
+
+
+def validate_canvas_json(canvas_data: Union[dict, list], model: Module) -> None:
+    """Validate that incoming canvas JSON arrays or dictionaries perfectly match
+    the properties, variable boundaries, and hierarchies expected by the backend modules.
+    
+    Raises:
+        ValueError: If there is a structural/hierarchy mismatch or boundary violation.
+    """
+    if isinstance(canvas_data, list):
+        # Convert flat canvas array of nodes to a hierarchical dictionary
+        json_tree = _flat_canvas_to_tree(canvas_data)
+    elif isinstance(canvas_data, dict):
+        json_tree = canvas_data
+    else:
+        raise ValueError("canvas_data must be a dictionary or a list of dictionaries.")
+        
+    _validate_tree_structure(json_tree, model)
+
+
+def _flat_canvas_to_tree(flat_list: list[dict[str, Any]]) -> dict[str, Any]:
+    # Group by path/id
+    nodes_by_path = {}
+    for node in flat_list:
+        path = node.get("path", node.get("id"))
+        if path is None:
+            raise ValueError("Canvas JSON array elements must have a 'path' or 'id' property.")
+        # If ID is "root" or similar, map to empty string for consistency
+        if path == "root":
+            path = ""
+        nodes_by_path[path] = node
+        
+    # Reconstruct tree starting from sorted paths by segment depth
+    sorted_paths = sorted(nodes_by_path.keys(), key=lambda p: len(p.split('.')) if p else 0)
+    
+    tree = {}
+    if "" not in nodes_by_path:
+        raise ValueError("Flat canvas list must include a root node with path/id equal to '' or 'root'.")
+        
+    for path in sorted_paths:
+        node = nodes_by_path[path]
+        node_copy = {
+            "class": node.get("class"),
+            "layout": node.get("layout", {}),
+            "variables": node.get("variables", {}),
+            "children": {},
+            "connections": node.get("connections", {})
+        }
+        
+        if not path:
+            tree = node_copy
+        else:
+            parts = path.split('.')
+            parent_parts = parts[:-1]
+            child_name = parts[-1]
+            
+            parent_node = tree
+            for part in parent_parts:
+                if "children" not in parent_node:
+                    parent_node["children"] = {}
+                if part not in parent_node["children"]:
+                    parent_node["children"][part] = {}
+                parent_node = parent_node["children"][part]
+                
+            if "children" not in parent_node:
+                parent_node["children"] = {}
+            parent_node["children"][child_name] = node_copy
+            
+    return tree
+
+
+def _validate_tree_structure(json_node: dict, current_mod: Module, path: str = "") -> None:
+    # 1. Validate class
+    expected_class = type(current_mod).__name__
+    actual_class = json_node.get("class")
+    if not actual_class:
+        raise ValueError(f"Missing 'class' field at path '{path or 'root'}'.")
+    if actual_class != expected_class:
+        raise ValueError(
+            f"Structural mismatch at '{path or 'root'}': class names do not match. "
+            f"Expected: {expected_class}, Got: {actual_class}"
+        )
+        
+    # 2. Validate variables
+    json_vars = json_node.get("variables", {})
+    for var_name, var in current_mod._variables.items():
+        if var_name not in json_vars:
+            raise ValueError(
+                f"Structural mismatch at '{path or 'root'}': expected variable '{var_name}' is missing."
+            )
+        var_data = json_vars[var_name]
+        if isinstance(var_data, str):
+            # Simple type check matching standard _validate_structure
+            if var_data != type(var).__name__:
+                raise ValueError(
+                    f"Variable type mismatch at '{path or 'root'}.{var_name}': "
+                    f"Expected: {type(var).__name__}, Got: {var_data}"
+                )
+        elif isinstance(var_data, dict):
+            # Detailed verification
+            var_class = var_data.get("class", var_data.get("type"))
+            if var_class and var_class != type(var).__name__:
+                raise ValueError(
+                    f"Variable type mismatch at '{path or 'root'}.{var_name}': "
+                    f"Expected: {type(var).__name__}, Got: {var_class}"
+                )
+            
+            # Validate boundary/thresholds
+            val = var_data.get("value", var_data.get("initial_value"))
+            if val is not None and not isinstance(val, dict):  # skip equation dicts
+                lower = var_data.get("lower_threshold", getattr(var, "lower_threshold", -math.inf))
+                upper = var_data.get("upper_threshold", getattr(var, "upper_threshold", math.inf))
+                
+                if isinstance(lower, str):
+                    lower = _deserialize_val(lower)
+                if isinstance(upper, str):
+                    upper = _deserialize_val(upper)
+                if isinstance(val, str):
+                    val = _deserialize_val(val)
+                    
+                if isinstance(val, (int, float)) and isinstance(lower, (int, float)) and isinstance(upper, (int, float)):
+                    if val < lower or val > upper:
+                        raise ValueError(
+                            f"Boundary violation for variable '{var_name}' at path '{path or 'root'}': "
+                            f"value {val} is outside boundaries [{lower}, {upper}]."
+                        )
+                        
+    # 3. Validate children
+    curr_children = set(current_mod._modules.keys())
+    json_children = json_node.get("children", {})
+    if not isinstance(json_children, dict):
+        raise ValueError(f"Field 'children' must be a dictionary at path '{path or 'root'}'.")
+    
+    # Check that all expected child modules exist in JSON
+    for child_name in curr_children:
+        if child_name not in json_children:
+            raise ValueError(
+                f"Structural mismatch at '{path or 'root'}': expected submodule '{child_name}' is missing."
+            )
+        sub_path = f"{path}.{child_name}" if path else child_name
+        _validate_tree_structure(json_children[child_name], current_mod._modules[child_name], sub_path)
 
 
 def _serialize_val(val: Any) -> Any:
