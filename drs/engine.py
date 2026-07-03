@@ -135,6 +135,8 @@ class DRSEngine:
         self.strict_mode = self.config.strict_mode
         self._orphaned_warned_ids = set()
         self.telemetry = None
+        self.step_count = 0
+        self._resuming = False
 
     def attach_telemetry(self, telemetry: Any) -> None:
         """
@@ -143,6 +145,16 @@ class DRSEngine:
         The engine will automatically trigger snapshots at the end of every time step.
         """
         self.telemetry = telemetry
+
+    def save_checkpoint(self, filepath: str) -> None:
+        """Save the full engine and model state to a JSON file."""
+        from .serialize import save_checkpoint
+        save_checkpoint(self, filepath)
+
+    def load_checkpoint(self, filepath: str) -> None:
+        """Load the full engine and model state from a JSON file."""
+        from .serialize import load_checkpoint
+        load_checkpoint(self, filepath)
 
     def run(self, max_time: float) -> SimulationResult:
         """
@@ -163,7 +175,11 @@ class DRSEngine:
 
         ExecutionContext.push(self.model)
         ExecutionContext.set_engine(self)
-        self.model.initialize_state()
+        if not getattr(self, "_resuming", False):
+            self.step_count = 0
+            self.model.initialize_state()
+        else:
+            self._resuming = False
         ExecutionContext.pop()
 
         try:
@@ -271,6 +287,7 @@ class DRSEngine:
         )
 
         self.current_time += dt
+        self.step_count += 1
         for var in current_variables:
             if hasattr(var, "_update"):
                 var._update(dt)

@@ -15,7 +15,7 @@ from .telemetry import Telemetry
 from .exceptions import StateMutationError, DeadlockError
 from .config import DRSConfig, EngineConfig
 from .callbacks import Callback, ProgressBarCallback
-from .serialize import save_state, load_state, export_architecture
+from .serialize import save_state, load_state, export_architecture, save_checkpoint, load_checkpoint
 
 # Provide friendly aliases for commonly used classes
 Engine = DRSEngine
@@ -40,5 +40,7 @@ __all__ = [
     "EngineConfig",
     "save_state",
     "load_state",
-    "export_architecture"
+    "export_architecture",
+    "save_checkpoint",
+    "load_checkpoint"
 ]
