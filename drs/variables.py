@@ -1,22 +1,23 @@
 """
 Note on Expression AST System:
 
-The `Expression` class and operator overloading (`__add__`, `__sub__`, etc.) within `Variable` 
-have been removed for maximum cleanup and performance, making `Variable` incredibly lightweight. 
-Since the `DRSEngine` recalculates rates dynamically every tick via `self.model()` and never 
-actually toggles `ExecutionContext.set_tracing(True)`, the framework currently relies entirely 
+The `Expression` class and operator overloading (`__add__`, `__sub__`, etc.) within `Variable`
+have been removed for maximum cleanup and performance, making `Variable` incredibly lightweight.
+Since the `DRSEngine` recalculates rates dynamically every tick via `self.model()` and never
+actually toggles `ExecutionContext.set_tracing(True)`, the framework currently relies entirely
 on Eager Evaluation.
 
 If you ever decide to implement the Arena-like drag-and-drop GUI or JSON exporter:
-You will need to resurrect the `Expression` AST system to perform symbolic "dry runs" and capture 
-the structural relationships (the AST) between variables without executing the raw floats. You can 
-recover the `Expression` class and the magic method overloads (`_op`, `_rop`, etc.) from earlier 
+You will need to resurrect the `Expression` AST system to perform symbolic "dry runs" and capture
+the structural relationships (the AST) between variables without executing the raw floats. You can
+recover the `Expression` class and the magic method overloads (`_op`, `_rop`, etc.) from earlier
 Git commits or from the codebase prior to the "Maximum Cleanup" refactor.
 """
+
 import math
 from typing import Any, Union
 from ._execution_context import ExecutionContext
-
+from .exceptions import StateMutationError
 
 
 class Variable:
@@ -42,7 +43,6 @@ class Variable:
         self._value = initial_value
         self._owner = None
 
-
     def _record_read_dependency(self) -> None:
         """
         [INTERNAL] Record that the current executing module has read this variable.
@@ -57,8 +57,8 @@ class Variable:
     @property
     def value(self) -> Any:
         """
-        Get the current value of the variable. 
-        
+        Get the current value of the variable.
+
         Reading this automatically records a dependency edge in the execution context,
         linking the module that read it to the module that owns it.
 
@@ -81,10 +81,10 @@ class Variable:
         """
         current = ExecutionContext.get_current()
         if current is not None and current is not self._owner:
-            raise RuntimeError(
+            raise StateMutationError(
                 f"Illegal Mutation: {type(current).__name__} tried to mutate "
                 f"'{self.name}' owned by {type(self._owner).__name__}. "
-                f"Modules must communicate by passing Signals/Flows. Do not mutate state directly!"
+                f"Modules must communicate by passing Flows. Do not mutate state directly!"
             )
         self._value = val
 
@@ -104,8 +104,6 @@ class Variable:
 
     def __hash__(self) -> int:
         return id(self)
-
-
 
 
 class Level(Variable):
@@ -128,7 +126,9 @@ class Level(Variable):
     # user code. Until then, guardrail #1 (orphaned-threshold check in DRSEngine) catches
     # the most common manifestation: thresholds set without corresponding rates.
 
-    def __init__(self, name: str, initial_value: float = 0.0, rate: float = 0.0) -> None:
+    def __init__(
+        self, name: str, initial_value: float = 0.0, rate: float = 0.0
+    ) -> None:
         """
         Initialize a new Level.
 
@@ -146,7 +146,7 @@ class Level(Variable):
     def rate(self) -> float:
         """
         Get the current rate of change.
-        
+
         Returns:
             float: The rate at which the level is currently accumulating per time unit.
         """
@@ -156,12 +156,12 @@ class Level(Variable):
     @rate.setter
     def rate(self, val: Any) -> None:
         """
-        Set the rate of change. 
-        
+        Set the rate of change.
+
         Args:
-            val (Any): Can be a single float representing the new rate, or a tuple 
+            val (Any): Can be a single float representing the new rate, or a tuple
                 of `(rate, lower_threshold, upper_threshold)`.
-                
+
         Raises:
             ValueError: If a tuple is provided but it does not have exactly 3 elements.
         """
@@ -193,11 +193,13 @@ class Level(Variable):
 
 class Timer(Level):
     """A specialized level used to track time.
-    
+
     Timers are simply Levels that accumulate at a default rate of 1.0 (or -1.0 for countdowns).
     """
 
-    def __init__(self, name: str, initial_value: float = 0.0, rate: float = 1.0) -> None:
+    def __init__(
+        self, name: str, initial_value: float = 0.0, rate: float = 1.0
+    ) -> None:
         """
         Initialize a Timer.
 
@@ -211,7 +213,7 @@ class Timer(Level):
     def reset(self) -> None:
         """
         Reset the timer value back to 0.0.
-        
+
         This sets the absolute value of the timer to 0, but does not modify the rate.
         """
         self.value = 0.0

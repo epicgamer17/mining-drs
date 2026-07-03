@@ -4,6 +4,7 @@ from typing import Tuple, Optional
 from .variables import Variable, Level
 from .module import Module
 from ._execution_context import ExecutionContext
+from .exceptions import DeadlockError
 
 
 class DRSEngine:
@@ -98,8 +99,8 @@ class DRSEngine:
                         upper_val = getattr(v, "upper_threshold", "N/A")
                         state_dump += f"{v.name}: value={v.value}, rate={rate_val}, bounds=[{lower_val}, {upper_val}]\n"
 
-                    raise RuntimeError(
-                        f"DeadlockError: Maximum consecutive zero-time steps ({self.max_deadlock_steps}) reached. "
+                    raise DeadlockError(
+                        f"Maximum consecutive zero-time steps ({self.max_deadlock_steps}) reached. "
                         f"The simulation is ping-ponging between states without advancing time. "
                         f"Last trigger: '{trigger_var.name if trigger_var else 'None'}' "
                         f"(value={trigger_var.value if trigger_var else 'None'}, "
