@@ -17,7 +17,9 @@ class DRSConfig:
 class EngineConfig(DRSConfig):
     """Configuration for the DRS Engine."""
 
-    max_step_size: float = float("inf")
+    max_step_size: float = (
+        0.5  # TODO: should change this to float("inf") but for parity dont, it seems to cause behaviour changes, theory is that its because of precision propogation over longer time horizons. Why do we even need a max step size?
+    )
     max_deadlock_steps: int = 20
     max_time: float = None
     strict_mode: bool = False

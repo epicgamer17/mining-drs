@@ -146,28 +146,17 @@ if __name__ == "__main__":
     df = result.history
 
     # --- Mode Transition Log ---
-    print("\n--- Mode Transition Log ---")
-    df["active_operating_mode_name"] = df["active_operating_mode"].apply(
-        lambda x: x.name if x else "None"
-    )
-    print(df["active_operating_mode_name"].unique()[:5])
-    df["prev_mode_name"] = df["active_operating_mode_name"].shift(1)
-    transitions = df[
-        (df["active_operating_mode_name"] != df["prev_mode_name"])
-        & df["prev_mode_name"].notna()
+    state_change_events = [
+        e for e in result.events 
+        if e.event_type == "STATE_CHANGE" and e.details.get("variable") == "active_operating_mode"
     ]
-
-    for idx, row in transitions.iterrows():
-        print(
-            f"Time: {row['time']:.2f} | Transition: {row['prev_mode_name']} -> {row['active_operating_mode_name']}"
-        )
-        print(
-            f"  ↳ Ore1 Stock: {row['Ore1Stock_mass']:.1f} | Ore2 Stock: {row['Ore2Stock_mass']:.1f} (Critical: {config.critical_ore2_level}) | Total Stock: {row['total_system_ore_mass']:.1f} (Target: {config.target_ore_stock_level})"
-        )
-        print(
-            f"  ↳ Campaign/Shutdown Timer: {row['current_campaign_duration']:.2f} | Contingency Timer: {row['current_contingency_duration']:.2f}"
-        )
-    print("---------------------------\n")
+    if state_change_events:
+        print("\n--- Mode Transition Log ---")
+        for e in state_change_events:
+            old = e.details['old_value'].name if hasattr(e.details['old_value'], 'name') else str(e.details['old_value'])
+            new = e.details['new_value'].name if hasattr(e.details['new_value'], 'name') else str(e.details['new_value'])
+            print(f"Time: {e.time:.2f} | Transition: {old} -> {new}")
+        print("---------------------------\n")
 
     # --- Cumulative Deficit by Mode Log ---
     import pandas as pd
@@ -176,6 +165,11 @@ if __name__ == "__main__":
     actual_extraction_step = df["cumulative_extracted_mass"].diff().fillna(0)
     ideal_extraction_step = dt * 6000.0
     step_deficit = (ideal_extraction_step - actual_extraction_step).clip(lower=0)
+
+    # We still need the active_operating_mode_name column for downstream plotting and analysis
+    df["active_operating_mode_name"] = df["active_operating_mode"].apply(
+        lambda x: x.name if x else "None"
+    )
 
     deficit_df = pd.DataFrame(
         {"mode": df["active_operating_mode_name"], "deficit": step_deficit}
@@ -232,13 +226,12 @@ if __name__ == "__main__":
         plot_time_series,
         plot_dual_axis_step,
         plot_safety_margin,
-        plot_mode_distribution,
-        plot_mode_dwell_times,
         build_dashboard,
     )
     from examples.mining.components.plot import (
         plot_ore_with_modes,
-
+        plot_mode_distribution,
+        plot_mode_dwell_times,
         plot_normalized_deviation_violin,
         plot_attributed_deficit,
         plot_deficit_disparity,

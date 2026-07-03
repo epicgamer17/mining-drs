@@ -25,6 +25,19 @@ class SimulationResult:
     sim_time: float        # simulation time reached
     history: Optional['pd.DataFrame']  # telemetry data
     terminated_reason: str  # "max_time", "condition_met", "deadlock", etc.
+    events: Optional[list] = None # events log
+
+    def print_event_timeline(self):
+        """Prints the formatted event timeline if events exist."""
+        if not self.events:
+            print("No events logged.")
+            return
+            
+        print("\n--- Event Audit Trail ---")
+        for e in self.events:
+            details_str = ", ".join(f"{k}={v}" for k, v in e.details.items())
+            print(f"t={e.time:<6.2f} | {e.event_type:<15} | [{e.source}] {details_str}")
+        print("-------------------------\n")
 
     def plot(self, *args, **kwargs):
         """Helper to plot telemetry data using pandas."""
@@ -100,16 +113,7 @@ class DRSEngine:
         self.model = model
         
         if log_level:
-            try:
-                from rich.logging import RichHandler
-                logging.basicConfig(
-                    level=log_level.upper(),
-                    format="%(message)s",
-                    datefmt="[%X]",
-                    handlers=[RichHandler()]
-                )
-            except ImportError:
-                logging.basicConfig(level=log_level.upper())
+            logging.basicConfig(level=log_level.upper())
                 
         self.callbacks = callbacks or []
         if progress_bar:
@@ -158,36 +162,40 @@ class DRSEngine:
         """
 
         ExecutionContext.push(self.model)
+        ExecutionContext.set_engine(self)
         self.model.initialize_state()
         ExecutionContext.pop()
 
-        self._current_max_time = max_time
-        for cb in self.callbacks:
-            cb.on_simulation_start(self)
-
-        self._consecutive_zero_dt_count = 0
-        termination_reason = "unknown"
-        steps = 0
-        start_time = time.time()
-
-        while True:
-            if self.model.is_terminating_condition_met():
-                termination_reason = "condition_met"
-                break
-
+        try:
+            self._current_max_time = max_time
             for cb in self.callbacks:
-                cb.on_step_start(self)
-
-            if self.current_time >= max_time:
-                termination_reason = "max_time_reached"
-                break
-
-            self._step(max_time)
-            steps += 1
-
-        if self.telemetry:
-            self.telemetry.snapshot(self.current_time)
-        self.model._run_post_step_hooks(self.current_time)
+                cb.on_simulation_start(self)
+    
+            self._consecutive_zero_dt_count = 0
+            termination_reason = "unknown"
+            steps = 0
+            start_time = time.time()
+    
+            while True:
+                if self.model.is_terminating_condition_met():
+                    termination_reason = "condition_met"
+                    break
+    
+                for cb in self.callbacks:
+                    cb.on_step_start(self)
+    
+                if self.current_time >= max_time:
+                    termination_reason = "max_time_reached"
+                    break
+    
+                self._step(max_time)
+                steps += 1
+    
+            if self.telemetry:
+                self.telemetry.snapshot(self.current_time)
+            self.model._run_post_step_hooks(self.current_time)
+        finally:
+            ExecutionContext.set_engine(None)
 
         end_time = time.time()
         df = self.telemetry.to_dataframe() if self.telemetry else None
@@ -199,6 +207,7 @@ class DRSEngine:
             steps=steps,
             sim_time=self.current_time,
             history=df,
+            events=self.telemetry.events if self.telemetry else None,
             terminated_reason=termination_reason
         )
         
@@ -228,6 +237,19 @@ class DRSEngine:
         dt, trigger_var, is_upper = self._calculate_min_dt(current_variables)
         
         if trigger_var is not None:
+            if self.telemetry is not None:
+                threshold_hit = trigger_var.upper_threshold if is_upper else trigger_var.lower_threshold
+                self.telemetry.log_event(
+                    time=self.current_time + dt,
+                    event_type="THRESHOLD",
+                    source="DRSEngine",
+                    details={
+                        "variable": trigger_var.name,
+                        "threshold": threshold_hit,
+                        "rate": trigger_var.rate,
+                        "direction": "upper" if is_upper else "lower"
+                    }
+                )
             for cb in self.callbacks:
                 cb.on_threshold(self, trigger_var, is_upper)
 
@@ -266,6 +288,18 @@ class DRSEngine:
 
         for cb in self.callbacks:
             cb.on_deadlock(self)
+        
+        if self.telemetry is not None:
+            self.telemetry.log_event(
+                time=self.current_time,
+                event_type="DEADLOCK",
+                source="DRSEngine",
+                details={
+                    "trigger_var": trigger_var.name if trigger_var else "None",
+                    "trigger_val": trigger_var.value if trigger_var else "None",
+                    "trigger_rate": getattr(trigger_var, 'rate', "N/A") if trigger_var else "None"
+                }
+            )
 
         raise DeadlockError(
             f"Maximum consecutive zero-time steps ({self.max_deadlock_steps}) reached. "

@@ -62,6 +62,8 @@ class ProgressBarCallback(Callback):
             TaskProgressColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
+            redirect_stdout=False,
+            redirect_stderr=False,
         )
         self.task_id = None
         self.max_time = None

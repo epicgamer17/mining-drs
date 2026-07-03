@@ -20,6 +20,14 @@ class ExecutionContext:
         stack = getattr(cls._local, "stack", [])
         return stack[-1] if stack else None
 
+    @classmethod
+    def set_engine(cls, engine):
+        cls._local.engine = engine
+    
+    @classmethod
+    def get_engine(cls):
+        return getattr(cls._local, 'engine', None)
+
 
 
     @classmethod

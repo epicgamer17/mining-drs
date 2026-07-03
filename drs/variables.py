@@ -86,7 +86,21 @@ class Variable:
                 f"'{self.name}' owned by {type(self._owner).__name__}. "
                 f"Modules must communicate by passing Flows. Do not mutate state directly!"
             )
-        self._value = val
+            
+        if self._value != val:
+            engine = ExecutionContext.get_engine()
+            if engine and getattr(engine, 'telemetry', None):
+                engine.telemetry.log_event(
+                    time=engine.current_time,
+                    event_type="STATE_CHANGE",
+                    source=type(current).__name__ if current else "External",
+                    details={
+                        "variable": self.name,
+                        "old_value": self._value,
+                        "new_value": val
+                    }
+                )
+            self._value = val
 
     @property
     def rate(self) -> float:

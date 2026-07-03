@@ -595,13 +595,12 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
         plot_time_series,
         plot_dual_axis_step,
         plot_safety_margin,
-        plot_mode_distribution,
-        plot_mode_dwell_times,
         build_dashboard,
     )
     from examples.mining.components.plot import (
         plot_ore_with_modes,
-
+        plot_mode_distribution,
+        plot_mode_dwell_times,
         plot_normalized_deviation_violin,
         plot_attributed_deficit,
         plot_deficit_disparity,

@@ -39,6 +39,7 @@ end
     mine -->|cumulative_extracted_mass| controller
     ore1_stock -->|Ore1Stock_mass| controller
     ore2_stock -->|Ore2Stock_mass| controller
+    fleet -->|stockpile2_routing_fraction| controller
     mine ==>|flow| fleet
     fleet ==>|flow| ore1_stock
     fleet ==>|flow| ore2_stock
@@ -59,6 +60,7 @@ The following read-dependencies were recorded during the simulation. An arrow `A
   - `mine` → `controller` reads `cumulative_extracted_mass`
   - `ore1_stock` → `controller` reads `Ore1Stock_mass`
   - `ore2_stock` → `controller` reads `Ore2Stock_mass`
+  - `fleet` → `controller` reads `stockpile2_routing_fraction`
 
 ## Data Flow (transient)
 

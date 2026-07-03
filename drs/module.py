@@ -141,6 +141,11 @@ class Module:
         """
         raise NotImplementedError("Module subclasses must implement forward()")
 
+    # TODO: add @property def current_time(self) -> float
+    # This would implicitly grab ExecutionContext.get_engine().current_time.
+    # Benefit: Allows modules/controllers to read simulation time natively 
+    # (e.g. `if self.current_time > 10.0:`) without needing to explicitly instantiate and track a Timer variable.
+
     def __setattr__(self, name: str, value: Any) -> None:
         if name.startswith("_"):
             super().__setattr__(name, value)
