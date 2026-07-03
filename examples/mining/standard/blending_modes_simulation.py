@@ -130,15 +130,20 @@ if __name__ == "__main__":
     # Run your massive Monte Carlo simulation at lightning speed
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
-    engine = DRSEngine(sim)
-    engine.run(max_time=config.replication_length)
+    engine = DRSEngine(sim, progress_bar=True, log_level="INFO")
+    if sim.enable_telemetry and hasattr(sim, "telemetry"):
+        engine.attach_telemetry(sim.telemetry)
+    result = engine.run(max_time=config.replication_length)
+    
+    print(result.summary())
+    
     sim.print_statistics()
 
     from drs.vis.module_graph import save_module_graph_report
 
     save_module_graph_report(sim, path_prefix="Concentrator_Module_Graph")
 
-    df = sim.telemetry.to_dataframe()
+    df = result.history
 
     # --- Mode Transition Log ---
     print("\n--- Mode Transition Log ---")

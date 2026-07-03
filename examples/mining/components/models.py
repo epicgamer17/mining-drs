@@ -39,8 +39,7 @@ class BaseBlendingModel(drs.Module):
     def setup_telemetry(self):
         if self.enable_telemetry:
             self.telemetry = Telemetry(self)
-            self.register_post_step_hook(self.telemetry.snapshot)
-
+            
             self.telemetry.register_metric(
                 "MassOfCurrentParcel",
                 lambda t, m, s, _: m.mine.active_parcel_initial_mass.value,

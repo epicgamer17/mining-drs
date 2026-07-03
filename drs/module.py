@@ -172,7 +172,7 @@ class Module:
     def _record_incoming_edge(self, variable: Variable) -> None:
         """
         [INTERNAL] Record that this module reads 'variable' (owned by another module).
-        
+
         Power User Note: Automatically called by the ExecutionContext to build graphs.
         """
         if variable._owner is not None and variable._owner is not self:
@@ -261,12 +261,11 @@ class Module:
                 var._rate = 0.0
                 var.upper_threshold = math.inf
                 var.lower_threshold = -math.inf
-                var._rate_set_by = None
 
     def initialize_state(self) -> None:
         """
         Override this to set up initial state before the simulation starts.
-        
+
         This is called once by the engine before the first time step.
         """
         pass
@@ -339,5 +338,3 @@ class DataSource(Module):
     def next(self) -> DataPoint:
         """Alias for __next__."""
         return next(self)
-
-

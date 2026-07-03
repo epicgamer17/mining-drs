@@ -7,19 +7,23 @@ __version__ = "0.1.0"
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 from .module import Module, DataSource
-from .engine import DRSEngine
+from .engine import DRSEngine, SimulationResult
 from .variables import Variable, Level, Timer
 from .data_source import DataPoint
 from .flow import Flow
 from .telemetry import Telemetry
 from .exceptions import StateMutationError, DeadlockError
 from .config import DRSConfig, EngineConfig
+from .callbacks import Callback, ProgressBarCallback
 
 # Provide friendly aliases for commonly used classes
 Engine = DRSEngine
 
 __all__ = [
     "DRSEngine", 
+    "SimulationResult",
+    "Callback",
+    "ProgressBarCallback",
     "Engine", 
     "Variable",
     "Level",

@@ -1,12 +1,66 @@
 import math
 import logging
-from typing import Tuple, Optional
+from dataclasses import dataclass
+import time
+from typing import Tuple, Optional, Any
+import pandas as pd
 from .variables import Variable, Level
 from .module import Module
 from ._execution_context import ExecutionContext
-from .exceptions import DeadlockError
+from .exceptions import DeadlockError, ThresholdConfigurationError
+from .config import EngineConfig
+from .callbacks import Callback, ProgressBarCallback
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SimulationResult:
+    """Encapsulates the final results of a simulation run."""
+
+    model: Module
+    config: Any
+    duration: float        # wall time
+    steps: int             # number of engine ticks
+    sim_time: float        # simulation time reached
+    history: Optional['pd.DataFrame']  # telemetry data
+    terminated_reason: str  # "max_time", "condition_met", "deadlock", etc.
+
+    def plot(self, *args, **kwargs):
+        """Helper to plot telemetry data using pandas."""
+        if self.history is None or self.history.empty:
+            logger.warning("No telemetry data to plot.")
+            return
+        
+        try:
+            import matplotlib.pyplot as plt
+            ax = self.history.plot(*args, **kwargs)
+            plt.show()
+            return ax
+        except ImportError:
+            logger.error("matplotlib is required for plotting.")
+
+    def summary(self) -> str:
+        """Returns a string summary of the simulation run."""
+        lines = [
+            f"--- Simulation Summary ---",
+            f"Termination Reason : {self.terminated_reason}",
+            f"Simulated Time     : {self.sim_time:.2f}",
+            f"Wall Clock Time    : {self.duration:.4f} seconds",
+            f"Engine Steps       : {self.steps:,}",
+        ]
+        if self.history is not None:
+            lines.append(f"Telemetry Records  : {len(self.history):,}")
+        return "\n".join(lines)
+
+    def save(self, path: str):
+        """Saves telemetry history to a CSV file."""
+        if self.history is not None:
+            self.history.to_csv(path, index=False)
+            logger.info(f"Saved telemetry to {path}")
+        else:
+            logger.warning("No telemetry data to save.")
+
 
 
 class DRSEngine:
@@ -24,28 +78,69 @@ class DRSEngine:
     """
 
     def __init__(
-        self,
-        model: Module,
-        max_step_size: float = 0.5,
-        max_deadlock_steps: int = 20,
+        self, 
+        model: Module, 
+        config: Optional[EngineConfig] = None, 
+        progress_bar: bool = False,
+        log_level: Optional[str] = None,
+        callbacks: Optional[list[Callback]] = None,
+        **kwargs
     ) -> None:
         """
         Initialize the DRS Engine.
 
         Args:
             model (Module): The root Module of your simulation.
-            max_step_size (float): The maximum time delta (dt) the engine is allowed 
-                to take in a single step (default: 0.5).
-            max_deadlock_steps (int): The maximum consecutive zero-time steps allowed 
-                before raising a deadlock error (default: 20).
+            config (Optional[EngineConfig]): Configuration for the engine.
+            progress_bar (bool): If True, attaches a Rich progress bar callback.
+            log_level (Optional[str]): If provided, configures structured logging at this level.
+            callbacks (Optional[list[Callback]]): Custom callbacks to attach.
+            **kwargs: Overrides for configuration parameters.
         """
         self.model = model
-        self.current_time = 0.0
-        self.max_step_size = max_step_size
-        self.max_deadlock_steps = max_deadlock_steps
-        self._orphaned_warned_ids = set()
+        
+        if log_level:
+            try:
+                from rich.logging import RichHandler
+                logging.basicConfig(
+                    level=log_level.upper(),
+                    format="%(message)s",
+                    datefmt="[%X]",
+                    handlers=[RichHandler()]
+                )
+            except ImportError:
+                logging.basicConfig(level=log_level.upper())
+                
+        self.callbacks = callbacks or []
+        if progress_bar:
+            self.callbacks.append(ProgressBarCallback())
 
-    def run(self, max_time: Optional[float] = None) -> None:
+        if config is None:
+            config = EngineConfig()
+
+        for k, v in kwargs.items():
+            if hasattr(config, k):
+                setattr(config, k, v)
+
+        self.config = config
+        self.current_time = 0.0
+        self.max_step_size = (
+            self.config.max_step_size
+        )  # TODO: why do we have this? why is it not inf by default?
+        self.max_deadlock_steps = self.config.max_deadlock_steps
+        self.strict_mode = self.config.strict_mode
+        self._orphaned_warned_ids = set()
+        self.telemetry = None
+
+    def attach_telemetry(self, telemetry: Any) -> None:
+        """
+        Attach a Telemetry object to the engine.
+
+        The engine will automatically trigger snapshots at the end of every time step.
+        """
+        self.telemetry = telemetry
+
+    def run(self, max_time: Optional[float] = None) -> SimulationResult:
         """
         Execute the main simulation loop.
 
@@ -54,7 +149,7 @@ class DRSEngine:
         (`dt`), and integrates all variables forward by `dt`.
 
         Args:
-            max_time (Optional[float]): The maximum simulation time to run until. 
+            max_time (Optional[float]): The maximum simulation time to run until.
                 If None, the engine runs until a custom terminating condition is met.
 
         Raises:
@@ -67,69 +162,129 @@ class DRSEngine:
         self.model.initialize_state()
         ExecutionContext.pop()
 
-        consecutive_zero_dt_count = 0
+        self._current_max_time = max_time
+        for cb in self.callbacks:
+            cb.on_simulation_start(self)
+
+        self._consecutive_zero_dt_count = 0
+        termination_reason = "unknown"
+        steps = 0
+        start_time = time.time()
 
         while True:
             if self.model.is_terminating_condition_met():
+                termination_reason = "condition_met"
                 break
+
+            for cb in self.callbacks:
+                cb.on_step_start(self)
 
             if max_time is not None and self.current_time >= max_time:
+                termination_reason = "max_time_reached"
                 break
 
-            self.model._zero_rates()
-            self.model()
+            self._step(max_time)
+            steps += 1
 
-            current_variables = list(self.model.variables())
-            self._check_orphaned_thresholds(current_variables)
+        if self.telemetry:
+            self.telemetry.snapshot(self.current_time)
+        self.model._run_post_step_hooks(self.current_time)
 
-            self.model._run_post_step_hooks(self.current_time)
+        end_time = time.time()
+        df = self.telemetry.to_dataframe() if self.telemetry else None
+        
+        result = SimulationResult(
+            model=self.model,
+            config=self.config,
+            duration=end_time - start_time,
+            steps=steps,
+            sim_time=self.current_time,
+            history=df,
+            terminated_reason=termination_reason
+        )
+        
+        for cb in self.callbacks:
+            cb.on_complete(self, result)
+            
+        return result
 
-            dt, trigger_var, is_upper = self._calculate_min_dt(current_variables)
+    def _step(self, max_time: Optional[float] = None) -> None:
+        """
+        [INTERNAL] Perform a single tick of the engine.
+        
+        Evaluates the model, calculates the time until the next event,
+        and integrates variables forward.
+        """
+        self.model._zero_rates()
+        self.model()
 
-            dt = min(dt, self.max_step_size)
+        current_variables = list(self.model.variables())
+        self._check_orphaned_thresholds(current_variables)
 
-            if max_time is not None:
-                dt = min(dt, max_time - self.current_time)
-
-            if dt == 0.0:
-                consecutive_zero_dt_count += 1
-                if consecutive_zero_dt_count > self.max_deadlock_steps:
-                    state_dump = "\n--- Engine State at Deadlock ---\n"
-                    for v in current_variables:
-                        rate_val = getattr(v, "rate", "N/A")
-                        lower_val = getattr(v, "lower_threshold", "N/A")
-                        upper_val = getattr(v, "upper_threshold", "N/A")
-                        state_dump += f"{v.name}: value={v.value}, rate={rate_val}, bounds=[{lower_val}, {upper_val}]\n"
-
-                    raise DeadlockError(
-                        f"Maximum consecutive zero-time steps ({self.max_deadlock_steps}) reached. "
-                        f"The simulation is ping-ponging between states without advancing time. "
-                        f"Last trigger: '{trigger_var.name if trigger_var else 'None'}' "
-                        f"(value={trigger_var.value if trigger_var else 'None'}, "
-                        f"rate={getattr(trigger_var, 'rate', 'N/A') if trigger_var else 'None'}).\n{state_dump}",
-                        state_dump=state_dump
-                    )
-            else:
-                consecutive_zero_dt_count = 0
-
-            if dt < 0:
-                raise ValueError("Time delta (dt) cannot be negative.")
-
-            logger.debug(f"Advancing time by {dt:.4f} to {self.current_time + dt:.4f} (Trigger: {trigger_var.name if trigger_var else 'None'})")
-
-            self.current_time += dt
-            for var in current_variables:
-                if hasattr(var, "_update"):
-                    var._update(dt)
+        if self.telemetry:
+            self.telemetry.snapshot(self.current_time)
 
         self.model._run_post_step_hooks(self.current_time)
+
+        dt, trigger_var, is_upper = self._calculate_min_dt(current_variables)
+        
+        if trigger_var is not None:
+            for cb in self.callbacks:
+                cb.on_threshold(self, trigger_var, is_upper)
+
+        dt = min(dt, self.max_step_size)
+
+        if max_time is not None:
+            dt = min(dt, max_time - self.current_time)
+
+        if dt == 0.0:
+            self._consecutive_zero_dt_count += 1
+            if self._consecutive_zero_dt_count > self.max_deadlock_steps:
+                self._handle_deadlock(current_variables, trigger_var)
+        else:
+            self._consecutive_zero_dt_count = 0
+
+        if dt < 0:
+            raise ValueError("Time delta (dt) cannot be negative.")
+
+        logger.debug(
+            f"Advancing time by {dt:.4f} to {self.current_time + dt:.4f} (Trigger: {trigger_var.name if trigger_var else 'None'})"
+        )
+
+        self.current_time += dt
+        for var in current_variables:
+            if hasattr(var, "_update"):
+                var._update(dt)
+
+    def _handle_deadlock(self, current_variables: list[Variable], trigger_var: Optional[Variable]) -> None:
+        """
+        [INTERNAL] Handle the case where the engine ping-pongs between states without advancing time.
+        """
+        state_dump = "\n--- Engine State at Deadlock ---\n"
+        for v in current_variables:
+            rate_val = getattr(v, "rate", "N/A")
+            lower_val = getattr(v, "lower_threshold", "N/A")
+            upper_val = getattr(v, "upper_threshold", "N/A")
+            state_dump += f"{v.name}: value={v.value}, rate={rate_val}, bounds=[{lower_val}, {upper_val}]\n"
+
+        for cb in self.callbacks:
+            cb.on_deadlock(self)
+
+        raise DeadlockError(
+            f"Maximum consecutive zero-time steps ({self.max_deadlock_steps}) reached. "
+            f"The simulation is ping-ponging between states without advancing time. "
+            f"Last trigger: '{trigger_var.name if trigger_var else 'None'}' "
+            f"(value={trigger_var.value if trigger_var else 'None'}, "
+            f"rate={getattr(trigger_var, 'rate', 'N/A') if trigger_var else 'None'}).\n{state_dump}",
+            state_dump=state_dump,
+        )
 
     def _check_orphaned_thresholds(self, variables: list[Variable]) -> None:
         """
         [INTERNAL] Warn once per variable about thresholds set but rate=0.
-        
-        Power User Note: This helps catch logic bugs where a state transition 
-        threshold is set but the state is not actually changing, meaning the 
+
+        Power User Note: This helps catch logic bugs where a state transition
+        threshold is set but the state is not actually changing, meaning the
         event will never fire.
         """
         for var in variables:
@@ -139,33 +294,35 @@ class DRSEngine:
                 continue
             rate = var._rate
             has_threshold = (
-                var.lower_threshold != -math.inf or
-                var.upper_threshold != math.inf
+                var.lower_threshold != -math.inf or var.upper_threshold != math.inf
             )
             if has_threshold and rate == 0.0:
                 self._orphaned_warned_ids.add(id(var))
                 owner_name = type(var._owner).__name__ if var._owner else "unknown"
-                logger.warning(
+                msg = (
                     f"Orphaned threshold: '{var.name}' (owned by {owner_name}) "
                     f"has lower_threshold={var.lower_threshold}, "
                     f"upper_threshold={var.upper_threshold} "
                     f"but rate=0.0. This threshold will never trigger."
                 )
+                if self.strict_mode:
+                    raise ThresholdConfigurationError(msg)
+                logger.warning(msg)
 
     def _calculate_min_dt(
         self, variables: list[Variable]
     ) -> Tuple[float, Optional[Variable], bool]:
         """
         [INTERNAL] Determine the time step (dt) to the next event/threshold.
-        
-        Power User Note: Evaluates all variables in the system to find the 
+
+        Power User Note: Evaluates all variables in the system to find the
         closest future threshold hit based on current rates.
 
         Args:
             variables (list[Variable]): A list of all variables in the system.
 
         Returns:
-            Tuple[float, Optional[Variable], bool]: 
+            Tuple[float, Optional[Variable], bool]:
                 - min_dt: The time until the next event.
                 - trigger_var: The variable that will hit its threshold.
                 - is_upper: True if hitting upper_threshold, False if lower_threshold.
@@ -198,20 +355,22 @@ class DRSEngine:
                     continue
                 rate = var._rate
                 has_threshold = (
-                    var.lower_threshold != -math.inf or
-                    var.upper_threshold != math.inf
+                    var.lower_threshold != -math.inf or var.upper_threshold != math.inf
                 )
                 if has_threshold and rate == 0.0:
                     owner_name = type(var._owner).__name__ if var._owner else "unknown"
                     orphaned.append(f"'{var.name}' ({owner_name})")
             if orphaned and id(None) not in self._orphaned_warned_ids:
                 self._orphaned_warned_ids.add(id(None))
-                logger.warning(
+                msg = (
                     f"No threshold events pending. "
                     f"Variables with thresholds but rate=0: "
                     f"{', '.join(orphaned)}. "
                     f"Simulation will advance at max_step_size={self.max_step_size}."
                 )
+                if self.strict_mode:
+                    raise ThresholdConfigurationError(msg)
+                logger.warning(msg)
             return 1.0, None, True
 
         return min_dt, trigger_var, is_upper

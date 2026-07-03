@@ -19,8 +19,6 @@ class RL_ConcentratorModel(ConcentratorModel):
         if not enable_telemetry:
             # Remove telemetry to prevent memory leaks during RL training
             if getattr(self, "telemetry", None) is not None:
-                if self.telemetry.snapshot in self._post_step_hooks:
-                    self._post_step_hooks.remove(self.telemetry.snapshot)
                 self.telemetry = None
 
     def is_terminating_condition_met(self) -> bool:

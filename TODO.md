@@ -14,6 +14,9 @@ This file consolidates all action items, open questions, and tasks across the mi
 * [ ] **Modes as Classes:** Do you think that Modes are important enough that instead of using an Enum we could make a new class? (Start conditions, end conditions, actual operation logic for each mode). It should still be easy to preempt modes (e.g. switch from Mode A to Mode A Contingency). Is a Mode Class PyTorch like in nature? Is it okay that it isn't even though my goal was a PyTorch like system for DRS?
 * [ ] **Transitions:** I'm curious if it could be better to define my transitions as start conditions and end conditions, or somehow have that ability to more easily allow for action masking when using my DRS in a Gym Env.
 * [ ] **End Conditions in Env vs Controller:** Is it good practice to have the environment handle the end conditions? Or should that be done in my Controller DRS? Intuition says it should be the controller, but from a DRS perspective there are not fixed timesteps.
+* [ ] **Optional Feature - Standard Components:** Investigate whether we want a standard library of components (`Source`, `Sink`, `Tank`). (Not sure if we want this yet, keeping DRS as a build-it-yourself framework may be better).
+* [ ] **Optional Feature - Parameter Type:** Consider introducing a `Parameter` type alongside `Variable` to add a strict read-only lock to prevent accidental mutation of configuration constants during `forward()` calls.
+* [ ] **Optional Feature - Real-World Time:** Consider supporting a `datetime` mapping (e.g. `start_datetime` in `EngineConfig`) for native integration with real-world timestamps. (Not sure if we need this yet).
 
 ## 3. Standard Simulation & GeoStatistics
 * [ ] **Kriging:** Need to make Kriging stuff (or find online or in a library), SGS and GSGS stuff (or find in a library), and SIS stuff.

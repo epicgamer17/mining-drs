@@ -64,6 +64,8 @@ class MiningRLEnv(gym.Env):
             self.config, enable_telemetry=self.enable_telemetry
         )
         self.engine = DRSEngine(self.sim)
+        if self.enable_telemetry and hasattr(self.sim, "telemetry"):
+            self.engine.attach_telemetry(self.sim.telemetry)
         self.last_extraction = 0.0
         self.last_time = 0.0  # <--- Reset time
 

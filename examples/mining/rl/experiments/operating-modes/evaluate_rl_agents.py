@@ -536,13 +536,12 @@ def generate_rl_dashboard(
                 [terminated or truncated], dtype=torch.float32, device=device
             )
 
-    sim = env.sim
-    sim.print_statistics()
+    result = env.engine.run(max_time=env.config.replication_length)
 
     from drs.vis.module_graph import save_module_graph_report
-    save_module_graph_report(sim, path_prefix=f"{model_name}_Module_Graph")
+    save_module_graph_report(env.sim, path_prefix=f"{model_name}_Module_Graph")
 
-    df = sim.telemetry.to_dataframe()
+    df = result.history
 
     # --- Mode Transition Log ---
     print("\n--- Mode Transition Log ---")

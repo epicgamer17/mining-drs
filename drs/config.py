@@ -22,3 +22,4 @@ class EngineConfig(DRSConfig):
     )
     max_deadlock_steps: int = 20
     max_time: float = None
+    strict_mode: bool = False

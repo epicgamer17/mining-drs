@@ -4,7 +4,6 @@ class DRSError(Exception):
     pass
 
 
-# TODO: is this mining specific sort of? is there a better name than physics violation that is more general for non mining simulations
 class StateMutationError(DRSError):
     """Raised when a module attempts to illegally mutate state."""
 
@@ -17,3 +16,9 @@ class DeadlockError(DRSError):
     def __init__(self, message: str, state_dump: str = ""):
         super().__init__(message)
         self.state_dump = state_dump
+
+
+class ThresholdConfigurationError(DRSError):
+    """Raised when a threshold is configured but cannot be reached."""
+
+    pass

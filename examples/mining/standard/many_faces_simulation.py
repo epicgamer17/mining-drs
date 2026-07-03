@@ -496,7 +496,9 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine(sim)
-    engine.run(max_time=config.replication_length)
+    if sim.enable_telemetry and hasattr(sim, "telemetry"):
+        engine.attach_telemetry(sim.telemetry)
+    result = engine.run(max_time=config.replication_length)
     sim.print_statistics()
 
     from drs.vis.module_graph import save_module_graph_report
@@ -504,7 +506,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     prefix = name.replace(" ", "_")
     save_module_graph_report(sim, path_prefix=f"Concentrator_Module_Graph_{prefix}")
 
-    df = sim.telemetry.to_dataframe()
+    df = result.history
 
     # --- Mode Transition Log ---
     print(f"\n--- Mode Transition Log ({name}) ---")
