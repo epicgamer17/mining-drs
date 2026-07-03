@@ -279,6 +279,62 @@ class Module:
         """
         return False
 
+    def state_dict(self, prefix: str = "") -> dict[str, Any]:
+        """
+        Returns a dictionary containing the entire state of the module.
+        Keys are dotted paths to variable values (e.g., 'submodule.variable.value').
+        """
+        state = {}
+        for name, var in self._variables.items():
+            key_base = f"{prefix}.{name}" if prefix else name
+            state[f"{key_base}.value"] = var.value
+            
+        for name, module in self._modules.items():
+            module_prefix = f"{prefix}.{name}" if prefix else name
+            state.update(module.state_dict(prefix=module_prefix))
+            
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """
+        Copies state from state_dict into this module and its descendants.
+        """
+        for key, value in state_dict.items():
+            if not key.endswith(".value"):
+                continue
+            key_base = key[:-6] # remove .value
+            parts = key_base.split('.')
+            var_name = parts[-1]
+            mod_path = parts[:-1]
+            
+            # Navigate to the correct module
+            current_mod = self
+            try:
+                for part in mod_path:
+                    current_mod = current_mod._modules[part]
+                current_mod._variables[var_name].value = value
+            except KeyError:
+                import logging
+                logging.getLogger(__name__).warning(f"Key '{key}' found in state_dict but not in module hierarchy.")
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Returns a structural JSON-serializable representation of the module architecture.
+        """
+        children = {}
+        for name, mod in self._modules.items():
+            children[name] = mod.to_dict()
+            
+        variables = {}
+        for name, var in self._variables.items():
+            variables[name] = type(var).__name__
+            
+        return {
+            "class": type(self).__name__,
+            "children": children,
+            "variables": variables
+        }
+
     def register_post_step_hook(self, hook_fn: Any) -> None:
         """Registers a callback to be run after every engine step."""
         self._post_step_hooks.append(hook_fn)
