@@ -15,31 +15,31 @@ Git commits or from the codebase prior to the "Maximum Cleanup" refactor.
 """
 import math
 from typing import Any, Union
-from .execution_context import ExecutionContext
+from ._execution_context import ExecutionContext
 
 
 
 class Variable:
     """Base class for all domain variables."""
 
-    def __init__(self, name: str, initial_value: Any = 0.0):
+    def __init__(self, name: str, initial_value: Any = 0.0) -> None:
         self.name = name
         self._value = initial_value
         self._owner = None
 
 
-    def _record_read_dependency(self):
+    def _record_read_dependency(self) -> None:
         current = ExecutionContext.get_current()
         if current is not None and current is not self._owner:
             current._record_incoming_edge(self)
 
     @property
-    def value(self):
+    def value(self) -> Any:
         self._record_read_dependency()
         return self._value
 
     @value.setter
-    def value(self, val):
+    def value(self, val: Any) -> None:
         current = ExecutionContext.get_current()
         if current is not None and current is not self._owner:
             raise RuntimeError(
@@ -50,20 +50,20 @@ class Variable:
         self._value = val
 
     @property
-    def rate(self):
+    def rate(self) -> float:
         raise AttributeError(
             f"'{type(self).__name__}' has no attribute 'rate'. "
             f"Only drs.Level supports .rate. Use drs.Level() for quantities that flow."
         )
 
     @rate.setter
-    def rate(self, val):
+    def rate(self, val: Any) -> None:
         raise AttributeError(
             f"Cannot set .rate on '{type(self).__name__}'. "
             f"Only drs.Level supports .rate."
         )
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return id(self)
 
 
@@ -80,7 +80,7 @@ class Level(Variable):
     # user code. Until then, guardrail #1 (orphaned-threshold check in DRSEngine) catches
     # the most common manifestation: thresholds set without corresponding rates.
 
-    def __init__(self, name: str, initial_value: float = 0.0, rate: float = 0.0):
+    def __init__(self, name: str, initial_value: float = 0.0, rate: float = 0.0) -> None:
         super().__init__(name, initial_value)
         self._rate = rate
         self.upper_threshold = math.inf
@@ -92,7 +92,7 @@ class Level(Variable):
         return self._rate
 
     @rate.setter
-    def rate(self, val):
+    def rate(self, val: Any) -> None:
         current_actor = ExecutionContext.get_current()
         if current_actor is not None and current_actor is not self._owner:
             if hasattr(current_actor, "_record_incoming_edge"):
@@ -106,15 +106,15 @@ class Level(Variable):
         else:
             self._rate = val
 
-    def update(self, dt: float):
+    def _update(self, dt: float) -> None:
         self.value += self.rate * dt
 
 
 class Timer(Level):
     """A specialized level used to track time, typically with a rate of 1.0 or -1.0."""
 
-    def __init__(self, name: str, initial_value: float = 0.0, rate: float = 1.0):
+    def __init__(self, name: str, initial_value: float = 0.0, rate: float = 1.0) -> None:
         super().__init__(name, initial_value, rate)
 
-    def reset(self):
+    def reset(self) -> None:
         self.value = 0.0

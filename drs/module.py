@@ -1,7 +1,7 @@
 import math
-from typing import Iterator
+from typing import Iterator, Any, Tuple
 from .variables import Variable, Level, Timer
-from .execution_context import ExecutionContext
+from ._execution_context import ExecutionContext
 from .data_source import DataPoint
 from .flow import Flow
 
@@ -12,7 +12,7 @@ class Module:
     Automatically registers variables and sub-modules upon assignment.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._variables = {}
         self._modules = {}
         self.parent = None
@@ -24,7 +24,7 @@ class Module:
         self._data_dependencies = []
         self._data_dep_seen = set()
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         caller = ExecutionContext.get_current()
         ExecutionContext.push(self)
         try:
@@ -101,10 +101,10 @@ class Module:
         finally:
             ExecutionContext.pop()
 
-    def forward(self, *args, **kwargs):
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("Module subclasses must implement forward()")
 
-    def __setattr__(self, name, value):
+    def __setattr__(self, name: str, value: Any) -> None:
         if name.startswith("_"):
             super().__setattr__(name, value)
             return
@@ -132,7 +132,7 @@ class Module:
 
         super().__setattr__(name, value)
 
-    def _record_incoming_edge(self, variable: Variable):
+    def _record_incoming_edge(self, variable: Variable) -> None:
         """Record that this module reads 'variable' (owned by another module)."""
         if variable._owner is not None and variable._owner is not self:
             key = (id(variable._owner), id(variable))
@@ -140,7 +140,7 @@ class Module:
                 self._dep_seen.add(key)
                 self._dependencies.append((variable._owner, variable))
 
-    def _record_flow_edge(self, source_module):
+    def _record_flow_edge(self, source_module: "Module") -> None:
         """Record that this module received a Flow from source_module."""
         if source_module is not None and source_module is not self:
             key = id(source_module)
@@ -148,7 +148,7 @@ class Module:
                 self._flow_dep_seen.add(key)
                 self._flow_dependencies.append(source_module)
 
-    def _record_data_edge(self, source_module):
+    def _record_data_edge(self, source_module: "Module") -> None:
         """Record that this module received a DataPoint from source_module."""
         if source_module is not None and source_module is not self:
             key = id(source_module)
@@ -193,7 +193,7 @@ class Module:
 
         yield from _get_modules(self, prefix)
 
-    def zero_rates(self):
+    def _zero_rates(self) -> None:
         """Zero out rates and remove thresholds for all Levels before the next rate update."""
         for var in self.variables():
             if isinstance(var, Level):
@@ -201,7 +201,7 @@ class Module:
                 var.upper_threshold = math.inf
                 var.lower_threshold = -math.inf
 
-    def initialize_state(self):
+    def initialize_state(self) -> None:
         """Override this to set up initial state before the simulation starts."""
         pass
 
@@ -209,11 +209,11 @@ class Module:
         """Override this to define custom stopping conditions."""
         return False
 
-    def register_post_step_hook(self, hook_fn):
+    def register_post_step_hook(self, hook_fn: Any) -> None:
         """Registers a callback to be run after every engine step."""
         self._post_step_hooks.append(hook_fn)
 
-    def _run_post_step_hooks(self, current_time):
+    def _run_post_step_hooks(self, current_time: float) -> None:
         """Called by the engine after dt is integrated."""
         for hook in self._post_step_hooks:
             hook(current_time)
@@ -248,10 +248,10 @@ class DataSource(Module):
                 return point
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[DataPoint]:
         return self
 
     def __next__(self) -> DataPoint:

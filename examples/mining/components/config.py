@@ -63,9 +63,12 @@ class ConcentratorConfig(BaseDualStockpileConfig):
     total_lhd_count: float = 3.0
     total_truck_count: float = 10.0
     max_lhds_per_face: float = 2.0  # Physical constraint on LHDs per face
-    max_trucks_per_face: float = 5.0  # Physical constraint on trucks per face
-    face_haul_distance: tuple = (1.0, 1.2)
-    face_accessibility_fraction: tuple = (0.93, 0.91)
+    max_trucks_per_face: float = 6.0  # Physical constraint on trucks per face
+    face_haul_distance: tuple = (1.5, 2.2)
+    face_accessibility_fraction: tuple = (
+        0.93,
+        0.91,
+    )  # this is suppose to mimic blasting and times when face is not accesible by cars (so we decrease the throughput by the time its not available instead of making like a new "mode" or phase). TODO: is this going to be made obsolete by modelling development?
 
     # --- Mine Development Parameters ---
     development_rate_per_extra_truck: float = (

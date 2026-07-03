@@ -3,7 +3,7 @@ import warnings
 from typing import Tuple, Optional
 from .variables import Variable, Level
 from .module import Module
-from .execution_context import ExecutionContext
+from ._execution_context import ExecutionContext
 
 
 class DRSEngine:
@@ -18,14 +18,14 @@ class DRSEngine:
         model: Module,
         max_step_size: float = 0.5,
         max_deadlock_steps: int = 20,
-    ):
+    ) -> None:
         self.model = model
         self.current_time = 0.0
         self.max_step_size = max_step_size
         self.max_deadlock_steps = max_deadlock_steps
         self._orphaned_warned_ids = set()
 
-    def run(self, max_time: Optional[float] = None):
+    def run(self, max_time: Optional[float] = None) -> None:
         """The main simulation loop."""
 
         ExecutionContext.push(self.model)
@@ -41,7 +41,7 @@ class DRSEngine:
             if max_time is not None and self.current_time >= max_time:
                 break
 
-            self.model.zero_rates()
+            self.model._zero_rates()
             self.model()
 
             current_variables = list(self.model.variables())
@@ -49,7 +49,7 @@ class DRSEngine:
 
             self.model._run_post_step_hooks(self.current_time)
 
-            dt, trigger_var, is_upper = self.calculate_min_dt(current_variables)
+            dt, trigger_var, is_upper = self._calculate_min_dt(current_variables)
 
             dt = min(dt, self.max_step_size)
 
@@ -81,12 +81,12 @@ class DRSEngine:
 
             self.current_time += dt
             for var in current_variables:
-                if hasattr(var, "update"):
-                    var.update(dt)
+                if hasattr(var, "_update"):
+                    var._update(dt)
 
         self.model._run_post_step_hooks(self.current_time)
 
-    def _check_orphaned_thresholds(self, variables: list[Variable]):
+    def _check_orphaned_thresholds(self, variables: list[Variable]) -> None:
         """Warn once per variable about thresholds set but rate=0."""
         for var in variables:
             if not isinstance(var, Level):
@@ -108,7 +108,7 @@ class DRSEngine:
                     f"but rate=0.0. This threshold will never trigger."
                 )
 
-    def calculate_min_dt(
+    def _calculate_min_dt(
         self, variables: list[Variable]
     ) -> Tuple[float, Optional[Variable], bool]:
         """

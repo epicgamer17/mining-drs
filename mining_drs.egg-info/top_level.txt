@@ -1,6 +1,0 @@
-drs
-examples
-lib
-papers
-tests
-wandb
