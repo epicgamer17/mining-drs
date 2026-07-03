@@ -68,3 +68,43 @@ This file consolidates all action items, open questions, and tasks across the mi
   * Traditional RL (DQN/PPO) vs Stream RL vs Non-stationary RL (IDBD/CBP).
   * POMDP versions with LSTMs.
   * Discrete vs. Continuous Control (high vs. low level).
+
+
+---
+TO BE FORMATTED
+OPTIONAL/UNSURE: Constraint / Invariant System
+
+Natural extension of existing guardrails (mutation protection, deadlock detection):
+
+model.register_invariant(
+    "mass_conservation",
+    check=lambda m: abs(m.total_mass_in.value - m.total_mass_out.value) < 1e-6,
+    on_violation="warn"  # or "raise" in strict mode
+)
+model.register_invariant(
+    "stockpile_bounds",
+    check=lambda m: 0 <= m.stockpile.mass.value <= m.stockpile.capacity.value,
+    on_violation="raise"
+)
+Check all invariants every step. Produces an invariant report in SimulationResult. Catches model bugs early.
+
+OPTIONAL/UNSURE: Scenario Runner / Experiment Manager
+
+The Monte Carlo pattern exists ad-hoc in examples. Formalize it into a high-level API:
+
+from drs import Experiment
+
+exp = Experiment(
+    model_class=NavarraConcentrator,
+    base_config={"plant.max_rate": 6000, "simulation_days": 365},
+)
+exp.add_scenario("baseline", {})
+exp.add_scenario("aggressive_fleet", {"fleet.n_trucks": 12, "fleet.match_factor": 1.2})
+exp.add_scenario("conservative", {"controller.bias": "ore2_safety"})
+
+results = exp.run_all(n_replications=30, parallel=True, seed=42)
+results.summary()       # Table of means and stds per scenario
+results.compare()       # Auto-generated comparison dashboard
+results.report_md()     # Markdown report for docs
+This would make parameter sweeps, sensitivity analysis, and Monte Carlo studies trivial instead of requiring custom scripts.
+

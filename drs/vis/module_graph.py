@@ -1,6 +1,5 @@
 import os
 import urllib.request
-import urllib.error
 
 def _node_id(path: str) -> str:
     """

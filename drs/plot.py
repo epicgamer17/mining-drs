@@ -5,6 +5,33 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+# Visual styling constants
+DEFAULT_FIGSIZE = (10, 6)
+DEFAULT_STYLE = "seaborn-v0_8-whitegrid"
+DEFAULT_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+
+
+def apply_plot_style() -> None:
+    """
+    Apply the default matplotlib stylesheet and seaborn configuration.
+    
+    Power User Note: Standardizes visual aesthetics across all plots.
+    """
+    plt.style.use(DEFAULT_STYLE)
+
+
+def _setup_axes(ax=None, figsize=DEFAULT_FIGSIZE):
+    """
+    [INTERNAL] Helper to initialize or reuse a matplotlib axes.
+    
+    Power User Note: Reduces boilerplate for creating figure/axes objects.
+    """
+    apply_plot_style()
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        return fig, ax, True
+    return ax.figure, ax, False
+
 
 def plot_time_series(
     df,
@@ -18,22 +45,18 @@ def plot_time_series(
     colors: list = None,
     **line_kwargs,
 ):
+    """Plot multiple time-series curves on a single axis."""
     if time_col not in df.columns:
         raise ValueError(
             f"DataFrame must contain a '{time_col}' column for time-series plotting."
         )
 
-    plt.style.use("seaborn-v0_8-whitegrid")
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        own_ax = True
-    else:
-        own_ax = False
+    fig, ax, own_ax = _setup_axes(ax, DEFAULT_FIGSIZE)
+    plot_colors = colors or DEFAULT_COLORS
 
     for i, col in enumerate(y_columns):
         if col in df.columns:
-            color = colors[i % len(colors)] if colors else None
+            color = plot_colors[i % len(plot_colors)]
 
             kwargs = dict(line_kwargs)
             kwargs.setdefault("linewidth", 2)
@@ -58,11 +81,9 @@ def plot_time_series(
         )
 
     if own_ax:
-        fig = ax.figure
         fig.tight_layout()
         return fig
     return ax
-
 
 
 def plot_safety_margin(
@@ -75,11 +96,8 @@ def plot_safety_margin(
     danger_threshold: float = None,
     ax=None,
 ):
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(12, 6))
-        own_ax = True
-    else:
-        own_ax = False
+    """Plot level safety margin relative to upper or lower constraints."""
+    fig, ax, own_ax = _setup_axes(ax, (12, 6))
 
     if constraint_type == "upper":
         margin = constraint_value - df[level_col]
@@ -131,7 +149,6 @@ def plot_safety_margin(
     ax.legend(loc="best", frameon=True)
 
     if own_ax:
-        fig = ax.figure
         fig.tight_layout()
         return fig
     return ax
@@ -149,11 +166,8 @@ def plot_dual_axis_step(
     title: str = "Dual Axis Step Plot",
     ax=None,
 ):
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        own_ax = True
-    else:
-        own_ax = False
+    """Plot two steps on dual y-axes for scale-disparate variables."""
+    fig, ax, own_ax = _setup_axes(ax, DEFAULT_FIGSIZE)
 
     if y1_col in df.columns:
         line1 = ax.step(
@@ -194,13 +208,13 @@ def plot_dual_axis_step(
     ax.set_xlabel("Simulation Time", fontsize=12)
 
     if own_ax:
-        fig = ax.figure
         fig.tight_layout()
         return fig
     return ax
 
 
 def build_dashboard(df, plot_configs, title="Simulation Dashboard", figsize=(16, 20)):
+    """Assemble a multi-plot layout sharing x-axes where appropriate."""
     num_plots = len(plot_configs)
     fig = plt.figure(figsize=figsize)
     gs = gridspec.GridSpec(num_plots, 1, figure=fig)
@@ -238,5 +252,3 @@ def build_dashboard(df, plot_configs, title="Simulation Dashboard", figsize=(16,
     fig.suptitle(title, fontsize=18, fontweight="bold", y=0.98)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     return fig
-
-

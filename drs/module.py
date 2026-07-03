@@ -1,5 +1,5 @@
 import math
-from typing import Iterator, Any, Tuple
+from typing import Iterator, Any
 from .variables import Variable, Level, Timer
 from ._execution_context import ExecutionContext
 from .data_source import DataPoint
@@ -143,7 +143,7 @@ class Module:
 
     # TODO: add @property def current_time(self) -> float
     # This would implicitly grab ExecutionContext.get_engine().current_time.
-    # Benefit: Allows modules/controllers to read simulation time natively 
+    # Benefit: Allows modules/controllers to read simulation time natively
     # (e.g. `if self.current_time > 10.0:`) without needing to explicitly instantiate and track a Timer variable.
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -301,11 +301,11 @@ class Module:
         for name, var in self._variables.items():
             key_base = f"{prefix}.{name}" if prefix else name
             state[f"{key_base}.value"] = var.value
-            
+
         for name, module in self._modules.items():
             module_prefix = f"{prefix}.{name}" if prefix else name
             state.update(module.state_dict(prefix=module_prefix))
-            
+
         return state
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -315,11 +315,11 @@ class Module:
         for key, value in state_dict.items():
             if not key.endswith(".value"):
                 continue
-            key_base = key[:-6] # remove .value
-            parts = key_base.split('.')
+            key_base = key[:-6]  # remove .value
+            parts = key_base.split(".")
             var_name = parts[-1]
             mod_path = parts[:-1]
-            
+
             # Navigate to the correct module
             current_mod = self
             try:
@@ -328,7 +328,10 @@ class Module:
                 current_mod._variables[var_name].value = value
             except KeyError:
                 import logging
-                logging.getLogger(__name__).warning(f"Key '{key}' found in state_dict but not in module hierarchy.")
+
+                logging.getLogger(__name__).warning(
+                    f"Key '{key}' found in state_dict but not in module hierarchy."
+                )
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -337,15 +340,15 @@ class Module:
         children = {}
         for name, mod in self._modules.items():
             children[name] = mod.to_dict()
-            
+
         variables = {}
         for name, var in self._variables.items():
             variables[name] = type(var).__name__
-            
+
         return {
             "class": type(self).__name__,
             "children": children,
-            "variables": variables
+            "variables": variables,
         }
 
     def register_post_step_hook(self, hook_fn: Any) -> None:
@@ -407,7 +410,3 @@ class DataSource(Module):
     def __next__(self) -> DataPoint:
         """Yield the next DataPoint in the sequence."""
         raise StopIteration
-
-    def next(self) -> DataPoint:
-        """Alias for __next__."""
-        return next(self)
