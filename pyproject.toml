@@ -28,6 +28,14 @@ docs = [
     "mkdocs-material>=9.4",
     "mkdocstrings[python]>=0.24"
 ]
+rl = [
+    "torch>=2.0",
+    "gymnasium>=0.28",
+    "wandb",
+    "tensordict",
+    "einops",
+    "rl-stuff"
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["drs"]

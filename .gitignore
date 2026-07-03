@@ -1,10 +1,8 @@
 /.venv
 /__pycache__
-*.png
 /drs/__pycache__
 /examples/mining/rl/environments/__pycache__
 /examples/mining/rl/experiments/__pycache__
-/wandb
 /tests/test_drs/unit/__pycache__
 /tests/test_drs/integration/__pycache__
 /examples/mining/components/__pycache__
@@ -12,6 +10,19 @@
 /examples/mining/rl/__pycache__
 /examples/mining/rl/experiments/weights
 /examples/mining/standard/__pycache__
-*.png
-*.pt
 *.pyc
+
+# Auto-generated reports and artifacts
+*.csv
+*.gif
+*.pt
+*.png
+*.html
+*.md
+
+# Directories
+site/
+.benchmarks/
+wandb/
+/outputs/
+/data/

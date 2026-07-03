@@ -66,7 +66,7 @@ class Telemetry:
 
         self.history.append(state)
 
-    def to_dataframe(self):
+    def to_dataframe(self) -> pd.DataFrame:
         """
         Converts the entire simulation history into a Pandas DataFrame.
         

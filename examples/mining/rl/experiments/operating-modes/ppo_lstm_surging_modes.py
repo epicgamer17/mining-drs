@@ -6,8 +6,8 @@ Adapted from rl-stuff/examples/ppo/ppo_lstm_cartpole.py.
 import sys
 import os
 
-sys.path.append("/Users/jonathanlamontange-kratz/Documents/GitHub/rl-stuff")
-sys.path.append("/Users/jonathanlamontange-kratz/Documents/GitHub/mining-drs")
+# Ensure the root directory is on the path so we can import 'examples.mining'
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../")))
 
 from functional.initialization import layer_init, set_seed
 import torch

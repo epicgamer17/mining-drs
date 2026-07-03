@@ -1,3 +1,5 @@
+from typing import Any
+
 """
 Generic data point for data yielded by DataSource.
 
@@ -20,7 +22,7 @@ class DataPoint:
         point.priority  # → 1
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any):
         """
         Initialize a new DataPoint with arbitrary attributes.
 

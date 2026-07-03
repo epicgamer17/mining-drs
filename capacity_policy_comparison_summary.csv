@@ -1,3 +1,0 @@
-scenario,final_time,fleet_shift_count,mean_total_target_extraction_rate,mean_total_real_extraction_rate,mean_total_achieved_extraction_rate,mean_face1_operational_downtime_fraction,mean_face2_operational_downtime_fraction,mean_capacity_utilization,max_capacity_gap_rate,capacity_lost_mass,final_ore1_stock,final_ore2_stock,min_ore2_stock
-Dynamic Fleet Allocation,60.0,120.0,5906.976744186047,10207405.438595835,5906.976744186047,0.0,0.0,1.0,0.0,0.0,40815.29155719398,19184.70844280589,18000.0
-Equal Fleet Allocation,60.0,120.0,5651.162790697675,11047147.592819259,5651.162790697675,0.0,0.0,1.0,0.0,0.0,33305.274571038855,26694.725428961137,1762.8250333440265
