@@ -343,9 +343,15 @@ class Module:
         if root is None:
             root = self
 
+        import enum
+
         def _to_dict_serialize_val(val: Any) -> Any:
             if isinstance(val, Expression):
                 return {"equation": val.get_equation()}
+            if isinstance(val, enum.Enum):
+                return val.name
+            if hasattr(val, "name") and hasattr(val, "id"):
+                return val.name
             if isinstance(val, float):
                 if math.isinf(val):
                     return "Infinity" if val > 0 else "-Infinity"
@@ -369,17 +375,48 @@ class Module:
         for name, var in self._variables.items():
             var_info = {
                 "class": type(var).__name__,
-                "value": _to_dict_serialize_val(var._value)
+                "value": _to_dict_serialize_val(var._value),
             }
             if isinstance(var, Level):
                 var_info["rate"] = _to_dict_serialize_val(var._rate)
-                var_info["lower_threshold"] = _to_dict_serialize_val(var.lower_threshold)
-                var_info["upper_threshold"] = _to_dict_serialize_val(var.upper_threshold)
+                var_info["lower_threshold"] = _to_dict_serialize_val(
+                    var.lower_threshold
+                )
+                var_info["upper_threshold"] = _to_dict_serialize_val(
+                    var.upper_threshold
+                )
             variables[name] = var_info
 
         layout = getattr(self, "layout", getattr(self, "metadata", {}))
         if not isinstance(layout, dict):
             layout = {"value": str(layout)}
+
+        attributes = {}
+        import json
+        from .variables import Variable
+
+        # Exclude reserved framework attributes
+        RESERVED_KEYS = {
+            "parent",
+            "config",
+            "telemetry",
+            "layout",
+            "global_time",
+        }
+
+        for k, v in self.__dict__.items():
+            if k.startswith("_"):
+                continue
+            if k in RESERVED_KEYS:
+                continue
+            if isinstance(v, (Module, Variable)):
+                continue
+            if isinstance(v, (int, float, str, bool, list, dict)) or v is None:
+                try:
+                    json.dumps(v)
+                    attributes[k] = v
+                except Exception:
+                    pass
 
         flow_inputs = []
         for src in self._flow_dependencies:
@@ -391,23 +428,23 @@ class Module:
 
         variable_reads = []
         for src_mod, var in self._dependencies:
-            variable_reads.append({
-                "module": get_module_path(root, src_mod),
-                "variable": var.name
-            })
+            variable_reads.append(
+                {"module": get_module_path(root, src_mod), "variable": var.name}
+            )
 
         connections = {
             "flow_inputs": flow_inputs,
             "data_inputs": data_inputs,
-            "variable_reads": variable_reads
+            "variable_reads": variable_reads,
         }
 
         return {
             "class": type(self).__name__,
             "layout": layout,
             "variables": variables,
+            "attributes": attributes,
             "children": children,
-            "connections": connections
+            "connections": connections,
         }
 
     def register_post_step_hook(self, hook_fn: Any) -> None:

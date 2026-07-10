@@ -524,18 +524,36 @@ const CanvasEditor = () => {
         const importedNodes: Node[] = [];
         const importedEdges: Edge[] = [];
 
+        // Helper to check layout validity and do automatic column alignments
+        const getLayoutPosition = (layout: any, cls: string, idx: number) => {
+          if (layout && typeof layout.x === 'number' && typeof layout.y === 'number') {
+            return layout;
+          }
+          let col = 1;
+          if (cls.includes('Source') || cls.includes('Generator') || cls.includes('Scheduler')) {
+            col = 0;
+          } else if (cls.includes('Face') || cls.includes('Extractor') || cls.includes('Mine')) {
+            col = 1;
+          } else if (cls.includes('Stock') || cls.includes('Buffer') || cls.includes('Crusher') || cls.includes('Logistics')) {
+            col = 2;
+          } else if (cls.includes('Plant') || cls.includes('Factory') || cls.includes('Concentrator') || cls.includes('Controller')) {
+            col = 3;
+          }
+          return { x: 100 + col * 280, y: 100 + (idx * 160) % 500 };
+        };
+
         // Check if flat array or tree
         if (Array.isArray(parsed)) {
           // Flat list
           parsed.forEach((item: any, index: number) => {
-            const position = item.layout || { x: 100 + index * 150, y: 150 };
+            const cls = item.class || '';
+            const position = getLayoutPosition(item.layout, cls, index);
             
             // Map class name to custom visual type
             let type = 'extractionNode';
-            const cls = item.class || '';
             if (cls.includes('Stock') || cls.includes('Buffer') || cls.includes('Crusher')) {
               type = 'bufferNode';
-            } else if (cls.includes('Plant') || cls.includes('Factory') || cls.includes('Concentrator')) {
+            } else if (cls.includes('Plant') || cls.includes('Factory') || cls.includes('Concentrator') || cls.includes('Controller')) {
               type = 'factoryNode';
             } else if (cls.includes('Source') || cls.includes('Stream')) {
               type = 'dataSourceNode';
@@ -594,13 +612,13 @@ const CanvasEditor = () => {
             const currentPath = path ? path : '';
             
             if (node.class && node.class !== 'DRSModel') {
-              const position = node.layout || { x: 100 + (nodeIndex % 4) * 250, y: 100 + Math.floor(nodeIndex / 4) * 180 };
+              const cls = node.class || '';
+              const position = getLayoutPosition(node.layout, cls, nodeIndex);
               
               let type = 'extractionNode';
-              const cls = node.class || '';
               if (cls.includes('Stock') || cls.includes('Buffer') || cls.includes('Crusher')) {
                 type = 'bufferNode';
-              } else if (cls.includes('Plant') || cls.includes('Factory') || cls.includes('Concentrator')) {
+              } else if (cls.includes('Plant') || cls.includes('Factory') || cls.includes('Concentrator') || cls.includes('Controller')) {
                 type = 'factoryNode';
               } else if (cls.includes('Source') || cls.includes('Stream')) {
                 type = 'dataSourceNode';
