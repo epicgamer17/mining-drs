@@ -188,6 +188,7 @@ const CanvasEditor = () => {
   const [selectedNode, setSelectedNode] = useState<{ id: string; data: any } | null>(null);
   const [isCompiling, setIsCompiling] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [currentParentId, setCurrentParentId] = useState<string | null>(null);
   
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
@@ -382,12 +383,17 @@ const CanvasEditor = () => {
 
       // Generate a unique path-compliant ID
       const sanitizedLabel = label.toLowerCase().replace(/\s+/g, '_');
-      let id = sanitizedLabel;
+      let relativeId = sanitizedLabel;
       let counter = 1;
-      while (nodes.some((n) => n.id === id)) {
-        id = `${sanitizedLabel}_${counter}`;
+      
+      const makeFullId = (relId: string) => currentParentId ? `${currentParentId}.${relId}` : relId;
+
+      while (nodes.some((n) => n.id === makeFullId(relativeId))) {
+        relativeId = `${sanitizedLabel}_${counter}`;
         counter++;
       }
+      
+      const id = makeFullId(relativeId);
 
       const newNode: Node = {
         id,
@@ -403,7 +409,7 @@ const CanvasEditor = () => {
 
       updateNodesAndPersist((nds: Node[]) => nds.concat(newNode));
     },
-    [reactFlowInstance, nodes, updateNodesAndPersist]
+    [reactFlowInstance, nodes, updateNodesAndPersist, currentParentId]
   );
 
   const onNodeClick = useCallback((_: any, node: Node) => {
@@ -430,6 +436,7 @@ const CanvasEditor = () => {
   }, [updateNodesAndPersist]);
 
   const onNodeDragStop = useCallback((_: any, node: Node) => {
+    if (node.id.startsWith('proxy-')) return;
     updateNodesAndPersist((nds: Node[]) =>
       nds.map((n) => {
         if (n.id === node.id) {
@@ -763,6 +770,150 @@ const CanvasEditor = () => {
     e.target.value = ''; // clear input
   }, [setNodes, setEdges, saveToLocalStorage]);
 
+  // 1. Identify which nodes are containers (contain children with dot-prefixed IDs)
+  const containerNodeIds = new Set<string>();
+  nodes.forEach(n => {
+    if (n.id.includes('.')) {
+      const parts = n.id.split('.');
+      for (let i = 1; i < parts.length; i++) {
+        containerNodeIds.add(parts.slice(0, i).join('.'));
+      }
+    }
+  });
+
+  // Filter nodes belonging to the current parent level
+  const baseVisibleNodes = nodes.filter(node => {
+    if (currentParentId === null) {
+      return !node.id.includes('.');
+    } else {
+      const prefix = currentParentId + '.';
+      if (node.id.startsWith(prefix)) {
+        const rest = node.id.substring(prefix.length);
+        return !rest.includes('.');
+      }
+      return false;
+    }
+  }).map(node => {
+    const isContainer = containerNodeIds.has(node.id) || ['ConcentratorPlant', 'DRSModel', 'Module', 'ProcessingPlant', 'ContinuousFleetLogistics', 'ConcentratorController', 'ConcentratorModel'].includes((node.data as any).class);
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        isContainer
+      }
+    };
+  });
+
+  // Construct final visibleNodes and visibleEdges by resolving boundary proxies
+  const visibleNodes: Node[] = [...baseVisibleNodes];
+  const visibleEdges: Edge[] = [];
+
+  const proxyInputs: { [sourceId: string]: string } = {}; // sourceId -> proxyNodeId
+  const proxyOutputs: { [targetId: string]: string } = {}; // targetId -> proxyNodeId
+
+  edges.forEach(edge => {
+    const source = edge.source;
+    const target = edge.target;
+
+    if (currentParentId === null) {
+      // Root level view: if edge connects two nodes, check if they are nested submodules.
+      // If so, re-route the edge to their parent container at the root level!
+      const rootSource = source.includes('.') ? source.split('.')[0] : source;
+      const rootTarget = target.includes('.') ? target.split('.')[0] : target;
+
+      if (rootSource !== rootTarget) {
+        const rootEdgeId = `e-h-${rootSource}-${rootTarget}`;
+        // Prevent duplicate edges at parent level
+        if (!visibleEdges.some(e => e.id === rootEdgeId)) {
+          visibleEdges.push({
+            id: rootEdgeId,
+            source: rootSource,
+            sourceHandle: edge.sourceHandle?.startsWith('flow') ? 'flow-out' : edge.sourceHandle?.startsWith('read') ? 'read-out' : 'data-out',
+            target: rootTarget,
+            targetHandle: edge.targetHandle?.startsWith('flow') ? 'flow-in' : edge.targetHandle?.startsWith('read') ? 'read-in' : 'data-in',
+            style: edge.style,
+          });
+        }
+      } else {
+        // Purely internal edge between siblings at root level
+        if (!source.includes('.') && !target.includes('.')) {
+          visibleEdges.push(edge);
+        }
+      }
+    } else {
+      // Drilled down inside currentParentId
+      const isSourceInSub = source.startsWith(currentParentId + '.') && !source.substring(currentParentId.length + 1).includes('.');
+      const isTargetInSub = target.startsWith(currentParentId + '.') && !target.substring(currentParentId.length + 1).includes('.');
+
+      if (isSourceInSub && isTargetInSub) {
+        // Edge is fully inside this sub-circuit
+        visibleEdges.push(edge);
+      } else if (isTargetInSub && !isSourceInSub) {
+        // Incoming edge from outside this sub-circuit
+        const proxyId = `proxy-in-${source}`;
+        if (!proxyInputs[source]) {
+          proxyInputs[source] = proxyId;
+          const label = source.split('.').pop() || source;
+          visibleNodes.push({
+            id: proxyId,
+            type: 'dataSourceNode',
+            position: { x: 20, y: 100 + Object.keys(proxyInputs).length * 150 },
+            data: {
+              label: `From ${label}`,
+              class: 'ProxyInput',
+              variables: {}
+            },
+            style: { borderStyle: 'dashed', opacity: 0.8 }
+          });
+        }
+        visibleEdges.push({
+          ...edge,
+          id: `e-proxy-in-${source}-${target}`,
+          source: proxyId,
+          sourceHandle: 'flow-out'
+        });
+      } else if (isSourceInSub && !isTargetInSub) {
+        // Outgoing edge to outside this sub-circuit
+        const proxyId = `proxy-out-${target}`;
+        if (!proxyOutputs[target]) {
+          proxyOutputs[target] = proxyId;
+          const label = target.split('.').pop() || target;
+          visibleNodes.push({
+            id: proxyId,
+            type: 'factoryNode',
+            position: { x: 950, y: 100 + Object.keys(proxyOutputs).length * 150 },
+            data: {
+              label: `To ${label}`,
+              class: 'ProxyOutput',
+              variables: {}
+            },
+            style: { borderStyle: 'dashed', opacity: 0.8 }
+          });
+        }
+        visibleEdges.push({
+          ...edge,
+          id: `e-proxy-out-${source}-${target}`,
+          target: proxyId,
+          targetHandle: 'flow-in'
+        });
+      }
+    }
+  });
+
+  const onNodesChangeWrapped = useCallback((changes: any) => {
+    const filteredChanges = changes.filter((c: any) => !c.id.startsWith('proxy-'));
+    onNodesChange(filteredChanges);
+  }, [onNodesChange]);
+
+  const onNodeDoubleClick = useCallback((_: any, node: Node) => {
+    const hasChildren = nodes.some(n => n.id.startsWith(node.id + '.'));
+    const isContainerClass = ['ConcentratorPlant', 'DRSModel', 'Module', 'ProcessingPlant', 'ContinuousFleetLogistics', 'ConcentratorController', 'ConcentratorModel'].includes((node.data as any).class);
+    if (hasChildren || isContainerClass) {
+      setCurrentParentId(node.id);
+      setSelectedNode(null);
+    }
+  }, [nodes]);
+
   return (
     <div className="flex w-screen h-screen bg-slate-950 font-sans text-slate-100 overflow-hidden">
       {/* Sidebar palette & controls */}
@@ -777,24 +928,57 @@ const CanvasEditor = () => {
       />
 
       {/* React Flow Editor Grid */}
-      <div className="flex-1 h-full relative" ref={reactFlowWrapper}>
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          onNodeClick={onNodeClick}
-          onPaneClick={() => setSelectedNode(null)}
-          onNodeDragStop={onNodeDragStop}
-          onInit={setReactFlowInstance}
-          onDrop={onDrop}
-          onDragOver={onDragOver}
-          nodeTypes={nodeTypes}
-          isValidConnection={isValidConnection}
-          fitView
-          colorMode="dark"
-        >
+      <div className="flex-1 h-full relative flex flex-col" ref={reactFlowWrapper}>
+        {/* Breadcrumb Navigation bar */}
+        {currentParentId && (
+          <div className="bg-slate-900 border-b border-slate-800/80 px-4 py-2 flex items-center gap-2 text-xs font-semibold z-10 text-slate-300">
+            <button
+              onClick={() => setCurrentParentId(null)}
+              className="text-sky-400 hover:text-sky-350 transition-colors"
+            >
+              Root
+            </button>
+            {currentParentId.split('.').map((part, index, arr) => {
+              const path = arr.slice(0, index + 1).join('.');
+              const isLast = index === arr.length - 1;
+              return (
+                <React.Fragment key={path}>
+                  <span className="text-slate-600">/</span>
+                  {isLast ? (
+                    <span className="text-white font-bold">{part}</span>
+                  ) : (
+                    <button
+                      onClick={() => setCurrentParentId(path)}
+                      className="text-sky-400 hover:text-sky-350 transition-colors"
+                    >
+                      {part}
+                    </button>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="flex-1 h-full relative">
+          <ReactFlow
+            nodes={visibleNodes}
+            edges={visibleEdges}
+            onNodesChange={onNodesChangeWrapped}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onNodeClick={onNodeClick}
+            onNodeDoubleClick={onNodeDoubleClick}
+            onPaneClick={() => setSelectedNode(null)}
+            onNodeDragStop={onNodeDragStop}
+            onInit={setReactFlowInstance}
+            onDrop={onDrop}
+            onDragOver={onDragOver}
+            nodeTypes={nodeTypes}
+            isValidConnection={isValidConnection}
+            fitView
+            colorMode="dark"
+          >
           <Controls className="!bg-slate-900 !border-slate-800 !text-white [&_button]:!border-slate-800 [&_button]:!bg-slate-900 [&_button:hover]:!bg-slate-800" />
           <MiniMap 
             nodeColor={(node) => {
@@ -809,6 +993,7 @@ const CanvasEditor = () => {
           />
           <Background color="#334155" gap={20} size={1} />
         </ReactFlow>
+      </div>
       </div>
 
       {/* Editor Inspector Panel */}

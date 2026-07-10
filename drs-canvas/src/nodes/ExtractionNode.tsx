@@ -14,6 +14,7 @@ interface ExtractionNodeData {
     [key: string]: VariableInfo;
   };
   connections?: any;
+  isContainer?: boolean;
 }
 
 export const ExtractionNode = ({ data, selected }: { data: ExtractionNodeData; selected?: boolean }) => {
@@ -33,7 +34,14 @@ export const ExtractionNode = ({ data, selected }: { data: ExtractionNodeData; s
       <div className="flex items-center gap-2 pb-2 mb-2 border-b border-amber-900/30">
         <Pickaxe className="w-5 h-5 text-amber-500" />
         <div>
-          <div className="text-xs text-amber-500/80 font-bold uppercase tracking-wider">Mine Face</div>
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-amber-500/80 font-bold uppercase tracking-wider">Mine Face</div>
+            {data.isContainer && (
+              <span className="text-[9px] bg-amber-950/60 border border-amber-800/40 px-1 py-0.5 rounded text-amber-300 font-semibold font-sans">
+                Sub-circuit
+              </span>
+            )}
+          </div>
           <div className="text-sm font-semibold">{data.label}</div>
         </div>
       </div>

@@ -13,6 +13,7 @@ interface FactoryNodeData {
   variables: {
     [key: string]: VariableInfo;
   };
+  isContainer?: boolean;
 }
 
 export const FactoryNode = ({ data, selected }: { data: FactoryNodeData; selected?: boolean }) => {
@@ -50,7 +51,14 @@ export const FactoryNode = ({ data, selected }: { data: FactoryNodeData; selecte
       <div className="flex items-center gap-2 pb-2 mb-2 border-b border-purple-900/30">
         <Factory className="w-5 h-5 text-purple-400" />
         <div>
-          <div className="text-xs text-purple-400 font-bold uppercase tracking-wider">Factory / Plant</div>
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-purple-400 font-bold uppercase tracking-wider">Factory / Plant</div>
+            {data.isContainer && (
+              <span className="text-[9px] bg-purple-950/60 border border-purple-800/40 px-1 py-0.5 rounded text-purple-300 font-semibold font-sans">
+                Sub-circuit
+              </span>
+            )}
+          </div>
           <div className="text-sm font-semibold">{data.label}</div>
         </div>
       </div>

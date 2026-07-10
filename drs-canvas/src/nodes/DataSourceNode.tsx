@@ -13,6 +13,7 @@ interface DataSourceNodeData {
   variables: {
     [key: string]: VariableInfo;
   };
+  isContainer?: boolean;
 }
 
 export const DataSourceNode = ({ data, selected }: { data: DataSourceNodeData; selected?: boolean }) => {
@@ -23,7 +24,14 @@ export const DataSourceNode = ({ data, selected }: { data: DataSourceNodeData; s
       <div className="flex items-center gap-2 pb-2 mb-2 border-b border-emerald-900/30">
         <RefreshCw className="w-5 h-5 text-emerald-500" />
         <div>
-          <div className="text-xs text-emerald-500/80 font-bold uppercase tracking-wider">Data Source</div>
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-emerald-500/80 font-bold uppercase tracking-wider">Data Source</div>
+            {data.isContainer && (
+              <span className="text-[9px] bg-emerald-950/60 border border-emerald-800/40 px-1 py-0.5 rounded text-emerald-300 font-semibold font-sans">
+                Sub-circuit
+              </span>
+            )}
+          </div>
           <div className="text-sm font-semibold">{data.label}</div>
         </div>
       </div>

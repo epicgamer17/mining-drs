@@ -549,3 +549,12 @@ i notice a lot of masking a lot of if length less than max this, or *X<Y and stu
 We have our different variable types. should we do what he did and use a simple String to determine that or make new types to represent these? 
 
 the arena method uses matrices and vectors, are these the best way? or is this an artifact of arena?
+
+--- 
+
+
+Allow for the different development phases. This is somewhat mining specific and may be better in the mining-drs goals but i think in general many projects have phases of development and varying levels of abstraction. 
+
+Strategic Planning & Feasibility (High Abstraction)
+Pre-Feasibility & Detailed Engineering Design (Intermediate Abstraction)
+Execution & Operational Control (Low Abstraction)

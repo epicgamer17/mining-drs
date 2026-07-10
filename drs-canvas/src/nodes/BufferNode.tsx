@@ -16,6 +16,7 @@ interface BufferNodeData {
   variables: {
     [key: string]: VariableInfo;
   };
+  isContainer?: boolean;
 }
 
 export const BufferNode = ({ data, selected }: { data: BufferNodeData; selected?: boolean }) => {
@@ -52,7 +53,14 @@ export const BufferNode = ({ data, selected }: { data: BufferNodeData; selected?
       <div className="flex items-center gap-2 pb-2 mb-2 border-b border-sky-900/30">
         <Database className="w-5 h-5 text-sky-500" />
         <div>
-          <div className="text-xs text-sky-500/80 font-bold uppercase tracking-wider">Buffer / Stockpile</div>
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-sky-500/80 font-bold uppercase tracking-wider">Buffer / Stockpile</div>
+            {data.isContainer && (
+              <span className="text-[9px] bg-sky-950/60 border border-sky-800/40 px-1 py-0.5 rounded text-sky-300 font-semibold font-sans">
+                Sub-circuit
+              </span>
+            )}
+          </div>
           <div className="text-sm font-semibold">{data.label}</div>
         </div>
       </div>
