@@ -107,7 +107,3 @@ results.summary()       # Table of means and stds per scenario
 results.compare()       # Auto-generated comparison dashboard
 results.report_md()     # Markdown report for docs
 This would make parameter sweeps, sensitivity analysis, and Monte Carlo studies trivial instead of requiring custom scripts.
-
-Block model support
-
-ingest and mutate these models seamlessly without bottlenecks.  Agnostic File Parsing: Native parsers for CSV, ASCII, and binary formats from major General Mining Packages (GMPs) like Datamine (.dm), Vulcan (.bm), and Deswik.Volumetric & Spatial Grid Engine:Support for sub-blocking (splitting parent blocks into smaller child blocks near geological boundaries) and partial blocks (blocks cut by topographic lines or ownership boundaries).Fast spatial spatial-indexing (e.g., Octrees or $R^*$-trees) to quickly query a block's physical neighbors. This is critical for evaluating whether mining a specific block violates slope constraints.Geological & Variable Normalization: An ETL (Extract, Transform, Load) pipeline that maps diverse raw variables (e.g., Cu_pct, Au_gpt, Density, RockType, Hardness) into clean normalized arrays that your RL environment's state-space can digest.

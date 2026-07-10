@@ -6,8 +6,20 @@ interface VariableInfo {
   value: number;
   lower_threshold?: number | string;
   upper_threshold?: number | string;
-  rate?: number | string;
+  rate?: number | string | { equation: string };
 }
+
+const isRateEquation = (rate: any): boolean => {
+  if (typeof rate === 'object' && rate !== null && 'equation' in rate) return true;
+  if (typeof rate === 'string' && rate !== 'Infinity' && rate !== '-Infinity' && rate !== 'NaN') return true;
+  return false;
+};
+
+const getRateEquationString = (rate: any): string => {
+  if (typeof rate === 'object' && rate !== null && 'equation' in rate) return rate.equation;
+  if (typeof rate === 'string') return rate;
+  return '';
+};
 
 interface NodeData {
   label: string;
@@ -96,12 +108,18 @@ export const Inspector = ({ selectedNode, onUpdateNode, onClose }: InspectorProp
     setVariables(updated);
   };
 
-  const handleVariableChange = (name: string, field: keyof VariableInfo, val: string) => {
+  const handleVariableChange = (name: string, field: keyof VariableInfo, val: string, isEquation: boolean = false) => {
     const updated = { ...variables };
     const currentVar = updated[name];
     if (!currentVar) return;
 
-    if (field === 'value' || field === 'rate') {
+    if (field === 'rate') {
+      if (isEquation) {
+        currentVar.rate = { equation: val };
+      } else {
+        currentVar.rate = parseFloat(val) || 0;
+      }
+    } else if (field === 'value') {
       currentVar[field] = parseFloat(val) || 0;
     } else if (field === 'lower_threshold' || field === 'upper_threshold') {
       if (val === '-Infinity' || val === 'Infinity' || val === '') {
@@ -223,15 +241,55 @@ export const Inspector = ({ selectedNode, onUpdateNode, onClose }: InspectorProp
                         />
                       </div>
                     </div>
-                    <div>
-                      <span className="text-[9px] text-slate-500 uppercase tracking-wider">Current Rate</span>
-                      <input
-                        type="number"
-                        step="any"
-                        value={varInfo.rate ?? 0.0}
-                        onChange={(e) => handleVariableChange(name, 'rate', e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 mt-0.5 font-mono text-amber-500"
-                      />
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center mb-0.5">
+                        <span className="text-[9px] text-slate-500 uppercase tracking-wider">Current Rate</span>
+                        <div className="flex gap-1 bg-slate-900 p-0.5 rounded border border-slate-800">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const hasEq = isRateEquation(varInfo.rate);
+                              const currentVal = hasEq ? 0.0 : (parseFloat(varInfo.rate as string) || 0.0);
+                              handleVariableChange(name, 'rate', currentVal.toString(), false);
+                            }}
+                            className={`px-1.5 py-0.5 text-[9px] rounded font-semibold transition-all ${
+                              !isRateEquation(varInfo.rate) ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            Static
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const hasEq = isRateEquation(varInfo.rate);
+                              const defaultEq = hasEq ? getRateEquationString(varInfo.rate) : '';
+                              handleVariableChange(name, 'rate', defaultEq, true);
+                            }}
+                            className={`px-1.5 py-0.5 text-[9px] rounded font-semibold transition-all ${
+                              isRateEquation(varInfo.rate) ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            Equation
+                          </button>
+                        </div>
+                      </div>
+                      {isRateEquation(varInfo.rate) ? (
+                        <input
+                          type="text"
+                          value={getRateEquationString(varInfo.rate)}
+                          onChange={(e) => handleVariableChange(name, 'rate', e.target.value, true)}
+                          placeholder="e.g. self.sibling.mass * 0.1"
+                          className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 mt-0.5 font-mono text-amber-400 text-xs focus:border-amber-500 focus:outline-none"
+                        />
+                      ) : (
+                        <input
+                          type="number"
+                          step="any"
+                          value={typeof varInfo.rate === 'number' ? varInfo.rate : parseFloat(varInfo.rate as string) || 0.0}
+                          onChange={(e) => handleVariableChange(name, 'rate', e.target.value, false)}
+                          className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 mt-0.5 font-mono text-sky-400"
+                        />
+                      )}
                     </div>
                   </div>
                 )}

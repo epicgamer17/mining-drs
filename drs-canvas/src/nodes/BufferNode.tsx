@@ -83,8 +83,21 @@ export const BufferNode = ({ data, selected }: { data: BufferNodeData; selected?
             {varInfo.rate !== undefined && (
               <div className="flex justify-between items-center text-[10px] text-slate-500">
                 <span>rate</span>
-                <span className="text-amber-500/90 font-mono">
-                  {typeof varInfo.rate === 'object' ? 'Equation' : varInfo.rate}
+                <span 
+                  className="text-amber-500/90 font-mono truncate max-w-[120px]" 
+                  title={
+                    typeof varInfo.rate === 'object' && varInfo.rate !== null && 'equation' in varInfo.rate
+                      ? varInfo.rate.equation
+                      : typeof varInfo.rate === 'string'
+                      ? varInfo.rate
+                      : String(varInfo.rate)
+                  }
+                >
+                  {typeof varInfo.rate === 'object' && varInfo.rate !== null && 'equation' in varInfo.rate
+                    ? varInfo.rate.equation
+                    : typeof varInfo.rate === 'string'
+                    ? varInfo.rate
+                    : varInfo.rate}
                 </span>
               </div>
             )}

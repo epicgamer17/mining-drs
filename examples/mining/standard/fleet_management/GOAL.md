@@ -371,4 +371,40 @@ standard/many_faces_simulation.py
 
 Comparison runner, CSV summaries, and generated plots. 
 
- 
+ --- 
+
+two stages: Macro-Allocation (linear/integer programming to determine required hourly tonnages per route) and Micro-Dispatching (real-time truck assignment). Right now focusing on Macro-Allocation
+
+Legacy Rule-Based Heuristics (Single-Stage)
+These are quick, local rules of thumb. They are incredibly robust to sudden disruptions (like a truck breaking down) but suffer from a lack of global optimization.
+
+Nearest Shovel (NS): When a truck dumps its load, it is immediately dispatched to the geographically closest available loading unit.
+
+Flaw: Causes massive truck queues at shovels close to the waste dump/crusher while starving distant shovels.
+
+Minimizing Truck Waiting Time / Earliest Ready Shovel (ERS): Looks at the current state of all shovels, estimates their queue lengths, and sends the truck to the shovel where it will wait the absolute least amount of time to get loaded.
+
+Shortest Processing Time First (SPTF): Prioritizes routing trucks to the fastest shovels (e.g., massive hydraulic rope shovels over smaller front-end loaders) to keep high-capacity equipment moving.
+
+Fixed Group Allocation: Trucks are assigned to a specific shovel group at the start of a shift and never change routes.
+
+Two-Stage Optimization (The Industry Benchmark)
+This is what premium commercial FMS packages use. It combines global math programming with real-time heuristic adjustments. Your development team should implement this as your primary "boss baseline" to beat.
+
++--------------------------------------------------------+
+| STAGE 1: Linear Programming (LP) / Network Flow        |
+| - Runs every 20-30 minutes.                           |
+| - Calculates optimal flow rates (tons/hr) per path.     |
+| - Constraints: Shovel capacities, crusher demands.     |
++---------------------------+----------------------------+
+                            | Outputs target flow rates
+                            v
++--------------------------------------------------------+
+| STAGE 2: Dynamic Heuristic Real-Time Dispatching      |
+| - Runs the moment a truck requests a destination.      |
+| - Evaluates which assignment minimizes deviation       |
+|   from the Stage 1 LP's target flow rates.             |
++--------------------------------------------------------+
+Stage 1: Linear Programming (LP) / Network Flow: Every 20 to 30 minutes, a global LP solver (like Gurobi or CPLEX) looks at the mine network. It solves a classic transportation problem to find the optimal flow rates (tons per hour) across every road path to maximize production while honoring blending constraints at the crusher.
+
+Stage 2: Current Value / Goal Programming Dispatches: When a truck actually calls in for a dispatch, the system doesn't re-run the massive LP. Instead, it uses a heuristic rule to calculate which assignment will minimize the current deviation from the target flow rates calculated in Stage 1.
