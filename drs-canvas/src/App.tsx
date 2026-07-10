@@ -186,25 +186,45 @@ const CanvasEditor = () => {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selectedNode, setSelectedNode] = useState<{ id: string; data: any } | null>(null);
+  const [isCompiling, setIsCompiling] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
 
-  // Load from local storage or defaults
+  // Load from dev server with fallback to localStorage or defaults
   useEffect(() => {
-    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (saved) {
+    const loadTopology = async () => {
       try {
-        const parsed = JSON.parse(saved);
-        setNodes(parsed.nodes || []);
-        setEdges(parsed.edges || []);
-        return;
-      } catch (e) {
-        console.error('Error restoring localStorage topology, resetting to defaults.', e);
+        const res = await fetch('/api/topology');
+        if (res.ok) {
+          const parsed = await res.json();
+          if (parsed && Array.isArray(parsed.nodes)) {
+            setNodes(parsed.nodes);
+            setEdges(parsed.edges || []);
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load topology from dev server, falling back to localStorage.', err);
       }
-    }
-    setNodes(initialNodes);
-    setEdges(initialEdges);
+
+      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          setNodes(parsed.nodes || []);
+          setEdges(parsed.edges || []);
+          return;
+        } catch (e) {
+          console.error('Error restoring localStorage topology, resetting to defaults.', e);
+        }
+      }
+      setNodes(initialNodes);
+      setEdges(initialEdges);
+    };
+
+    loadTopology();
   }, [setNodes, setEdges]);
 
   // Persist to local storage
@@ -227,6 +247,53 @@ const CanvasEditor = () => {
       return next;
     });
   }, [nodes, setEdges, saveToLocalStorage]);
+
+  const onSaveToWorkspace = useCallback(async () => {
+    setIsSaving(true);
+    try {
+      const res = await fetch('/api/topology', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ nodes, edges })
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'ok') {
+        alert('Successfully saved canvas and translated topology to workspace!');
+      } else {
+        alert(`Failed to save: ${data.error || 'Unknown error'}`);
+      }
+    } catch (err) {
+      alert(`Network error saving to workspace: ${err}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }, [nodes, edges]);
+
+  const onVerifyCompile = useCallback(async () => {
+    setIsCompiling(true);
+    try {
+      const res = await fetch('/api/compile', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ nodes, edges })
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'ok') {
+        alert(`Verification Success!\n\n${data.message}`);
+      } else {
+        const details = data.details ? `\n\nDetails:\n${data.details}` : '';
+        alert(`Verification Failed!\n\nError: ${data.message}${details}`);
+      }
+    } catch (err) {
+      alert(`Network error verifying compilation: ${err}`);
+    } finally {
+      setIsCompiling(false);
+    }
+  }, [nodes, edges]);
 
   const onConnect = useCallback(
     (params: Connection) => {
@@ -699,7 +766,15 @@ const CanvasEditor = () => {
   return (
     <div className="flex w-screen h-screen bg-slate-950 font-sans text-slate-100 overflow-hidden">
       {/* Sidebar palette & controls */}
-      <Sidebar onExport={onExport} onImport={onImport} onClear={onClear} />
+      <Sidebar 
+        onExport={onExport} 
+        onImport={onImport} 
+        onClear={onClear} 
+        onSaveToWorkspace={onSaveToWorkspace}
+        onVerifyCompile={onVerifyCompile}
+        isSaving={isSaving}
+        isCompiling={isCompiling}
+      />
 
       {/* React Flow Editor Grid */}
       <div className="flex-1 h-full relative" ref={reactFlowWrapper}>

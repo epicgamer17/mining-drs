@@ -1,13 +1,25 @@
 import React from 'react';
-import { Pickaxe, Database, Factory, RefreshCw, Download, Upload, Trash2, Layers } from 'lucide-react';
+import { Pickaxe, Database, Factory, RefreshCw, Download, Upload, Trash2, Layers, Save, CheckCircle } from 'lucide-react';
 
 interface SidebarProps {
   onExport: (format: 'flat' | 'hierarchical') => void;
   onImport: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onClear: () => void;
+  onSaveToWorkspace: () => void;
+  onVerifyCompile: () => void;
+  isSaving: boolean;
+  isCompiling: boolean;
 }
 
-export const Sidebar = ({ onExport, onImport, onClear }: SidebarProps) => {
+export const Sidebar = ({ 
+  onExport, 
+  onImport, 
+  onClear,
+  onSaveToWorkspace,
+  onVerifyCompile,
+  isSaving,
+  isCompiling
+}: SidebarProps) => {
   const onDragStart = (event: React.DragEvent, nodeType: string) => {
     event.dataTransfer.setData('application/reactflow', nodeType);
     event.dataTransfer.effectAllowed = 'move';
@@ -88,6 +100,35 @@ export const Sidebar = ({ onExport, onImport, onClear }: SidebarProps) => {
       {/* Footer Controls & Save/Load */}
       <div className="space-y-3 pt-4 border-t border-slate-800">
         <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Topology Pipeline</h2>
+        
+        {/* Workspace Sync */}
+        <div className="space-y-2 pb-2 border-b border-slate-800/60">
+          <button
+            onClick={onSaveToWorkspace}
+            disabled={isSaving}
+            className={`w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${
+              isSaving 
+                ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-800' 
+                : 'bg-gradient-to-r from-sky-600 to-sky-500 hover:from-sky-500 hover:to-sky-400 text-white shadow-lg shadow-sky-950/20 border border-sky-600/30'
+            }`}
+          >
+            <Save className={`w-4 h-4 ${isSaving ? 'animate-pulse' : ''}`} />
+            {isSaving ? 'Saving...' : 'Save to Workspace'}
+          </button>
+
+          <button
+            onClick={onVerifyCompile}
+            disabled={isCompiling}
+            className={`w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-xs font-semibold transition-all border ${
+              isCompiling 
+                ? 'bg-slate-800 text-slate-500 border-slate-800 cursor-not-allowed' 
+                : 'bg-slate-950/40 hover:bg-slate-800 border-slate-800 text-amber-400 hover:text-amber-300'
+            }`}
+          >
+            <CheckCircle className={`w-4 h-4 ${isCompiling ? 'animate-spin' : ''}`} />
+            {isCompiling ? 'Verifying...' : 'Verify & Compile Python'}
+          </button>
+        </div>
         
         <div className="grid grid-cols-2 gap-2">
           <button
