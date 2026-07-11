@@ -6,10 +6,12 @@ import matplotlib.pyplot as plt
 import argparse
 
 # Ensure the root directory is on the path so we can import 'examples.mining'
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../")))
+sys.path.append(
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../"))
+)
 
-from examples.mining.rl.environments import MiningRLEnv, RLMineConfig
-from examples.mining.components import ConcentratorConfig
+from drs_mining.rl.environments import MiningRLEnv, RLMineConfig
+from drs_mining.components import ConcentratorConfig
 from dqn_surging_modes import DQN
 from ppo_surging_modes import ActorCritic
 from ppo_lstm_surging_modes import ActorCriticLSTM
@@ -155,10 +157,12 @@ def plot_rl_monte_carlo_throughput(
     plt.grid(True, linestyle="--", alpha=0.7)
 
     plt.savefig(
-        f"Monte_Carlo_Throughput_Fig5_{model_name}.png", dpi=300, bbox_inches="tight"
+        f"plots/Monte_Carlo_Throughput_Fig5_{model_name}.png",
+        dpi=300,
+        bbox_inches="tight",
     )
     plt.close()
-    print(f"Saved 'Monte_Carlo_Throughput_Fig5_{model_name}.png'.\n")
+    print(f"Saved 'plots/Monte_Carlo_Throughput_Fig5_{model_name}.png'.\n")
 
 
 def plot_policy_decision_heatmap(
@@ -298,14 +302,18 @@ def plot_policy_decision_heatmap(
 
     fig.suptitle(f"Policy Decision Heatmap ({model_name})", fontsize=16)
     plt.tight_layout()
-    out_name = f"Policy_Decision_Heatmap_{model_name}.png"
+    out_name = f"plots/Policy_Decision_Heatmap_{model_name}.png"
     plt.savefig(out_name, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"Saved '{out_name}'.")
 
 
 def plot_non_stationary_time_slice(
-    model, model_name: str, device, config: RLMineConfig, ore_fractions=[10, 25, 50, 75, 90]
+    model,
+    model_name: str,
+    device,
+    config: RLMineConfig,
+    ore_fractions=[10, 25, 50, 75, 90],
 ):
     print(f"\n--- Generating Non-Stationary Time Slice for {model_name} ---")
     target_stock = config.sim_config.target_ore_stock_level
@@ -315,7 +323,11 @@ def plot_non_stationary_time_slice(
     ore1_vals = np.linspace(0, target_stock, 100)
 
     fig, axes = plt.subplots(
-        2, len(ore_fractions), figsize=(5 * len(ore_fractions), 10), sharex=True, sharey=True
+        2,
+        len(ore_fractions),
+        figsize=(5 * len(ore_fractions), 10),
+        sharex=True,
+        sharey=True,
     )
     if len(ore_fractions) == 1:
         axes = np.array([axes]).T
@@ -441,7 +453,7 @@ def plot_non_stationary_time_slice(
 
     fig.suptitle(f"Non-Stationary Time Slice ({model_name})", fontsize=16)
     plt.tight_layout()
-    out_name = f"Non_Stationary_Time_Slice_{model_name}.png"
+    out_name = f"plots/Non_Stationary_Time_Slice_{model_name}.png"
     plt.savefig(out_name, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"Saved '{out_name}'.")
@@ -539,21 +551,32 @@ def generate_rl_dashboard(
     result = env.engine.run(max_time=env.config.replication_length)
 
     from drs.vis.module_graph import save_module_graph_report
-    save_module_graph_report(env.sim, path_prefix=f"{model_name}_Module_Graph")
+
+    save_module_graph_report(env.sim, path_prefix=f"plots/{model_name}_Module_Graph")
 
     df = result.history
 
     # --- Mode Transition Log ---
     # --- Mode Transition Log ---
     state_change_events = [
-        e for e in result.events 
-        if e.event_type == "STATE_CHANGE" and e.details.get("variable") == "active_operating_mode"
+        e
+        for e in result.events
+        if e.event_type == "STATE_CHANGE"
+        and e.details.get("variable") == "active_operating_mode"
     ]
     if state_change_events:
         print("\n--- Mode Transition Log ---")
         for e in state_change_events:
-            old = e.details['old_value'].name if hasattr(e.details['old_value'], 'name') else str(e.details['old_value'])
-            new = e.details['new_value'].name if hasattr(e.details['new_value'], 'name') else str(e.details['new_value'])
+            old = (
+                e.details["old_value"].name
+                if hasattr(e.details["old_value"], "name")
+                else str(e.details["old_value"])
+            )
+            new = (
+                e.details["new_value"].name
+                if hasattr(e.details["new_value"], "name")
+                else str(e.details["new_value"])
+            )
             print(f"Time: {e.time:.2f} | Transition: {old} -> {new}")
         print("---------------------------\n")
 
@@ -639,7 +662,7 @@ def generate_rl_dashboard(
         plot_safety_margin,
         build_dashboard,
     )
-    from examples.mining.components.plot import (
+    from drs_mining.components.plot import (
         plot_ore_with_modes,
         plot_mode_distribution,
         plot_mode_dwell_times,
@@ -818,7 +841,7 @@ def generate_rl_dashboard(
     fig_comp = build_dashboard(
         df, configs, title=f"Comprehensive Diagnostics ({model_name})", figsize=(18, 69)
     )
-    out_name = f"Comprehensive_Diagnostics_Plot_{model_name}.png"
+    out_name = f"plots/Comprehensive_Diagnostics_Plot_{model_name}.png"
     fig_comp.savefig(out_name)
     plt.close(fig_comp)
     print(f"Saved '{out_name}'.\n")
@@ -916,9 +939,12 @@ def generate_policy_decision_video(
     colors = ["#1f77b4", "#d62728"]
     cmap_discrete = ListedColormap(colors)
 
-    for step_idx, (t_day, current_ore1, current_ore_fraction, chosen_action) in enumerate(
-        trajectory
-    ):
+    for step_idx, (
+        t_day,
+        current_ore1,
+        current_ore_fraction,
+        chosen_action,
+    ) in enumerate(trajectory):
         batch_size = 10000
         grid_obs = np.zeros((batch_size, 5), dtype=np.float32)
         grid_obs[:, 0] = grid_ore1 / target_stock
@@ -1087,14 +1113,17 @@ if __name__ == "__main__":
         default_model_name = f"dqn_mining_drs_model_{int(args.total_stockpile_level)}_{int(args.std_dev_ore_fraction)}.pt"
     elif args.model_type == "rainbow_dqn":
         from rainbow_dqn_surging_modes import RainbowNetwork
+
         model = RainbowNetwork(obs_shape, num_actions, ATOM_SIZE).to(device)
         default_model_name = f"rainbow_dqn_mining_drs_model_{int(args.total_stockpile_level)}_{int(args.std_dev_ore_fraction)}.pt"
     elif args.model_type == "ppo_lstm":
         from ppo_lstm_surging_modes import ActorCriticLSTM
+
         model = ActorCriticLSTM(obs_shape, num_actions).to(device)
         default_model_name = f"ppo_lstm_mining_drs_model_{int(args.total_stockpile_level)}_{int(args.std_dev_ore_fraction)}.pt"
     else:
         from ppo_surging_modes import ActorCritic
+
         model = ActorCritic(obs_shape, num_actions).to(device)
         default_model_name = f"ppo_mining_drs_model_{int(args.total_stockpile_level)}_{int(args.std_dev_ore_fraction)}.pt"
 

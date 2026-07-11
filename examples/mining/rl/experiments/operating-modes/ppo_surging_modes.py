@@ -7,7 +7,9 @@ import sys
 import os
 
 # Ensure the root directory is on the path so we can import 'examples.mining'
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../")))
+sys.path.append(
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../"))
+)
 
 from functional.initialization import layer_init, set_seed
 import torch
@@ -41,7 +43,6 @@ from functional.rollout_buffer import (
     yield_shuffled_minibatches,
 )
 from functional.utils import (
-
     standardize_tensor,
     to_tensor,
     to_numpy_action,
@@ -50,8 +51,8 @@ from tensordict import TensorDict
 
 
 # Import the custom environment and config
-from examples.mining.rl.environments import MiningRLEnv, RLMineConfig
-from examples.mining.components import ConcentratorConfig
+from drs_mining.rl.environments import MiningRLEnv, RLMineConfig
+from drs_mining.components import ConcentratorConfig
 
 # Constants
 LEARNING_RATE = 2.5e-4
@@ -109,9 +110,9 @@ if __name__ == "__main__":
     def make_env(seed, idx):
         def thunk():
             sim_config = ConcentratorConfig(
-                replication_length=99999.0, 
-                std_dev_ore_fraction=args.std_dev_ore_fraction, 
-                target_ore_stock_level=args.total_stockpile_level
+                replication_length=99999.0,
+                std_dev_ore_fraction=args.std_dev_ore_fraction,
+                target_ore_stock_level=args.total_stockpile_level,
             )
             config = RLMineConfig(sim_config=sim_config)
             env = MiningRLEnv(config)
@@ -379,7 +380,10 @@ if __name__ == "__main__":
 
     weights_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights")
     os.makedirs(weights_dir, exist_ok=True)
-    weights_path = os.path.join(weights_dir, f"ppo_mining_drs_model_{int(args.total_stockpile_level)}_{int(args.std_dev_ore_fraction)}.pt")
+    weights_path = os.path.join(
+        weights_dir,
+        f"ppo_mining_drs_model_{int(args.total_stockpile_level)}_{int(args.std_dev_ore_fraction)}.pt",
+    )
     torch.save(model.state_dict(), weights_path)
     print(f"Saved model weights to {weights_path}")
 

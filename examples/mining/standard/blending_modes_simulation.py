@@ -14,7 +14,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import types
 
-from examples.mining.components import ConcentratorConfig, ConcentratorModel
+from drs_mining.components import ConcentratorConfig, ConcentratorModel
 from drs import DRSEngine
 
 
@@ -98,10 +98,12 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
     plt.grid(True, linestyle="--", alpha=0.7)
 
     plt.savefig(
-        "Monte_Carlo_Throughput_Fig5_Standard.png", dpi=300, bbox_inches="tight"
+        "docs/assets/diagnostics/Monte_Carlo_Throughput_Fig5_Standard.png",
+        dpi=300,
+        bbox_inches="tight",
     )
     plt.close()
-    print("Saved 'Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
+    print("Saved 'docs/assets/diagnostics/Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
 
 
 if __name__ == "__main__":
@@ -125,7 +127,7 @@ if __name__ == "__main__":
     sim = ConcentratorModel(config, enable_telemetry=True)
 
     # Generates an interactive dashboard spanning all operating modes
-    from examples.mining.components.modes import MODES
+    from drs_mining.components.modes import MODES
 
     # Run your massive Monte Carlo simulation at lightning speed
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
@@ -134,27 +136,39 @@ if __name__ == "__main__":
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
     result = engine.run(max_time=config.replication_length)
-    
+
     print(result.summary())
-    
+
     sim.print_statistics()
 
     from drs.vis.module_graph import save_module_graph_report
 
-    save_module_graph_report(sim, path_prefix="Concentrator_Module_Graph")
+    save_module_graph_report(
+        sim, path_prefix="docs/guides/module-graphs/Concentrator_Module_Graph"
+    )
 
     df = result.history
 
     # --- Mode Transition Log ---
     state_change_events = [
-        e for e in result.events 
-        if e.event_type == "STATE_CHANGE" and e.details.get("variable") == "active_operating_mode"
+        e
+        for e in result.events
+        if e.event_type == "STATE_CHANGE"
+        and e.details.get("variable") == "active_operating_mode"
     ]
     if state_change_events:
         print("\n--- Mode Transition Log ---")
         for e in state_change_events:
-            old = e.details['old_value'].name if hasattr(e.details['old_value'], 'name') else str(e.details['old_value'])
-            new = e.details['new_value'].name if hasattr(e.details['new_value'], 'name') else str(e.details['new_value'])
+            old = (
+                e.details["old_value"].name
+                if hasattr(e.details["old_value"], "name")
+                else str(e.details["old_value"])
+            )
+            new = (
+                e.details["new_value"].name
+                if hasattr(e.details["new_value"], "name")
+                else str(e.details["new_value"])
+            )
             print(f"Time: {e.time:.2f} | Transition: {old} -> {new}")
         print("---------------------------\n")
 
@@ -228,7 +242,7 @@ if __name__ == "__main__":
         plot_safety_margin,
         build_dashboard,
     )
-    from examples.mining.components.plot import (
+    from drs_mining.components.plot import (
         plot_ore_with_modes,
         plot_mode_distribution,
         plot_mode_dwell_times,
@@ -407,7 +421,7 @@ if __name__ == "__main__":
     fig_comp = build_dashboard(
         df, configs, title="Comprehensive Mine Diagnostics", figsize=(18, 69)
     )
-    fig_comp.savefig("Comprehensive_Diagnostics_Plot.png")
+    fig_comp.savefig("docs/assets/diagnostics/Comprehensive_Diagnostics_Plot.png")
 
     # Recreate Figure 5 from paper
     plot_monte_carlo_throughput(

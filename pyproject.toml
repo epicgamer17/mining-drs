@@ -14,11 +14,11 @@ dependencies = [
     "pandas>=1.0",
     "numpy>=1.20",
     "matplotlib>=3.5",
-    "gstools>=1.4",
     "rich>=13.0"
 ]
 
 [project.optional-dependencies]
+mining = ["gstools>=1.4"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -37,12 +37,13 @@ rl = [
     "einops",
     "rl-stuff"
 ]
+all = ["mining_drs[mining,rl,dev,docs]"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["drs"]
+packages = ["drs", "drs_mining"]
 
 [tool.coverage.run]
-source = ["drs", "components", "rl"]
+source = ["drs", "drs_mining"]
 omit = [
     "tests/**",
     "examples/**",

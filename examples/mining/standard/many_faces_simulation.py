@@ -24,12 +24,12 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from examples.mining.components import (
+from drs_mining.components import (
     ConcentratorConfig,
     ConcentratorModel,
     ActiveFleetConcentratorModel,
 )
-from examples.mining.components.controllers import MultiFaceConcentratorController
+from drs_mining.components.controllers import MultiFaceConcentratorController
 from drs import DRSEngine
 
 
@@ -54,7 +54,9 @@ def evaluate_throughput(config: ConcentratorConfig, N: int) -> tuple[float, floa
         engine.run(max_time=config.replication_length)
 
         # Calculate Throughput manually as the paper defined it
-        active_time = engine.current_time - sim.controller.cumulative_time_shutdown.value
+        active_time = (
+            engine.current_time - sim.controller.cumulative_time_shutdown.value
+        )
         if active_time > 0:
             throughput = (
                 (
@@ -114,13 +116,16 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
     plt.grid(True, linestyle="--", alpha=0.7)
 
     plt.savefig(
-        "Monte_Carlo_Throughput_Fig5_Standard.png", dpi=300, bbox_inches="tight"
+        "docs/assets/diagnostics/Monte_Carlo_Throughput_Fig5_Standard.png",
+        dpi=300,
+        bbox_inches="tight",
     )
     plt.close()
-    print("Saved 'Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
+    print("Saved 'docs/assets/diagnostics/Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
 
 
 import types
+
 
 def _apply_equal_allocation(sim):
     n = len(sim.controller.faces)
@@ -128,31 +133,36 @@ def _apply_equal_allocation(sim):
     # Force the physical fleet dispatch to always be evenly split
     for k in sim.controller._mode_allocations.keys():
         sim.controller._mode_allocations[k] = fracs
-        
+
     orig_forward = sim.controller.forward
+
     def _equal_forward(self):
-        orig_forward() # wait, orig_forward is bound method?
+        orig_forward()  # wait, orig_forward is bound method?
         # If we use types.MethodType, orig_forward is an unbound function?
         # Actually in run_and_analyze we did orig_forward = MultiFaceConcentratorController.forward
         pass
 
+
 # Let's write it cleaner.
 def _apply_equal_allocation_to_sim(sim):
-    from examples.mining.components.controllers import MultiFaceConcentratorController
+    from drs_mining.components.controllers import MultiFaceConcentratorController
     import types
+
     n = len(sim.controller.faces)
     fracs = [1.0 / n] * n
     # Force the physical fleet dispatch to always be evenly split
     for k in sim.controller._mode_allocations.keys():
         sim.controller._mode_allocations[k] = fracs
-        
+
     orig_forward = MultiFaceConcentratorController.forward
+
     def _equal_forward(self):
         orig_forward(self)
         rate = self.target_mine_mass_rate.value / n
         for i in range(n):
             self.face_target_rates[i].value = rate
             self.face_shift_allocation_fractions[i].value = fracs[i]
+
     sim.controller.forward = types.MethodType(_equal_forward, sim.controller)
 
 
@@ -164,7 +174,7 @@ def _run_capacity_case(
     np_seed: int = 42,
     random_seed: int = 11,
 ):
-    from examples.mining.components.modes import MODES
+    from drs_mining.components.modes import MODES
 
     np.random.seed(np_seed)
     random.seed(random_seed)
@@ -189,7 +199,9 @@ def _run_capacity_case(
     df["total_real_extraction_rate"] = (
         df["face1_real_extraction_rate"] + df["face2_real_extraction_rate"]
     )
-    df["total_achieved_extraction_rate"] = df["face1_achieved_extraction_rate"] + df["face2_achieved_extraction_rate"]
+    df["total_achieved_extraction_rate"] = (
+        df["face1_achieved_extraction_rate"] + df["face2_achieved_extraction_rate"]
+    )
     df["capacity_gap_rate"] = (
         df["total_target_extraction_rate"] - df["total_achieved_extraction_rate"]
     ).clip(lower=0.0)
@@ -208,11 +220,15 @@ def _run_capacity_case(
         "scenario": label,
         "final_time": float(df["time"].iloc[-1]),
         "fleet_shift_count": float(df["fleet_shift_count"].max()),
-        "mean_total_target_extraction_rate": float(df["total_target_extraction_rate"].mean()),
+        "mean_total_target_extraction_rate": float(
+            df["total_target_extraction_rate"].mean()
+        ),
         "mean_total_real_extraction_rate": float(
             df["total_real_extraction_rate"].mean()
         ),
-        "mean_total_achieved_extraction_rate": float(df["total_achieved_extraction_rate"].mean()),
+        "mean_total_achieved_extraction_rate": float(
+            df["total_achieved_extraction_rate"].mean()
+        ),
         "mean_face1_operational_downtime_fraction": float(
             df["face1_operational_downtime_fraction"].mean()
         ),
@@ -234,7 +250,7 @@ def run_capacity_comparison(
     max_time: float = 60.0,
 ):
     import pandas as pd
-    from examples.mining.components.plot import plot_ore_with_modes
+    from drs_mining.components.plot import plot_ore_with_modes
 
     # Both configurations are physically identical, we only change the control strategy
     cases = [
@@ -310,7 +326,9 @@ def run_capacity_comparison(
             label=f"{label} required",
         )
         axes[0].plot(
-            group["time"], group["total_achieved_extraction_rate"], label=f"{label} actual"
+            group["time"],
+            group["total_achieved_extraction_rate"],
+            label=f"{label} actual",
         )
         axes[1].plot(group["time"], group["capacity_gap_rate"], label=label)
         axes[2].plot(group["time"], group["capacity_utilization"], label=label)
@@ -318,7 +336,9 @@ def run_capacity_comparison(
         mode_y = group["active_operating_mode_name"].map(mode_to_y)
         axes[4].step(group["time"], mode_y, where="post", label=label)
         axes[5].plot(
-            group["time"], group["face1_achieved_extraction_rate"], label=f"{label} face1"
+            group["time"],
+            group["face1_achieved_extraction_rate"],
+            label=f"{label} face1",
         )
         axes[5].plot(
             group["time"],
@@ -347,7 +367,11 @@ def run_capacity_comparison(
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend()
     fig.tight_layout()
-    fig.savefig("Capacity_Policy_Comparison.png", dpi=300, bbox_inches="tight")
+    fig.savefig(
+        "docs/assets/diagnostics/Capacity_Policy_Comparison.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
     palette = {
@@ -369,7 +393,13 @@ def run_capacity_comparison(
         for mode_label, mode_names in mode_groups.items():
             diagnostic_df[mode_label] = diagnostic_df[
                 "active_operating_mode_name"
-            ].apply(lambda mode: len(mode_groups) - list(mode_groups).index(mode_label) if mode in mode_names else 0)
+            ].apply(
+                lambda mode: (
+                    len(mode_groups) - list(mode_groups).index(mode_label)
+                    if mode in mode_names
+                    else 0
+                )
+            )
 
         fig_diag, axes_diag = plt.subplots(
             4,
@@ -469,7 +499,7 @@ def run_capacity_comparison(
         safe_label = label.lower().replace(" ", "_").replace("+", "plus")
         safe_label = safe_label.replace("/", "_")
         fig_diag.savefig(
-            f"Capacity_Policy_Diagnostics_{safe_label}.png",
+            f"docs/assets/diagnostics/Capacity_Policy_Diagnostics_{safe_label}.png",
             dpi=300,
             bbox_inches="tight",
         )
@@ -491,7 +521,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     if equal_allocation:
         _apply_equal_allocation_to_sim(sim)
 
-    from examples.mining.components.modes import MODES
+    from drs_mining.components.modes import MODES
 
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
@@ -504,7 +534,9 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     from drs.vis.module_graph import save_module_graph_report
 
     prefix = name.replace(" ", "_")
-    save_module_graph_report(sim, path_prefix=f"Concentrator_Module_Graph_{prefix}")
+    save_module_graph_report(
+        sim, path_prefix=f"docs/guides/module-graphs/Concentrator_Module_Graph_{prefix}"
+    )
 
     df = result.history
 
@@ -597,7 +629,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
         plot_safety_margin,
         build_dashboard,
     )
-    from examples.mining.components.plot import (
+    from drs_mining.components.plot import (
         plot_ore_with_modes,
         plot_mode_distribution,
         plot_mode_dwell_times,
@@ -755,7 +787,10 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
         {
             "func": plot_time_series,
             "kwargs": {
-                "y_columns": ["face1_truck_cycle_time_hours", "face2_truck_cycle_time_hours"],
+                "y_columns": [
+                    "face1_truck_cycle_time_hours",
+                    "face2_truck_cycle_time_hours",
+                ],
                 "title": "Truck Cycle Times (Hours) & Traffic Delays",
                 "is_step": True,
             },
@@ -862,7 +897,9 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     fig_comp = build_dashboard(
         df, configs, title=f"Comprehensive Mine Diagnostics ({name})", figsize=(18, 69)
     )
-    fig_comp.savefig(f"Comprehensive_Diagnostics_Plot_{prefix}.png")
+    fig_comp.savefig(
+        f"docs/assets/diagnostics/Comprehensive_Diagnostics_Plot_{prefix}.png"
+    )
     plt.close(fig_comp)
 
     return df
@@ -893,15 +930,22 @@ if __name__ == "__main__":
         run_capacity_comparison(config, max_time=args.comparison_max_time)
         raise SystemExit(0)
 
-    df_managed = run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocation")
-    df_equal = run_and_analyze(config, equal_allocation=True, name="Equal Fleet Allocation")
+    df_managed = run_and_analyze(
+        config, equal_allocation=False, name="Dynamic Fleet Allocation"
+    )
+    df_equal = run_and_analyze(
+        config, equal_allocation=True, name="Equal Fleet Allocation"
+    )
 
     # Print summary comparison
     print("\n" + "=" * 72)
     print("COMPARISON SUMMARY: Dynamic Fleet Allocation vs Equal Fleet Allocation")
     print("=" * 72)
 
-    for label, df in [("Dynamic Fleet Allocation", df_managed), ("Equal Fleet Allocation", df_equal)]:
+    for label, df in [
+        ("Dynamic Fleet Allocation", df_managed),
+        ("Equal Fleet Allocation", df_equal),
+    ]:
         dt = df["time"].diff().fillna(0)
         final_ore1 = df["Ore1Stock_mass"].iloc[-1]
         final_ore2 = df["Ore2Stock_mass"].iloc[-1]
@@ -910,7 +954,9 @@ if __name__ == "__main__":
         )
         print(f"\n--- {label} ---")
         print(f"  Total extracted: {total_extracted:,.0f} tons")
-        print(f"  Final Ore1 stock: {final_ore1:,.0f} t | Final Ore2 stock: {final_ore2:,.0f} t")
+        print(
+            f"  Final Ore1 stock: {final_ore1:,.0f} t | Final Ore2 stock: {final_ore2:,.0f} t"
+        )
         print(f"  Mode breakdown:")
         for mode_name in df["active_operating_mode_name"].unique():
             mode_dt = dt[df["active_operating_mode_name"] == mode_name].sum()

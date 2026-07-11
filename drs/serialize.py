@@ -587,33 +587,33 @@ def compile_canvas_json(
         # Check drs namespace
         if hasattr(drs, class_name):
             return getattr(drs, class_name)
-        # Check examples.mining.components namespaces
+        # Check drs_mining.components namespaces
         try:
-            import examples.mining.components as mc
+            import drs_mining.components as mc
 
             if hasattr(mc, class_name):
                 return getattr(mc, class_name)
-            import examples.mining.components.models as mm
+            import drs_mining.components.models as mm
 
             if hasattr(mm, class_name):
                 return getattr(mm, class_name)
-            import examples.mining.components.stockpiles as ms
+            import drs_mining.components.stockpiles as ms
 
             if hasattr(ms, class_name):
                 return getattr(ms, class_name)
-            import examples.mining.components.mine_face as mf
+            import drs_mining.components.mine_face as mf
 
             if hasattr(mf, class_name):
                 return getattr(mf, class_name)
-            import examples.mining.components.fleet as mfl
+            import drs_mining.components.fleet as mfl
 
             if hasattr(mfl, class_name):
                 return getattr(mfl, class_name)
-            import examples.mining.components.plant as mp
+            import drs_mining.components.plant as mp
 
             if hasattr(mp, class_name):
                 return getattr(mp, class_name)
-            import examples.mining.components.controllers as mc_ctrl
+            import drs_mining.components.controllers as mc_ctrl
 
             if hasattr(mc_ctrl, class_name):
                 return getattr(mc_ctrl, class_name)

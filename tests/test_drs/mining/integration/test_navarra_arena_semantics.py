@@ -1,12 +1,4 @@
 import math
-import sys
-from pathlib import Path
-
-NAVARRA_STANDARD = (
-    Path(__file__).resolve().parents[3] / "examples" / "mining" / "standard"
-)
-if str(NAVARRA_STANDARD) not in sys.path:
-    sys.path.insert(0, str(NAVARRA_STANDARD))
 
 from drs_mining.components.modes import MODES
 from drs_mining.components.models import ConcentratorModel
