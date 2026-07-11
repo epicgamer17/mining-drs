@@ -116,12 +116,12 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
     plt.grid(True, linestyle="--", alpha=0.7)
 
     plt.savefig(
-        "docs/assets/diagnostics/Monte_Carlo_Throughput_Fig5_Standard.png",
+        "plots/Monte_Carlo_Throughput_Fig5_Standard.png",
         dpi=300,
         bbox_inches="tight",
     )
     plt.close()
-    print("Saved 'docs/assets/diagnostics/Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
+    print("Saved 'plots/Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
 
 
 import types
@@ -368,7 +368,7 @@ def run_capacity_comparison(
         ax.legend()
     fig.tight_layout()
     fig.savefig(
-        "docs/assets/diagnostics/Capacity_Policy_Comparison.png",
+        "plots/Capacity_Policy_Comparison.png",
         dpi=300,
         bbox_inches="tight",
     )
@@ -499,7 +499,7 @@ def run_capacity_comparison(
         safe_label = label.lower().replace(" ", "_").replace("+", "plus")
         safe_label = safe_label.replace("/", "_")
         fig_diag.savefig(
-            f"docs/assets/diagnostics/Capacity_Policy_Diagnostics_{safe_label}.png",
+            f"plots/Capacity_Policy_Diagnostics_{safe_label}.png",
             dpi=300,
             bbox_inches="tight",
         )
@@ -535,7 +535,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
 
     prefix = name.replace(" ", "_")
     save_module_graph_report(
-        sim, path_prefix=f"docs/guides/module-graphs/Concentrator_Module_Graph_{prefix}"
+        sim, path_prefix=f"plots/Concentrator_Module_Graph_{prefix}"
     )
 
     df = result.history
@@ -897,9 +897,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     fig_comp = build_dashboard(
         df, configs, title=f"Comprehensive Mine Diagnostics ({name})", figsize=(18, 69)
     )
-    fig_comp.savefig(
-        f"docs/assets/diagnostics/Comprehensive_Diagnostics_Plot_{prefix}.png"
-    )
+    fig_comp.savefig(f"plots/Comprehensive_Diagnostics_Plot_{prefix}.png")
     plt.close(fig_comp)
 
     return df

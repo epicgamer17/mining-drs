@@ -9,7 +9,7 @@ from dataclasses import replace
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from drs_mining.components.config import ConcentratorConfig
-from examples.mining.standard.many_faces_simulation import _run_capacity_case
+from .simulation import _run_capacity_case
 
 
 def plot_theoretical_fleet_diminishing_returns():
@@ -100,8 +100,8 @@ def plot_theoretical_fleet_diminishing_returns():
     axes[2].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    fig.savefig("docs/assets/comparisons/Diminishing_Returns_Theoretical.png", dpi=300)
-    print("Saved docs/assets/comparisons/Diminishing_Returns_Theoretical.png")
+    fig.savefig("plots/Diminishing_Returns_Theoretical.png", dpi=300)
+    print("Saved plots/Diminishing_Returns_Theoretical.png")
     plt.close(fig)
 
 
@@ -235,10 +235,8 @@ def generate_infinite_vs_constrained_plots():
     axes[2].legend()
 
     plt.tight_layout()
-    fig.savefig(
-        "docs/assets/comparisons/Infinite_vs_Constrained_Simulation.png", dpi=300
-    )
-    print("Saved docs/assets/comparisons/Infinite_vs_Constrained_Simulation.png")
+    fig.savefig("plots/Infinite_vs_Constrained_Simulation.png", dpi=300)
+    print("Saved plots/Infinite_vs_Constrained_Simulation.png")
     plt.close(fig)
 
 

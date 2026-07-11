@@ -98,12 +98,12 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
     plt.grid(True, linestyle="--", alpha=0.7)
 
     plt.savefig(
-        "docs/assets/diagnostics/Monte_Carlo_Throughput_Fig5_Standard.png",
+        "plots/Monte_Carlo_Throughput_Fig5_Standard.png",
         dpi=300,
         bbox_inches="tight",
     )
     plt.close()
-    print("Saved 'docs/assets/diagnostics/Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
+    print("Saved 'plots/Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
 
 
 if __name__ == "__main__":
@@ -143,9 +143,7 @@ if __name__ == "__main__":
 
     from drs.vis.module_graph import save_module_graph_report
 
-    save_module_graph_report(
-        sim, path_prefix="docs/guides/module-graphs/Concentrator_Module_Graph"
-    )
+    save_module_graph_report(sim, path_prefix="plots/Concentrator_Module_Graph")
 
     df = result.history
 
@@ -421,7 +419,7 @@ if __name__ == "__main__":
     fig_comp = build_dashboard(
         df, configs, title="Comprehensive Mine Diagnostics", figsize=(18, 69)
     )
-    fig_comp.savefig("docs/assets/diagnostics/Comprehensive_Diagnostics_Plot.png")
+    fig_comp.savefig("plots/Comprehensive_Diagnostics_Plot.png")
 
     # Recreate Figure 5 from paper
     plot_monte_carlo_throughput(

@@ -7,9 +7,7 @@ import sys
 import os
 
 # Ensure the root directory is on the path so we can import 'examples.mining'
-sys.path.append(
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../"))
-)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from functional.initialization import set_seed
 import torch

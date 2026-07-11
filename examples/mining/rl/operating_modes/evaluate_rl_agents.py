@@ -6,9 +6,7 @@ import matplotlib.pyplot as plt
 import argparse
 
 # Ensure the root directory is on the path so we can import 'examples.mining'
-sys.path.append(
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../"))
-)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from drs_mining.rl.environments import MiningRLEnv, RLMineConfig
 from drs_mining.components import ConcentratorConfig
