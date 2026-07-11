@@ -565,6 +565,7 @@ def compile_canvas_json(
         try:
             import inspect
             import dis
+
             if hasattr(func, "__func__"):
                 func = func.__func__
             insts = list(dis.get_instructions(func))
@@ -635,7 +636,12 @@ def compile_canvas_json(
     # We will also keep track of node JSON configs to construct forward passes later
     nodes_info = {}  # path -> json node copy
 
-    def build_module(name: str, node_data: dict, path: str = "", existing_obj: Optional[Module] = None) -> Module:
+    def build_module(
+        name: str,
+        node_data: dict,
+        path: str = "",
+        existing_obj: Optional[Module] = None,
+    ) -> Module:
         cls_name = node_data.get("class", "Module")
         cls = _resolve_class(cls_name)
 
@@ -644,20 +650,23 @@ def compile_canvas_json(
         else:
             # Instantiate object using smart signature inspection
             import inspect
+
             try:
                 # Check the signature of the class constructor
                 sig = inspect.signature(cls.__init__)
                 params = list(sig.parameters.values())
                 # Exclude self
-                params_no_self = [p for p in params if p.name != 'self']
-                
+                params_no_self = [p for p in params if p.name != "self"]
+
                 # Check if second parameter is config/cfg or if parameter type name contains config
                 has_config_param = False
                 if params_no_self:
                     first_param = params_no_self[0]
-                    if first_param.name in ('config', 'cfg') or 'Config' in str(first_param.annotation):
+                    if first_param.name in ("config", "cfg") or "Config" in str(
+                        first_param.annotation
+                    ):
                         has_config_param = True
-                
+
                 if has_config_param and config is not None:
                     obj = cls(config)
                 else:
@@ -665,7 +674,7 @@ def compile_canvas_json(
                     kwargs = {}
                     has_all_required = True
                     attrs = node_data.get("attributes", {})
-                    
+
                     for param in params_no_self:
                         if param.name in attrs:
                             kwargs[param.name] = attrs[param.name]
@@ -673,7 +682,7 @@ def compile_canvas_json(
                             # Required parameter is missing from attributes
                             has_all_required = False
                             break
-                            
+
                     if has_all_required:
                         obj = cls(**kwargs)
                     else:
@@ -689,7 +698,7 @@ def compile_canvas_json(
         # Restore layout/metadata
         if "layout" in node_data:
             obj.layout = node_data["layout"]
-            
+
         # Restore attributes
         attrs = node_data.get("attributes", {})
         for k, v in attrs.items():
@@ -715,16 +724,24 @@ def compile_canvas_json(
 
             # If variable already exists on obj, reuse it and update value
             existing_var = getattr(obj, var_name, None)
-            if isinstance(existing_var, Variable) and type(existing_var).__name__ == var_class_name:
+            if (
+                isinstance(existing_var, Variable)
+                and type(existing_var).__name__ == var_class_name
+            ):
                 var = existing_var
                 import enum
+
                 if isinstance(var._value, enum.Enum) and isinstance(var_value, str):
                     try:
                         enum_cls = type(var._value)
                         var._value = enum_cls[var_value]
                     except KeyError:
                         var._value = var_value
-                elif hasattr(var._value, "name") and hasattr(var._value, "id") and isinstance(var_value, str):
+                elif (
+                    hasattr(var._value, "name")
+                    and hasattr(var._value, "id")
+                    and isinstance(var_value, str)
+                ):
                     try:
                         enum_cls = type(var._value)
                         var._value = enum_cls(var_value)
@@ -737,7 +754,9 @@ def compile_canvas_json(
                 if var_cls in (Level, Timer):
                     var = var_cls(
                         var_name,
-                        initial_value=var_value if not isinstance(var_value, dict) else 0.0,
+                        initial_value=(
+                            var_value if not isinstance(var_value, dict) else 0.0
+                        ),
                     )
                 else:
                     var = var_cls(var_name, var_value)
@@ -770,7 +789,9 @@ def compile_canvas_json(
         for child_name, child_data in children_data.items():
             existing_child = getattr(obj, child_name, None)
             if isinstance(existing_child, Module):
-                build_module(child_name, child_data, current_path, existing_obj=existing_child)
+                build_module(
+                    child_name, child_data, current_path, existing_obj=existing_child
+                )
             else:
                 child_obj = build_module(child_name, child_data, current_path)
                 setattr(obj, child_name, child_obj)

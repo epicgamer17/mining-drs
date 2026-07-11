@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   ReactFlow,
   MiniMap,
@@ -11,6 +11,7 @@ import {
 } from '@xyflow/react';
 import type { Connection, Edge, Node } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import { Play, Pause, RotateCcw, ListFilter } from 'lucide-react';
 
 // Import components
 import { Sidebar } from './components/Sidebar';
@@ -189,6 +190,15 @@ const CanvasEditor = () => {
   const [isCompiling, setIsCompiling] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [currentParentId, setCurrentParentId] = useState<string | null>(null);
+
+  // Telemetry playback states
+  const [telemetryHistory, setTelemetryHistory] = useState<any[]>([]);
+  const [telemetryEvents, setTelemetryEvents] = useState<any[]>([]);
+  const [currentPlaybackTime, setCurrentPlaybackTime] = useState<number>(0);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
+  const [maxSimTime] = useState<number>(100);
+  const [showEventLog, setShowEventLog] = useState<boolean>(false);
   
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
@@ -295,6 +305,66 @@ const CanvasEditor = () => {
       setIsCompiling(false);
     }
   }, [nodes, edges]);
+
+  const onRunSimulation = useCallback(async () => {
+    try {
+      const res = await fetch('/api/simulate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ nodes, edges, max_time: maxSimTime }),
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'ok') {
+        setTelemetryHistory(data.history || []);
+        setTelemetryEvents(data.events || []);
+        setCurrentPlaybackTime(0);
+        setIsPlaying(true);
+        alert('Simulation execution complete! Telemetry loaded.');
+      } else {
+        alert(`Simulation execution failed: ${data.message || 'Unknown error'}`);
+      }
+    } catch (err) {
+      alert(`Network error running simulation: ${err}`);
+    }
+  }, [nodes, edges, maxSimTime]);
+
+  // Playback timer loop effect
+  useEffect(() => {
+    if (!isPlaying || telemetryHistory.length === 0) return;
+
+    const intervalTime = 100; // 100ms ticks
+    const interval = setInterval(() => {
+      setCurrentPlaybackTime((t) => {
+        const maxTime = telemetryHistory[telemetryHistory.length - 1]?.time || maxSimTime;
+        const nextTime = t + (intervalTime / 1000) * playbackSpeed;
+        if (nextTime >= maxTime) {
+          setIsPlaying(false);
+          return maxTime;
+        }
+        return nextTime;
+      });
+    }, intervalTime);
+
+    return () => clearInterval(interval);
+  }, [isPlaying, telemetryHistory, playbackSpeed, maxSimTime]);
+
+  // Find current active telemetry frame
+  const currentFrame = useMemo(() => {
+    if (telemetryHistory.length === 0) return null;
+    let closest = telemetryHistory[0];
+    let minDiff = Math.abs(closest.time - currentPlaybackTime);
+    for (let i = 1; i < telemetryHistory.length; i++) {
+      const frame = telemetryHistory[i];
+      const diff = Math.abs(frame.time - currentPlaybackTime);
+      if (diff < minDiff) {
+        closest = frame;
+        minDiff = diff;
+      }
+    }
+    return closest;
+  }, [telemetryHistory, currentPlaybackTime]);
 
   const onConnect = useCallback(
     (params: Connection) => {
@@ -781,6 +851,48 @@ const CanvasEditor = () => {
     }
   });
 
+  const getEdgeFlowRate = (src: string) => {
+    if (!currentFrame) return 0;
+    const possibleKeys = [
+      `${src}.rate`,
+      `${src}.throughput`,
+      `${src}.actual_outflow_rate`,
+      `${src}.outflow_rate`,
+      `${src}.value`
+    ];
+    for (const key of possibleKeys) {
+      if (currentFrame[key] !== undefined) {
+        return currentFrame[key];
+      }
+    }
+    const fallbackKey = Object.keys(currentFrame).find(k => k.startsWith(src + '.') && (k.endsWith('rate') || k.endsWith('throughput')));
+    if (fallbackKey && currentFrame[fallbackKey] !== undefined) {
+      return currentFrame[fallbackKey];
+    }
+    return 0;
+  };
+
+  const getEdgeStyle = (src: string, originalStyle: React.CSSProperties = {}) => {
+    if (!currentFrame) return originalStyle;
+    const flowRate = getEdgeFlowRate(src);
+    const isFlowActive = flowRate > 0;
+    
+    if (isFlowActive) {
+      return {
+        ...originalStyle,
+        stroke: '#3b82f6',
+        strokeWidth: Math.min(8, 2.5 + flowRate / 15),
+        strokeDasharray: '6,6',
+        animation: `dash ${Math.max(0.2, 5 / flowRate)}s linear infinite`
+      };
+    } else {
+      return {
+        ...originalStyle,
+        opacity: telemetryHistory.length > 0 ? 0.4 : 1.0
+      };
+    }
+  };
+
   // Filter nodes belonging to the current parent level
   const baseVisibleNodes = nodes.filter(node => {
     if (currentParentId === null) {
@@ -795,11 +907,30 @@ const CanvasEditor = () => {
     }
   }).map(node => {
     const isContainer = containerNodeIds.has(node.id) || ['ConcentratorPlant', 'DRSModel', 'Module', 'ProcessingPlant', 'ContinuousFleetLogistics', 'ConcentratorController', 'ConcentratorModel'].includes((node.data as any).class);
+    
+    // Inject telemetry values into node data variables
+    let nodeVariables = { ...(node.data as any).variables };
+    if (currentFrame) {
+      Object.keys(nodeVariables).forEach(varName => {
+        const telemetryKey = `${node.id}.${varName}`;
+        if (currentFrame[telemetryKey] !== undefined) {
+          let rawVal = currentFrame[telemetryKey];
+          // Handle string modes or numbers
+          let displayVal = typeof rawVal === 'number' ? Number(rawVal.toFixed(2)) : rawVal;
+          nodeVariables[varName] = {
+            ...nodeVariables[varName],
+            value: displayVal
+          };
+        }
+      });
+    }
+
     return {
       ...node,
       data: {
         ...node.data,
-        isContainer
+        isContainer,
+        variables: nodeVariables
       }
     };
   });
@@ -831,13 +962,16 @@ const CanvasEditor = () => {
             sourceHandle: edge.sourceHandle?.startsWith('flow') ? 'flow-out' : edge.sourceHandle?.startsWith('read') ? 'read-out' : 'data-out',
             target: rootTarget,
             targetHandle: edge.targetHandle?.startsWith('flow') ? 'flow-in' : edge.targetHandle?.startsWith('read') ? 'read-in' : 'data-in',
-            style: edge.style,
+            style: getEdgeStyle(source, edge.style),
           });
         }
       } else {
         // Purely internal edge between siblings at root level
         if (!source.includes('.') && !target.includes('.')) {
-          visibleEdges.push(edge);
+          visibleEdges.push({
+            ...edge,
+            style: getEdgeStyle(source, edge.style)
+          });
         }
       }
     } else {
@@ -847,7 +981,10 @@ const CanvasEditor = () => {
 
       if (isSourceInSub && isTargetInSub) {
         // Edge is fully inside this sub-circuit
-        visibleEdges.push(edge);
+        visibleEdges.push({
+          ...edge,
+          style: getEdgeStyle(source, edge.style)
+        });
       } else if (isTargetInSub && !isSourceInSub) {
         // Incoming edge from outside this sub-circuit
         const proxyId = `proxy-in-${source}`;
@@ -870,7 +1007,8 @@ const CanvasEditor = () => {
           ...edge,
           id: `e-proxy-in-${source}-${target}`,
           source: proxyId,
-          sourceHandle: 'flow-out'
+          sourceHandle: 'flow-out',
+          style: getEdgeStyle(source, edge.style)
         });
       } else if (isSourceInSub && !isTargetInSub) {
         // Outgoing edge to outside this sub-circuit
@@ -894,7 +1032,8 @@ const CanvasEditor = () => {
           ...edge,
           id: `e-proxy-out-${source}-${target}`,
           target: proxyId,
-          targetHandle: 'flow-in'
+          targetHandle: 'flow-in',
+          style: getEdgeStyle(source, edge.style)
         });
       }
     }
@@ -994,6 +1133,148 @@ const CanvasEditor = () => {
           <Background color="#334155" gap={20} size={1} />
         </ReactFlow>
       </div>
+
+      {/* Simulation Playback Toolbar */}
+      <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-slate-900/95 backdrop-blur-md border border-slate-800 rounded-xl px-5 py-3 shadow-2xl z-20 flex items-center gap-4 text-xs font-semibold max-w-[90%] md:max-w-2xl select-none">
+        <button
+          onClick={onRunSimulation}
+          className="flex items-center gap-1.5 py-1.5 px-3 rounded-lg bg-sky-600 hover:bg-sky-500 text-white transition-all text-xs font-bold whitespace-nowrap shadow-lg shadow-sky-950/20"
+        >
+          <Play className="w-3.5 h-3.5 fill-current" />
+          Run Simulation
+        </button>
+
+        {telemetryHistory.length > 0 && (
+          <>
+            <div className="h-6 w-px bg-slate-800" />
+            
+            <button
+              onClick={() => setIsPlaying(!isPlaying)}
+              className="flex items-center justify-center p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-all text-slate-100"
+              title={isPlaying ? 'Pause' : 'Play'}
+            >
+              {isPlaying ? (
+                <Pause className="w-4 h-4 text-sky-400 fill-current" />
+              ) : (
+                <Play className="w-4 h-4 text-emerald-400 fill-current" />
+              )}
+            </button>
+
+            <button
+              onClick={() => {
+                setIsPlaying(false);
+                setCurrentPlaybackTime(0);
+              }}
+              className="flex items-center justify-center p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-all text-slate-400 hover:text-white"
+              title="Restart"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-slate-400 whitespace-nowrap">t = {currentPlaybackTime.toFixed(1)}s</span>
+              <input
+                type="range"
+                min={0}
+                max={telemetryHistory[telemetryHistory.length - 1]?.time || maxSimTime}
+                step={0.1}
+                value={currentPlaybackTime}
+                onChange={(e) => {
+                  setIsPlaying(false);
+                  setCurrentPlaybackTime(parseFloat(e.target.value));
+                }}
+                className="w-32 md:w-40 accent-sky-400 cursor-pointer"
+              />
+              <span className="text-[10px] text-slate-400 whitespace-nowrap">{(telemetryHistory[telemetryHistory.length - 1]?.time || maxSimTime).toFixed(0)}s</span>
+            </div>
+
+            <div className="h-6 w-px bg-slate-800" />
+
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-slate-400">Speed</span>
+              <select
+                value={playbackSpeed}
+                onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
+                className="bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-xs text-white cursor-pointer focus:outline-none"
+              >
+                <option value={0.5}>0.5x</option>
+                <option value={1}>1.0x</option>
+                <option value={2}>2.0x</option>
+                <option value={5}>5.0x</option>
+                <option value={10}>10x</option>
+              </select>
+            </div>
+
+            {telemetryEvents.length > 0 && (
+              <>
+                <div className="h-6 w-px bg-slate-800" />
+                <button
+                  onClick={() => setShowEventLog(!showEventLog)}
+                  className={`flex items-center gap-1.5 py-1.5 px-3 rounded-lg border text-xs font-semibold transition-all ${
+                    showEventLog 
+                      ? 'bg-amber-950/20 border-amber-500/40 text-amber-300' 
+                      : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <ListFilter className="w-3.5 h-3.5" />
+                  Events ({telemetryEvents.length})
+                </button>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Floating Event Timeline Panel */}
+      {showEventLog && telemetryEvents.length > 0 && (
+        <div className="absolute top-16 right-6 w-80 bg-slate-900/95 backdrop-blur-md border border-slate-800 rounded-xl p-4 shadow-2xl z-20 flex flex-col max-h-[70vh] select-none text-slate-100">
+          <div className="flex justify-between items-center pb-2 mb-3 border-b border-slate-800">
+            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Event Timeline</span>
+            <button
+              onClick={() => setShowEventLog(false)}
+              className="text-slate-400 hover:text-white text-xs font-bold"
+            >
+              Close
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+            {telemetryEvents.map((evt, idx) => {
+              const isPast = evt.time <= currentPlaybackTime;
+              return (
+                <div
+                  key={idx}
+                  onClick={() => {
+                    setIsPlaying(false);
+                    setCurrentPlaybackTime(evt.time);
+                  }}
+                  className={`p-2.5 rounded-lg border cursor-pointer text-left transition-all ${
+                    isPast 
+                      ? 'bg-slate-950/60 border-slate-800 hover:border-slate-700' 
+                      : 'bg-slate-950/10 border-slate-900/20 opacity-50 hover:opacity-80'
+                  }`}
+                >
+                  <div className="flex justify-between items-center mb-1 text-[10px]">
+                    <span className="font-mono text-sky-400 font-bold">t = {evt.time.toFixed(2)}s</span>
+                    <span className="font-sans font-semibold px-1 py-0.2 rounded bg-slate-800 text-slate-300 uppercase text-[8px] tracking-wide">{evt.event_type}</span>
+                  </div>
+                  <div className="text-xs font-semibold text-slate-200">{evt.source}</div>
+                  {evt.details && Object.keys(evt.details).length > 0 && (
+                    <div className="mt-1.5 text-[9px] font-mono text-slate-400 border-t border-slate-950/50 pt-1">
+                      {Object.entries(evt.details).map(([k, v]) => (
+                        <div key={k} className="flex justify-between">
+                          <span>{k}:</span>
+                          <span className="text-slate-300">{String(v)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       </div>
 
       {/* Editor Inspector Panel */}

@@ -6,7 +6,8 @@ import traceback
 
 # Add the workspace root to sys.path so we can import 'drs'
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(ROOT_DIR)
+WORKSPACE_ROOT = os.path.dirname(ROOT_DIR)
+sys.path.append(WORKSPACE_ROOT)
 
 # Default initial nodes and edges: Concentrator model
 DEFAULT_NODES = [
@@ -240,7 +241,7 @@ class DevServerHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/api/topology":
-            file_path = os.path.join(ROOT_DIR, "drs-canvas", "src", "drs_canvas_state.json")
+            file_path = os.path.join(ROOT_DIR, "src", "drs_canvas_state.json")
             if os.path.exists(file_path):
                 try:
                     with open(file_path, "r") as f:
@@ -272,7 +273,7 @@ class DevServerHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/topology":
-            canvas_file = os.path.join(ROOT_DIR, "drs-canvas", "src", "drs_canvas_state.json")
+            canvas_file = os.path.join(ROOT_DIR, "src", "drs_canvas_state.json")
             try:
                 os.makedirs(os.path.dirname(canvas_file), exist_ok=True)
                 with open(canvas_file, "w") as f:
@@ -283,14 +284,14 @@ class DevServerHandler(http.server.BaseHTTPRequestHandler):
                 edges = payload.get("edges", [])
                 drs_flat = react_flow_to_drs_flat(nodes, edges)
                 
-                with open(os.path.join(ROOT_DIR, "drs_topology_flat.json"), "w") as f:
+                with open(os.path.join(WORKSPACE_ROOT, "drs_topology_flat.json"), "w") as f:
                     json.dump(drs_flat, f, indent=2)
                 
                 # Convert & save hierarchical DRS JSON
                 try:
                     from drs.serialize import _flat_canvas_to_tree
                     drs_tree = _flat_canvas_to_tree(drs_flat)
-                    with open(os.path.join(ROOT_DIR, "drs_topology_tree.json"), "w") as f:
+                    with open(os.path.join(WORKSPACE_ROOT, "drs_topology_tree.json"), "w") as f:
                         json.dump(drs_tree, f, indent=2)
                 except Exception as tree_ex:
                     print(f"Warning: Hierarchical tree export failed: {tree_ex}")
@@ -308,12 +309,58 @@ class DevServerHandler(http.server.BaseHTTPRequestHandler):
             
             try:
                 from drs.serialize import compile_canvas_json
+                from examples.mining.components.config import ConcentratorConfig
+                config = ConcentratorConfig()
                 # Compile verification pass
-                model = compile_canvas_json(drs_flat)
+                model = compile_canvas_json(drs_flat, config=config)
                 self._set_headers(200)
                 self.wfile.write(json.dumps({
                     "status": "ok",
                     "message": f"Compilation verification successful! Root Class: {type(model).__name__}"
+                }).encode("utf-8"))
+            except Exception as e:
+                err_details = traceback.format_exc()
+                self._set_headers(400)
+                self.wfile.write(json.dumps({
+                    "status": "error",
+                    "message": str(e),
+                    "details": err_details
+                }).encode("utf-8"))
+        elif self.path == "/api/simulate":
+            nodes = payload.get("nodes", [])
+            edges = payload.get("edges", [])
+            max_time = float(payload.get("max_time", 100.0))
+            
+            drs_flat = react_flow_to_drs_flat(nodes, edges)
+            
+            try:
+                from drs.serialize import compile_canvas_json
+                from drs.engine import DRSEngine
+                from drs.telemetry import Telemetry
+                from examples.mining.components.config import ConcentratorConfig
+                
+                config = ConcentratorConfig()
+                model = compile_canvas_json(drs_flat, config=config)
+                engine = DRSEngine(model)
+                telemetry = Telemetry(model)
+                engine.attach_telemetry(telemetry)
+                
+                result = engine.run(max_time)
+                
+                events_out = []
+                for e in telemetry.events:
+                    events_out.append({
+                        "time": e.time,
+                        "event_type": e.event_type,
+                        "source": e.source,
+                        "details": e.details
+                    })
+                
+                self._set_headers(200)
+                self.wfile.write(json.dumps({
+                    "status": "ok",
+                    "history": telemetry.history,
+                    "events": events_out
                 }).encode("utf-8"))
             except Exception as e:
                 err_details = traceback.format_exc()
