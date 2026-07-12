@@ -8,7 +8,8 @@ root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "
 sys.path.append(root_dir)
 
 from drs_mining.components import ConcentratorConfig, ConcentratorModel
-from drs import DRSEngine, compile_canvas_json
+from drs import DRSEngine
+from drs.canvas_compiler import compile_canvas_json
 
 
 def get_variable_values(model):

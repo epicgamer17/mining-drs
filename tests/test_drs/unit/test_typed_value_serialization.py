@@ -9,10 +9,10 @@ from drs import (
     Module,
     Variable,
     Level,
-    compile_canvas_json,
     DRSEngine,
     DRSConfig,
 )
+from drs.canvas_compiler import compile_canvas_json
 from drs_mining.components import OperatingMode
 
 
@@ -48,9 +48,7 @@ class TestTypedValueCompilation:
             },
         }
         registry = {"MockPipeline": MockPipeline}
-        with pytest.raises(
-            ValueError, match="Could not resolve typed object.*NonExistentClass"
-        ):
+        with pytest.raises(ValueError, match="Class 'NonExistentClass' not found"):
             compile_canvas_json(canvas, class_registry=registry)
 
     def test_typed_dict_with_invalid_name_raises_value_error(self):
@@ -91,7 +89,7 @@ class TestClassResolutionErrors:
             "class": "TotallyBogusModuleName",
             "variables": {},
         }
-        with pytest.raises(ValueError, match="not found in any registered namespace"):
+        with pytest.raises(ValueError, match="not found"):
             compile_canvas_json(canvas)
 
     def test_unknown_variable_class_raises_value_error(self):
@@ -102,9 +100,7 @@ class TestClassResolutionErrors:
             },
         }
         registry = {"MockPipeline": MockPipeline}
-        with pytest.raises(
-            ValueError, match="Variable class.*not found in drs namespace"
-        ):
+        with pytest.raises(ValueError, match="Variable class.*not found"):
             compile_canvas_json(canvas, class_registry=registry)
 
     def test_unknown_variable_class_in_existing_var_uses_new_path(self):

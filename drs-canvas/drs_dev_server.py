@@ -808,7 +808,7 @@ class DevServerHandler(http.server.BaseHTTPRequestHandler):
                 ) as f:
                     json.dump(drs_flat, f, indent=2)
                 try:
-                    from drs.serialize import _flat_canvas_to_tree
+                    from drs.canvas_compiler import _flat_canvas_to_tree
 
                     drs_tree = _flat_canvas_to_tree(drs_flat)
                     with open(
@@ -843,7 +843,7 @@ class DevServerHandler(http.server.BaseHTTPRequestHandler):
                 nodes = payload.get("nodes", [])
                 edges = payload.get("edges", [])
                 drs_flat = react_flow_to_drs_flat(nodes, edges)
-                from drs.serialize import compile_canvas_json
+                from drs.canvas_compiler import compile_canvas_json
                 from drs_mining.components.config import ConcentratorConfig
 
                 config = ConcentratorConfig()
@@ -889,7 +889,7 @@ class DevServerHandler(http.server.BaseHTTPRequestHandler):
 
                 drs_flat = react_flow_to_drs_flat(nodes, edges)
 
-                from drs.serialize import compile_canvas_json
+                from drs.canvas_compiler import compile_canvas_json
                 from drs.engine import DRSEngine
                 from drs.telemetry import Telemetry
                 from drs_mining.components.config import ConcentratorConfig

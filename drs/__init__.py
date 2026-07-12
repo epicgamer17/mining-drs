@@ -15,18 +15,25 @@ from .telemetry import Telemetry
 from .exceptions import StateMutationError, DeadlockError
 from .config import DRSConfig, EngineConfig
 from .callbacks import Callback, ProgressBarCallback
-from .serialize import save_state, load_state, export_architecture, save_checkpoint, load_checkpoint, validate_canvas_json, compile_canvas_json
+from .serialize import (
+    save_state,
+    load_state,
+    export_architecture,
+    save_checkpoint,
+    load_checkpoint,
+)
+from .canvas_compiler import compile_canvas_json, register_class
 
 __all__ = [
-    "DRSEngine", 
+    "DRSEngine",
     "SimulationResult",
     "Callback",
-    "ProgressBarCallback", 
+    "ProgressBarCallback",
     "Variable",
     "Level",
     "Timer",
     "Expression",
-    "DataPoint", 
+    "DataPoint",
     "DataSource",
     "Module",
     "Flow",
@@ -40,6 +47,6 @@ __all__ = [
     "export_architecture",
     "save_checkpoint",
     "load_checkpoint",
-    "validate_canvas_json",
-    "compile_canvas_json"
+    "compile_canvas_json",
+    "register_class",
 ]

@@ -6,11 +6,10 @@ from drs import (
     Level,
     Timer,
     Flow,
-    compile_canvas_json,
-    validate_canvas_json,
     DRSEngine,
     DRSConfig,
 )
+from drs.canvas_compiler import compile_canvas_json, validate_canvas_json
 from drs.variables import Expression
 
 

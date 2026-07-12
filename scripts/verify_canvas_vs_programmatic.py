@@ -31,7 +31,7 @@ if CANVAS_DIR not in sys.path:
     sys.path.insert(0, CANVAS_DIR)
 
 from drs_dev_server import DEFAULT_NODES, DEFAULT_EDGES, react_flow_to_drs_flat
-from drs.serialize import compile_canvas_json
+from drs.canvas_compiler import compile_canvas_json
 from drs.engine import DRSEngine, SimulationResult
 from drs.telemetry import Telemetry
 from drs_mining.components import ConcentratorModel, ConcentratorConfig

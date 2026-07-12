@@ -1,9 +1,35 @@
 import math
+import enum
 from typing import Any, Union
 from ._execution_context import ExecutionContext
 from .exceptions import StateMutationError
 
-# TODO: do we need both the expression and non expression system. Like could we have only the expression system and then just evaluate those. Goal being not having things like _value and _sim_value() and stuff.
+
+def serialize_val(val: Any) -> Any:
+    if isinstance(val, enum.Enum):
+        return val.name
+    if (
+        hasattr(val, "name")
+        and hasattr(val, "id")
+        and not isinstance(val, (int, float, str, bool))
+    ):
+        return {"__type__": type(val).__name__, "name": val.name}
+    if isinstance(val, float):
+        if math.isinf(val):
+            return "Infinity" if val > 0 else "-Infinity"
+        elif math.isnan(val):
+            return "NaN"
+    return val
+
+
+def deserialize_val(val: Any) -> Any:
+    if val == "Infinity":
+        return math.inf
+    elif val == "-Infinity":
+        return -math.inf
+    elif val == "NaN":
+        return math.nan
+    return val
 
 
 class Expression:

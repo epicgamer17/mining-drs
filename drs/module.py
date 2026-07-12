@@ -337,27 +337,16 @@ class Module:
         """
         Returns a structural JSON-serializable representation of the module architecture.
         """
-        import math
-        from .variables import Level, Expression
+        from .variables import Level, Expression, serialize_val
 
         if root is None:
             root = self
 
-        import enum
-
+        # TODO: Why is expresison not included in serialize_val?
         def _to_dict_serialize_val(val: Any) -> Any:
             if isinstance(val, Expression):
                 return {"equation": val.get_equation()}
-            if isinstance(val, enum.Enum):
-                return val.name
-            if hasattr(val, "name") and hasattr(val, "id"):
-                return {"__type__": type(val).__name__, "name": val.name}
-            if isinstance(val, float):
-                if math.isinf(val):
-                    return "Infinity" if val > 0 else "-Infinity"
-                elif math.isnan(val):
-                    return "NaN"
-            return val
+            return serialize_val(val)
 
         def get_module_path(rt: Module, target: Module) -> str:
             if target is rt:

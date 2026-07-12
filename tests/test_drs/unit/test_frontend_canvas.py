@@ -1,7 +1,8 @@
 import pytest
 import importlib.util
 from pathlib import Path
-from drs import Module, Variable, Level, validate_canvas_json
+from drs import Module, Variable, Level
+from drs.canvas_compiler import validate_canvas_json
 
 
 class MineFace(Module):
