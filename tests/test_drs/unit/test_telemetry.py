@@ -6,14 +6,21 @@ from drs.variables import Level, Timer, Variable
 
 class MockEngine:
     def __init__(self):
-        self._variables = [
-            Level("ore_stock", 1000.0),
-            Timer("runtime", 0.0),
-            Variable("trucks_dispatched", 5),
-        ]
+        self._variables = {
+            "ore_stock": Level("ore_stock", 1000.0),
+            "runtime": Timer("runtime", 0.0),
+            "trucks_dispatched": Variable("trucks_dispatched", 5),
+        }
 
     def variables(self):
-        return iter(self._variables)
+        return iter(self._variables.values())
+
+    def named_modules(self, memo=None, prefix=""):
+        yield prefix, self
+
+    @property
+    def _modules(self):
+        return {}
 
 
 def test_telemetry_snapshot():
@@ -24,13 +31,13 @@ def test_telemetry_snapshot():
     telemetry.snapshot(current_time=1.0)
 
     # Engine updates
-    engine._variables[0]._update(
+    engine._variables["ore_stock"]._update(
         2.0
     )  # Ore stock changes to 1000 + (0 * 2) = 1000.0 (rate is 0)
-    engine._variables[0].rate = 50.0
-    engine._variables[0]._update(1.0)  # Ore stock changes to 1050.0
-    engine._variables[1]._update(1.0)  # Runtime changes to 1.0
-    engine._variables[2].value = 6  # Trucks to 6
+    engine._variables["ore_stock"].rate = 50.0
+    engine._variables["ore_stock"]._update(1.0)  # Ore stock changes to 1050.0
+    engine._variables["runtime"]._update(1.0)  # Runtime changes to 1.0
+    engine._variables["trucks_dispatched"].value = 6  # Trucks to 6
 
     # Take a snapshot at t=2.0
     telemetry.snapshot(current_time=2.0)

@@ -1,9 +1,11 @@
 import { Handle, Position } from '@xyflow/react';
 import { Database } from 'lucide-react';
 
+type VariableValue = number | string | { __type__: string; name: string };
+
 interface VariableInfo {
   class: string;
-  value: number;
+  value: VariableValue;
   lower_threshold?: number | string;
   upper_threshold?: number | string;
   rate?: number | string | { equation: string };
@@ -70,7 +72,7 @@ export const BufferNode = ({ data, selected }: { data: BufferNodeData; selected?
         <div className="mb-3 bg-slate-950/60 p-2 rounded border border-sky-950/40">
           <div className="flex justify-between text-[10px] text-sky-400 font-mono mb-1">
             <span>Level</span>
-            <span>{currentVal.toFixed(1)} / {typeof levelVar.upper_threshold === 'number' ? levelVar.upper_threshold : '∞'}</span>
+            <span>{currentVal.toFixed(1)}t / {typeof levelVar.upper_threshold === 'number' ? levelVar.upper_threshold.toFixed(0) + 't' : '∞'}</span>
           </div>
           <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
             <div 
@@ -86,7 +88,7 @@ export const BufferNode = ({ data, selected }: { data: BufferNodeData; selected?
           <div key={key} className="space-y-1 bg-slate-950/40 p-2 rounded">
             <div className="flex justify-between items-center">
               <span className="font-mono text-slate-400 font-medium">{key}</span>
-              <span className="font-semibold text-sky-400">{typeof varInfo.value === 'object' ? 'Expr' : varInfo.value}</span>
+              <span className="font-semibold text-sky-400">{typeof varInfo.value === 'object' && varInfo.value !== null ? (varInfo.value.__type__ ? `${varInfo.value.__type__}: ${varInfo.value.name}` : 'Expr') : varInfo.value}</span>
             </div>
             {varInfo.rate !== undefined && (
               <div className="flex justify-between items-center text-[10px] text-slate-500">
@@ -122,6 +124,15 @@ export const BufferNode = ({ data, selected }: { data: BufferNodeData; selected?
         title="Physical Flow Output"
       />
       
+      {/* Batch Data Stream Input (green, bottom-left) */}
+      <Handle
+        type="target"
+        position={Position.Bottom}
+        id="data-in"
+        style={{ background: '#10b981', width: 10, height: 10, borderRadius: '50%', bottom: -6, left: -6 }}
+        title="Batch Data Input"
+      />
+
       {/* Logical Read Output (so other blocks can look up the level mass/volume) */}
       <Handle
         type="source"

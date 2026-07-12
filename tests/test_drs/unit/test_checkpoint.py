@@ -4,10 +4,12 @@ import random
 import json
 from pathlib import Path
 from drs.module import Module
-from drs.variables import Level, Timer
+from drs.variables import Level, Timer, Variable
 from drs.engine import DRSEngine
 from drs.telemetry import Telemetry
+from drs.flow import Flow
 from drs.serialize import save_checkpoint, load_checkpoint
+from drs.vis.module_graph import _generate_mermaid
 
 
 class CheckpointTestModule(Module):
@@ -38,6 +40,37 @@ class DifferentTestModule(Module):
         
     def forward(self):
         pass
+
+
+class CheckpointSource(Module):
+    def __init__(self):
+        super().__init__()
+        self.rate = Variable("rate", 3.0)
+
+    def forward(self):
+        return Flow(self.rate.value)
+
+
+class CheckpointSink(Module):
+    def __init__(self):
+        super().__init__()
+        self.level = Level("level", 0.0)
+
+    def forward(self, inflow=None, control=None):
+        flow_value = inflow.value if inflow is not None else 0.0
+        control_value = control.value if control is not None else 0.0
+        self.level.rate = flow_value + control_value
+
+
+class CheckpointTopologyModule(Module):
+    def __init__(self):
+        super().__init__()
+        self.source = CheckpointSource()
+        self.sink = CheckpointSink()
+
+    def forward(self):
+        flow = self.source()
+        self.sink(flow, self.source.rate)
 
 
 def test_checkpoint_save_and_load(tmp_path):
@@ -182,3 +215,43 @@ def test_checkpoint_telemetry(tmp_path):
     engine.load_checkpoint(str(checkpoint_file))
     assert len(telemetry.history) == len_history_save
     assert len(telemetry.events) == len_events_save
+
+
+def test_checkpoint_restores_dependency_topology(tmp_path):
+    model = CheckpointTopologyModule()
+    engine = DRSEngine(model, max_step_size=1.0)
+    engine.run(max_time=1.0)
+
+    assert model.sink._flow_dependencies == [model.source]
+    assert model.sink._dependencies == [(model.source, model.source.rate)]
+
+    checkpoint_file = tmp_path / "topology_checkpoint.json"
+    engine.save_checkpoint(str(checkpoint_file))
+
+    with open(checkpoint_file, "r") as f:
+        checkpoint = json.load(f)
+    assert checkpoint["topology"]["schema_version"] == 1
+    assert {
+        "kind": "flow",
+        "source": "source",
+        "target": "sink",
+    } in checkpoint["topology"]["edges"]
+    assert {
+        "kind": "read",
+        "source": "source",
+        "target": "sink",
+        "variable": "rate",
+    } in checkpoint["topology"]["edges"]
+
+    restored_model = CheckpointTopologyModule()
+    restored_engine = DRSEngine(restored_model, max_step_size=1.0)
+    restored_engine.load_checkpoint(str(checkpoint_file))
+
+    assert restored_model.sink._flow_dependencies == [restored_model.source]
+    assert restored_model.sink._dependencies == [
+        (restored_model.source, restored_model.source.rate)
+    ]
+
+    mermaid = _generate_mermaid(restored_model)
+    assert "source ==>|flow| sink" in mermaid
+    assert "source -->|rate| sink" in mermaid

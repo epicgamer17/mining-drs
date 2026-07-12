@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Sliders, Plus, Trash, Check, X } from 'lucide-react';
 
+type VariableValue = number | string | { __type__: string; name: string };
+
 interface VariableInfo {
   class: string;
-  value: number;
+  value: VariableValue;
   lower_threshold?: number | string;
   upper_threshold?: number | string;
   rate?: number | string | { equation: string };
@@ -63,7 +65,7 @@ export const Inspector = ({ selectedNode, onUpdateNode, onClose }: InspectorProp
       const val = varInfo.value;
       const lower = typeof varInfo.lower_threshold === 'number' ? varInfo.lower_threshold : -Infinity;
       const upper = typeof varInfo.upper_threshold === 'number' ? varInfo.upper_threshold : Infinity;
-      if (val < lower || val > upper) {
+      if (typeof val === 'number' && (val < lower || val > upper)) {
         alert(`Validation Warning: Variable "${name}" value (${val}) violates thresholds [${lower}, ${upper}].`);
       }
     }
@@ -209,13 +211,19 @@ export const Inspector = ({ selectedNode, onUpdateNode, onClose }: InspectorProp
                   </div>
                   <div>
                     <span className="text-[9px] text-slate-500 uppercase tracking-wider">Value</span>
-                    <input
-                      type="number"
-                      step="any"
-                      value={varInfo.value}
-                      onChange={(e) => handleVariableChange(name, 'value', e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-800 rounded px-1 py-0.5 mt-0.5 font-mono text-sky-400"
-                    />
+                    {typeof varInfo.value === 'object' && varInfo.value !== null ? (
+                      <div className="mt-0.5 px-1 py-0.5 font-mono text-xs text-amber-400 bg-slate-900 border border-slate-800 rounded">
+                        {varInfo.value.__type__}: {varInfo.value.name}
+                      </div>
+                    ) : (
+                      <input
+                        type="number"
+                        step="any"
+                        value={varInfo.value}
+                        onChange={(e) => handleVariableChange(name, 'value', e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded px-1 py-0.5 mt-0.5 font-mono text-sky-400"
+                      />
+                    )}
                   </div>
                 </div>
 

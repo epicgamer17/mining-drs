@@ -11,6 +11,10 @@ clear
 echo -e "\033[1;36m==================================================\033[0m"
 echo -e "\033[1;36m              DRS Visualizer System               \033[0m"
 echo -e "\033[1;36m==================================================\033[0m"
+
+# Kill any existing process on port 8000 to ensure clean startup
+kill $(lsof -ti :8000) 2>/dev/null || true
+
 echo -e "\033[0;32m[+] Starting Python Local Dev Server...\033[0m"
 
 # Start the Python dev server in the background

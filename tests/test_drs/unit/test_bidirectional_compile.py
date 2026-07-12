@@ -9,9 +9,10 @@ from drs import (
     compile_canvas_json,
     validate_canvas_json,
     DRSEngine,
-    DRSConfig
+    DRSConfig,
 )
 from drs.variables import Expression
+
 
 # Mock component classes to compile against
 class MockSource(Module):
@@ -22,6 +23,7 @@ class MockSource(Module):
     def forward(self) -> Flow:
         # Returns physical flow
         return Flow(self.output_rate.value)
+
 
 class MockBuffer(Module):
     def __init__(self):
@@ -37,6 +39,7 @@ class MockBuffer(Module):
             self.mass.rate = -5.0
         # Returns flow out
         return Flow(5.0)
+
 
 class MockConsumer(Module):
     def __init__(self):
@@ -61,20 +64,14 @@ def test_compile_flat_json():
             "id": "",
             "class": "MockPipeline",
             "layout": {"x": 0, "y": 0},
-            "variables": {}
+            "variables": {},
         },
         {
             "id": "src",
             "class": "MockSource",
             "layout": {"x": 100, "y": 150},
-            "variables": {
-                "output_rate": {"class": "Variable", "value": 15.0}
-            },
-            "connections": {
-                "flow_inputs": [],
-                "data_inputs": [],
-                "variable_reads": []
-            }
+            "variables": {"output_rate": {"class": "Variable", "value": 15.0}},
+            "connections": {"flow_inputs": [], "data_inputs": [], "variable_reads": []},
         },
         {
             "id": "buf",
@@ -86,14 +83,16 @@ def test_compile_flat_json():
                     "value": 100.0,
                     "lower_threshold": 0.0,
                     "upper_threshold": 300.0,
-                    "rate": 0.0
+                    "rate": 0.0,
                 }
             },
             "connections": {
-                "flow_inputs": ["src"],
+                "flow_inputs": [
+                    {"module": "src", "param": "inflow", "output_index": 0}
+                ],
                 "data_inputs": [],
-                "variable_reads": []
-            }
+                "variable_reads": [],
+            },
         },
         {
             "id": "dest",
@@ -105,22 +104,24 @@ def test_compile_flat_json():
                     "value": 10.0,
                     "lower_threshold": 0.0,
                     "upper_threshold": "Infinity",
-                    "rate": 0.0
+                    "rate": 0.0,
                 }
             },
             "connections": {
-                "flow_inputs": ["buf"],
+                "flow_inputs": [
+                    {"module": "buf", "param": "inflow", "output_index": 0}
+                ],
                 "data_inputs": [],
-                "variable_reads": []
-            }
-        }
+                "variable_reads": [],
+            },
+        },
     ]
 
     registry = {
         "MockPipeline": MockPipeline,
         "MockSource": MockSource,
         "MockBuffer": MockBuffer,
-        "MockConsumer": MockConsumer
+        "MockConsumer": MockConsumer,
     }
 
     # Compile the model
@@ -148,7 +149,7 @@ def test_compile_flat_json():
 
     # 4. Engine Run verification (checks that dynamically built forward works correctly)
     engine = DRSEngine(model)
-    
+
     # Step 1: src produces Flow(15.0).
     # buf receives Flow(15.0), sets mass.rate = 15.0 - 5.0 = 10.0, outputs Flow(5.0).
     # dest receives Flow(5.0), sets processed.rate = 5.0.
@@ -168,11 +169,9 @@ def test_compile_tree_json():
             "src": {
                 "class": "MockSource",
                 "layout": {"x": 100, "y": 150},
-                "variables": {
-                    "output_rate": {"class": "Variable", "value": 25.0}
-                },
+                "variables": {"output_rate": {"class": "Variable", "value": 25.0}},
                 "children": {},
-                "connections": {}
+                "connections": {},
             },
             "buf": {
                 "class": "MockBuffer",
@@ -183,21 +182,23 @@ def test_compile_tree_json():
                         "value": 50.0,
                         "lower_threshold": 0.0,
                         "upper_threshold": 200.0,
-                        "rate": 0.0
+                        "rate": 0.0,
                     }
                 },
                 "children": {},
                 "connections": {
-                    "flow_inputs": ["src"]
-                }
-            }
-        }
+                    "flow_inputs": [
+                        {"module": "src", "param": "inflow", "output_index": 0}
+                    ]
+                },
+            },
+        },
     }
 
     registry = {
         "MockPipeline": MockPipeline,
         "MockSource": MockSource,
-        "MockBuffer": MockBuffer
+        "MockBuffer": MockBuffer,
     }
 
     model = compile_canvas_json(canvas_tree, class_registry=registry)
@@ -213,9 +214,7 @@ def test_compile_rate_equation_ast_resolution():
         {
             "id": "",
             "class": "MockPipeline",
-            "variables": {
-                "control_val": {"class": "Variable", "value": 3.0}
-            }
+            "variables": {"control_val": {"class": "Variable", "value": 3.0}},
         },
         {
             "id": "buf",
@@ -225,16 +224,13 @@ def test_compile_rate_equation_ast_resolution():
                     "class": "Level",
                     "value": 50.0,
                     # Reference control_val from parent module
-                    "rate": {"equation": "(self.parent.control_val * 4.0)"}
+                    "rate": {"equation": "(self.parent.control_val * 4.0)"},
                 }
-            }
-        }
+            },
+        },
     ]
 
-    registry = {
-        "MockPipeline": MockPipeline,
-        "MockBuffer": MockBuffer
-    }
+    registry = {"MockPipeline": MockPipeline, "MockBuffer": MockBuffer}
 
     model = compile_canvas_json(canvas_flat, class_registry=registry)
 

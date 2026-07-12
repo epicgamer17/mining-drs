@@ -351,7 +351,7 @@ class Module:
             if isinstance(val, enum.Enum):
                 return val.name
             if hasattr(val, "name") and hasattr(val, "id"):
-                return val.name
+                return {"__type__": type(val).__name__, "name": val.name}
             if isinstance(val, float):
                 if math.isinf(val):
                     return "Infinity" if val > 0 else "-Infinity"

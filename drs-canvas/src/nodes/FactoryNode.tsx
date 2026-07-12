@@ -1,9 +1,11 @@
 import { Handle, Position } from '@xyflow/react';
 import { Factory } from 'lucide-react';
 
+type VariableValue = number | string | { __type__: string; name: string };
+
 interface VariableInfo {
   class: string;
-  value: number;
+  value: VariableValue;
 }
 
 interface FactoryNodeData {
@@ -67,7 +69,7 @@ export const FactoryNode = ({ data, selected }: { data: FactoryNodeData; selecte
         {Object.entries(data.variables || {}).map(([key, varInfo]) => (
           <div key={key} className="flex justify-between items-center gap-4 bg-slate-950/40 px-2 py-1 rounded">
             <span className="font-mono text-slate-400">{key}</span>
-            <span className="font-semibold text-purple-300">{varInfo.value}</span>
+            <span className="font-semibold text-purple-300">{typeof varInfo.value === 'object' && varInfo.value !== null ? `${varInfo.value.__type__}: ${varInfo.value.name}` : varInfo.value}</span>
           </div>
         ))}
       </div>
@@ -79,6 +81,15 @@ export const FactoryNode = ({ data, selected }: { data: FactoryNodeData; selecte
         id="flow-out"
         style={{ background: '#3b82f6', width: 12, height: 12, border: '2px solid #1e293b', right: -6 }}
         title="Physical Flow Output"
+      />
+
+      {/* Batch Data Stream Output (green, bottom-right) */}
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        id="data-out"
+        style={{ background: '#10b981', width: 10, height: 10, borderRadius: '50%', bottom: -6, right: -6 }}
+        title="Batch Data Output"
       />
     </div>
   );

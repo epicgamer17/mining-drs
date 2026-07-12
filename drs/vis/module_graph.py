@@ -166,6 +166,11 @@ def save_module_graph_report(model, path_prefix="module_graph", show_vars=True):
     png_path = f"{path_prefix}.png"
     md_path = f"{path_prefix}.md"
 
+    # Ensure the output directory exists
+    out_dir = os.path.dirname(png_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
     # Generate mermaid code
     mermaid_code = _generate_mermaid(model, show_vars=show_vars)
 

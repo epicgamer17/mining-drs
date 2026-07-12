@@ -40,8 +40,6 @@ const initialNodes: Node[] = [
       label: 'Concentrator Mine Face',
       class: 'ConcentratorMineFace',
       variables: {
-        active_parcel_initial_mass: { class: 'Variable', value: 34975.28 },
-        active_parcel_ore_fraction: { class: 'Variable', value: 0.7 },
         cumulative_extracted_mass: { class: 'Level', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
         parcel_extracted_mass: { class: 'Level', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 }
       }
@@ -66,6 +64,10 @@ const initialNodes: Node[] = [
     data: {
       label: 'Ore 1 Stockpile',
       class: 'Stockpile',
+      attributes: {
+        name: 'Ore1Stock',
+        expected_attributes: ['contained_ore_fraction_mass'],
+      },
       variables: {
         current_mass: { class: 'Level', value: 42000.0, lower_threshold: 0.0, upper_threshold: 60000.0, rate: 0.0 },
         contained_ore_fraction_mass: { class: 'Level', value: 12600.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
@@ -80,6 +82,10 @@ const initialNodes: Node[] = [
     data: {
       label: 'Ore 2 Stockpile',
       class: 'Stockpile',
+      attributes: {
+        name: 'Ore2Stock',
+        expected_attributes: ['contained_ore_fraction_mass'],
+      },
       variables: {
         current_mass: { class: 'Level', value: 18000.0, lower_threshold: 0.0, upper_threshold: 60000.0, rate: 0.0 },
         contained_ore_fraction_mass: { class: 'Level', value: 5400.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
@@ -107,13 +113,17 @@ const initialNodes: Node[] = [
       label: 'Concentrator Controller',
       class: 'ConcentratorController',
       variables: {
-        active_operating_mode: { class: 'Variable', value: 'OperatingMode.MODE_A' },
+        active_operating_mode: { class: 'Variable', value: { __type__: 'OperatingMode', name: 'MODE_A' } },
         total_system_ore_mass: { class: 'Level', value: 60000.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
-        current_campaign_duration: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 1.0 },
-        current_contingency_duration: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 1.0 },
-        cumulative_time_mode_a: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 1.0 },
-        cumulative_time_mode_b: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 1.0 },
-        cumulative_time_shutdown: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 1.0 },
+        current_campaign_duration: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
+        current_contingency_duration: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
+        cumulative_time_mode_a: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
+        cumulative_time_mode_a_contingency: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
+        cumulative_time_mode_a_surging: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
+        cumulative_time_mode_b: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
+        cumulative_time_mode_b_contingency: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
+        cumulative_time_mode_b_surging: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
+        cumulative_time_shutdown: { class: 'Timer', value: 0.0, lower_threshold: '-Infinity', upper_threshold: 'Infinity', rate: 0.0 },
         target_mine_mass_rate: { class: 'Variable', value: 0.0 },
         target_stock1_outflow_rate: { class: 'Variable', value: 0.0 },
         target_stock2_outflow_rate: { class: 'Variable', value: 0.0 }
@@ -137,6 +147,7 @@ const initialEdges: Edge[] = [
     sourceHandle: 'flow-out',
     target: 'ore1_stock',
     targetHandle: 'flow-in',
+    data: { param: 'inflow' },
     style: { stroke: '#3b82f6', strokeWidth: 4 }
   },
   {
@@ -145,6 +156,7 @@ const initialEdges: Edge[] = [
     sourceHandle: 'flow-out',
     target: 'ore2_stock',
     targetHandle: 'flow-in',
+    data: { param: 'inflow' },
     style: { stroke: '#3b82f6', strokeWidth: 4 }
   },
   {
@@ -153,6 +165,7 @@ const initialEdges: Edge[] = [
     sourceHandle: 'flow-out',
     target: 'plant',
     targetHandle: 'flow-in',
+    data: { param: 'ore1_outflow' },
     style: { stroke: '#3b82f6', strokeWidth: 4 }
   },
   {
@@ -161,6 +174,7 @@ const initialEdges: Edge[] = [
     sourceHandle: 'flow-out',
     target: 'plant',
     targetHandle: 'flow-in',
+    data: { param: 'ore2_outflow' },
     style: { stroke: '#3b82f6', strokeWidth: 4 }
   },
   {
@@ -169,6 +183,7 @@ const initialEdges: Edge[] = [
     sourceHandle: 'read-out',
     target: 'controller',
     targetHandle: 'read-in',
+    data: { variable: 'current_mass' },
     style: { stroke: '#f59e0b', strokeWidth: 1.5 }
   },
   {
@@ -177,11 +192,31 @@ const initialEdges: Edge[] = [
     sourceHandle: 'read-out',
     target: 'controller',
     targetHandle: 'read-in',
+    data: { variable: 'current_mass' },
     style: { stroke: '#f59e0b', strokeWidth: 1.5 }
+  },
+  {
+    id: 'e-data-controller-ore1',
+    source: 'controller',
+    sourceHandle: 'data-out',
+    target: 'ore1_stock',
+    targetHandle: 'data-in',
+    data: { param: 'requested_outflow_rate', variable: 'target_stock1_outflow_rate' },
+    style: { stroke: '#10b981', strokeWidth: 2, strokeDasharray: '5,5' }
+  },
+  {
+    id: 'e-data-controller-ore2',
+    source: 'controller',
+    sourceHandle: 'data-out',
+    target: 'ore2_stock',
+    targetHandle: 'data-in',
+    data: { param: 'requested_outflow_rate', variable: 'target_stock2_outflow_rate' },
+    style: { stroke: '#10b981', strokeWidth: 2, strokeDasharray: '5,5' }
   }
 ];
 
 const LOCAL_STORAGE_KEY = 'drs-canvas-topology-v2';
+const SCHEMA_VERSION = 2;
 
 const CanvasEditor = () => {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -197,11 +232,50 @@ const CanvasEditor = () => {
   const [currentPlaybackTime, setCurrentPlaybackTime] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
-  const [maxSimTime] = useState<number>(100);
+  const [maxSimTime, setMaxSimTime] = useState<number>(99999);
+  const [simSeed, setSimSeed] = useState<number>(42);
   const [showEventLog, setShowEventLog] = useState<boolean>(false);
+  const [dashboardPng, setDashboardPng] = useState<string | null>(null);
+  const [showDashboard, setShowDashboard] = useState<boolean>(false);
   
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<any>(null);
+
+  // Persist to local storage
+  const saveToLocalStorage = useCallback((newNodes: Node[], newEdges: Edge[]) => {
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ version: SCHEMA_VERSION, nodes: newNodes, edges: newEdges }));
+  }, []);
+
+  const migrateReadEdgeMetadata = useCallback((nextNodes: Node[], nextEdges: Edge[]) => {
+    return nextEdges.map((edge) => {
+      if (edge.targetHandle !== 'read-in' || (edge.data as any)?.variable) {
+        return edge;
+      }
+
+      const sourceNode = nextNodes.find((node) => node.id === edge.source);
+      const sourceVariables = (sourceNode?.data as any)?.variables || {};
+      const variableNames = Object.keys(sourceVariables);
+      let variable: string | undefined;
+
+      if ('current_mass' in sourceVariables) {
+        variable = 'current_mass';
+      } else if (variableNames.length === 1) {
+        variable = variableNames[0];
+      }
+
+      if (!variable) {
+        return edge;
+      }
+
+      return {
+        ...edge,
+        data: {
+          ...(edge.data || {}),
+          variable,
+        },
+      };
+    });
+  }, []);
 
   // Load from dev server with fallback to localStorage or defaults
   useEffect(() => {
@@ -211,8 +285,10 @@ const CanvasEditor = () => {
         if (res.ok) {
           const parsed = await res.json();
           if (parsed && Array.isArray(parsed.nodes)) {
+            const migratedEdges = migrateReadEdgeMetadata(parsed.nodes, parsed.edges || []);
             setNodes(parsed.nodes);
-            setEdges(parsed.edges || []);
+            setEdges(migratedEdges);
+            saveToLocalStorage(parsed.nodes, migratedEdges);
             return;
           }
         }
@@ -224,9 +300,17 @@ const CanvasEditor = () => {
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
-          setNodes(parsed.nodes || []);
-          setEdges(parsed.edges || []);
-          return;
+          if (parsed.version !== SCHEMA_VERSION) {
+            console.warn(`Schema version mismatch (cached: ${parsed.version}, expected: ${SCHEMA_VERSION}), resetting to defaults.`);
+            localStorage.removeItem(LOCAL_STORAGE_KEY);
+          } else {
+            const savedNodes = parsed.nodes || [];
+            const migratedEdges = migrateReadEdgeMetadata(savedNodes, parsed.edges || []);
+            setNodes(savedNodes);
+            setEdges(migratedEdges);
+            saveToLocalStorage(savedNodes, migratedEdges);
+            return;
+          }
         } catch (e) {
           console.error('Error restoring localStorage topology, resetting to defaults.', e);
         }
@@ -236,12 +320,7 @@ const CanvasEditor = () => {
     };
 
     loadTopology();
-  }, [setNodes, setEdges]);
-
-  // Persist to local storage
-  const saveToLocalStorage = useCallback((newNodes: Node[], newEdges: Edge[]) => {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ nodes: newNodes, edges: newEdges }));
-  }, []);
+  }, [setNodes, setEdges, migrateReadEdgeMetadata, saveToLocalStorage]);
 
   const updateNodesAndPersist = useCallback((updater: any) => {
     setNodes((nds) => {
@@ -313,12 +392,14 @@ const CanvasEditor = () => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ nodes, edges, max_time: maxSimTime }),
+        body: JSON.stringify({ nodes, edges, max_time: maxSimTime, seed: simSeed }),
       });
       const data = await res.json();
       if (res.ok && data.status === 'ok') {
         setTelemetryHistory(data.history || []);
         setTelemetryEvents(data.events || []);
+        const rawPng = data.plots?.dashboard_png;
+        setDashboardPng(rawPng ? `data:image/png;base64,${rawPng}` : null);
         setCurrentPlaybackTime(0);
         setIsPlaying(true);
         alert('Simulation execution complete! Telemetry loaded.');
@@ -328,7 +409,7 @@ const CanvasEditor = () => {
     } catch (err) {
       alert(`Network error running simulation: ${err}`);
     }
-  }, [nodes, edges, maxSimTime]);
+  }, [nodes, edges, maxSimTime, simSeed]);
 
   // Playback timer loop effect
   useEffect(() => {
@@ -370,22 +451,51 @@ const CanvasEditor = () => {
     (params: Connection) => {
       // Determine style based on source handle type
       let edgeStyle: React.CSSProperties = {};
+      let edgeData: Record<string, unknown> | undefined;
       if (params.sourceHandle?.startsWith('flow')) {
         edgeStyle = { stroke: '#3b82f6', strokeWidth: 4 };
+        const param = window.prompt('Parameter name on target (e.g., inflow, ore1_outflow):');
+        if (param) edgeData = { param };
       } else if (params.sourceHandle?.startsWith('read')) {
         edgeStyle = { stroke: '#f59e0b', strokeWidth: 1.5 };
+        const sourceNode = nodes.find((node) => node.id === params.source);
+        const variableNames = Object.keys((sourceNode?.data as any)?.variables || {});
+        if (variableNames.length === 0) {
+          alert('Read edges require the source node to expose at least one variable.');
+          return;
+        }
+        let readVariable = variableNames[0];
+        if (variableNames.length > 1) {
+          const selected = window.prompt(
+            `Variable to read from ${params.source}:\n${variableNames.join(', ')}`,
+            variableNames[0]
+          );
+          if (!selected) return;
+          if (!variableNames.includes(selected)) {
+            alert(`"${selected}" is not a variable on ${params.source}.`);
+            return;
+          }
+          readVariable = selected;
+        }
+        edgeData = { variable: readVariable };
       } else if (params.sourceHandle?.startsWith('data')) {
         edgeStyle = { stroke: '#10b981', strokeWidth: 2, strokeDasharray: '5,5' };
+        const param = window.prompt('Parameter name on target (e.g., requested_outflow_rate):');
+        if (!param) return;
+        const variable = window.prompt('Source variable name (e.g., target_stock1_outflow_rate):');
+        if (!variable) return;
+        edgeData = { param, variable };
       }
 
       const newEdge = {
         ...params,
+        data: edgeData,
         style: edgeStyle,
       };
 
       updateEdgesAndPersist((eds: Edge[]) => addEdge(newEdge, eds));
     },
-    [updateEdgesAndPersist]
+    [nodes, updateEdgesAndPersist]
   );
 
   const isValidConnection = useCallback((connection: Edge | Connection) => {
@@ -420,10 +530,11 @@ const CanvasEditor = () => {
         y: event.clientY,
       });
 
-      // Default variables by type
+      // Default variables and attributes by type
       let label = 'New Node';
       let nodeClass = 'Module';
       let variables = {};
+      let attributes = {};
 
       if (type === 'extractionNode') {
         label = 'New Extraction Face';
@@ -436,6 +547,10 @@ const CanvasEditor = () => {
         nodeClass = 'Stockpile';
         variables = {
           current_mass: { class: 'Level', value: 0.0, lower_threshold: 0.0, upper_threshold: 500.0, rate: 0.0 }
+        };
+        attributes = {
+          name: label.toLowerCase().replace(/\s+/g, '_'),
+          expected_attributes: [],
         };
       } else if (type === 'factoryNode') {
         label = 'New Concentrator';
@@ -473,6 +588,7 @@ const CanvasEditor = () => {
           label,
           class: nodeClass,
           variables,
+          attributes,
           layout: position
         },
       };
@@ -544,26 +660,43 @@ const CanvasEditor = () => {
 
     if (format === 'flat') {
       // Flat array containing node configs and connection outputs
+      // Track output_index per source for flow-in connections (tuple unpacking)
+      const sourceConsumerCount: Record<string, number> = {};
+      
       exportData = nodes.map((node) => {
         const layout = node.position;
         const variables = node.data.variables || {};
         
-        // Find links
+        // Find links with dict format (module, param, output_index/variable)
         const flow_inputs = edges
           .filter((e) => e.target === node.id && e.targetHandle === 'flow-in')
-          .map((e) => e.source);
+          .map((e) => {
+            const src = e.source;
+            if (sourceConsumerCount[src] === undefined) sourceConsumerCount[src] = 0;
+            const outputIndex = sourceConsumerCount[src];
+            sourceConsumerCount[src]++;
+            return {
+              module: src,
+              param: (e.data as any)?.param ?? null,
+              output_index: outputIndex
+            };
+          });
         
         const data_inputs = edges
           .filter((e) => e.target === node.id && e.targetHandle === 'data-in')
-          .map((e) => e.source);
+          .map((e) => ({
+            module: e.source,
+            param: (e.data as any)?.param ?? null,
+            variable: (e.data as any)?.variable ?? null,
+          }));
 
         const variable_reads = edges
           .filter((e) => e.target === node.id && e.targetHandle === 'read-in')
           .map((e) => {
-            // Find variable name read. Default to a guess based on source variables
-            const srcNode = nodes.find(n => n.id === e.source);
-            const varNames = srcNode ? Object.keys(srcNode.data.variables || {}) : [];
-            const readVar = varNames.length > 0 ? varNames[0] : 'value';
+            const readVar = (e.data as any)?.variable;
+            if (!readVar) {
+              throw new Error(`Read edge ${e.id} is missing data.variable.`);
+            }
             return {
               module: e.source,
               variable: readVar
@@ -575,6 +708,7 @@ const CanvasEditor = () => {
           class: node.data.class,
           layout,
           variables,
+          attributes: (node.data as any).attributes || {},
           connections: {
             flow_inputs,
             data_inputs,
@@ -587,6 +721,7 @@ const CanvasEditor = () => {
       // First, build a map of paths to children
       const buildTree = () => {
         const root: any = { class: 'DRSModel', layout: { x: 0, y: 0 }, variables: {}, children: {}, connections: {} };
+        const sourceConsumerCount: Record<string, number> = {};
         
         // Populate nodes into tree
         nodes.forEach((node) => {
@@ -598,18 +733,34 @@ const CanvasEditor = () => {
               // Leaf module definition
               const flow_inputs = edges
                 .filter((e) => e.target === node.id && e.targetHandle === 'flow-in')
-                .map((e) => e.source);
+                .map((e) => {
+                  const src = e.source;
+                  if (sourceConsumerCount[src] === undefined) sourceConsumerCount[src] = 0;
+                  const outputIndex = sourceConsumerCount[src];
+                  sourceConsumerCount[src]++;
+                  return {
+                    module: src,
+                    param: (e.data as any)?.param ?? null,
+                    output_index: outputIndex
+                  };
+                });
               const data_inputs = edges
                 .filter((e) => e.target === node.id && e.targetHandle === 'data-in')
-                .map((e) => e.source);
+                .map((e) => ({
+                  module: e.source,
+                  param: (e.data as any)?.param ?? null,
+                  variable: (e.data as any)?.variable ?? null,
+                }));
               const variable_reads = edges
                 .filter((e) => e.target === node.id && e.targetHandle === 'read-in')
                 .map((e) => {
-                  const srcNode = nodes.find(n => n.id === e.source);
-                  const varNames = srcNode ? Object.keys(srcNode.data.variables || {}) : [];
+                  const readVar = (e.data as any)?.variable;
+                  if (!readVar) {
+                    throw new Error(`Read edge ${e.id} is missing data.variable.`);
+                  }
                   return {
                     module: e.source,
-                    variable: varNames[0] || 'value'
+                    variable: readVar
                   };
                 });
 
@@ -617,6 +768,7 @@ const CanvasEditor = () => {
                 class: node.data.class,
                 layout: node.position,
                 variables: node.data.variables || {},
+                attributes: (node.data as any).attributes || {},
                 children: {},
                 connections: {
                   flow_inputs,
@@ -711,13 +863,16 @@ const CanvasEditor = () => {
                 label: item.id || `Node ${index}`,
                 class: item.class || 'Module',
                 variables: item.variables || {},
+                attributes: item.attributes || {},
                 layout: position
               }
             });
 
             // Reconstruct connections if present
+            // Support both old (string) and new (dict) formats
             const conns = item.connections || {};
-            (conns.flow_inputs || []).forEach((src: string, eIdx: number) => {
+            (conns.flow_inputs || []).forEach((entry: any, eIdx: number) => {
+              const src = typeof entry === 'string' ? entry : entry.module;
               importedEdges.push({
                 id: `e-flow-${src}-${item.id}-${eIdx}`,
                 source: src,
@@ -727,13 +882,20 @@ const CanvasEditor = () => {
                 style: { stroke: '#3b82f6', strokeWidth: 4 }
               });
             });
-            (conns.data_inputs || []).forEach((src: string, eIdx: number) => {
+            (conns.data_inputs || []).forEach((entry: any, eIdx: number) => {
+              const src = typeof entry === 'string' ? entry : entry.module;
+              const edgeData: Record<string, unknown> = {};
+              if (typeof entry === 'object' && entry !== null) {
+                if (entry.param) edgeData.param = entry.param;
+                if (entry.variable) edgeData.variable = entry.variable;
+              }
               importedEdges.push({
                 id: `e-data-${src}-${item.id}-${eIdx}`,
                 source: src,
                 sourceHandle: 'data-out',
                 target: item.id,
                 targetHandle: 'data-in',
+                data: Object.keys(edgeData).length > 0 ? edgeData : undefined,
                 style: { stroke: '#10b981', strokeWidth: 2, strokeDasharray: '5,5' }
               });
             });
@@ -744,6 +906,7 @@ const CanvasEditor = () => {
                 sourceHandle: 'read-out',
                 target: item.id,
                 targetHandle: 'read-in',
+                data: { variable: (srcObj as any).variable },
                 style: { stroke: '#f59e0b', strokeWidth: 1.5 }
               });
             });
@@ -776,13 +939,16 @@ const CanvasEditor = () => {
                   label: currentPath.split('.').pop() || 'Node',
                   class: node.class || 'Module',
                   variables: node.variables || {},
+                  attributes: node.attributes || {},
                   layout: position
                 }
               });
 
               // Connections
+              // Support both old (string) and new (dict) formats
               const conns = node.connections || {};
-              (conns.flow_inputs || []).forEach((src: string, eIdx: number) => {
+              (conns.flow_inputs || []).forEach((entry: any, eIdx: number) => {
+                const src = typeof entry === 'string' ? entry : entry.module;
                 importedEdges.push({
                   id: `e-flow-${src}-${currentPath}-${eIdx}`,
                   source: src,
@@ -792,13 +958,20 @@ const CanvasEditor = () => {
                   style: { stroke: '#3b82f6', strokeWidth: 4 }
                 });
               });
-              (conns.data_inputs || []).forEach((src: string, eIdx: number) => {
+              (conns.data_inputs || []).forEach((entry: any, eIdx: number) => {
+                const src = typeof entry === 'string' ? entry : entry.module;
+                const edgeData: Record<string, unknown> = {};
+                if (typeof entry === 'object' && entry !== null) {
+                  if (entry.param) edgeData.param = entry.param;
+                  if (entry.variable) edgeData.variable = entry.variable;
+                }
                 importedEdges.push({
                   id: `e-data-${src}-${currentPath}-${eIdx}`,
                   source: src,
                   sourceHandle: 'data-out',
                   target: currentPath,
                   targetHandle: 'data-in',
+                  data: Object.keys(edgeData).length > 0 ? edgeData : undefined,
                   style: { stroke: '#10b981', strokeWidth: 2, strokeDasharray: '5,5' }
                 });
               });
@@ -809,6 +982,7 @@ const CanvasEditor = () => {
                   sourceHandle: 'read-out',
                   target: currentPath,
                   targetHandle: 'read-in',
+                  data: { variable: (srcObj as any).variable },
                   style: { stroke: '#f59e0b', strokeWidth: 1.5 }
                 });
               });
@@ -1143,6 +1317,27 @@ const CanvasEditor = () => {
           <Play className="w-3.5 h-3.5 fill-current" />
           Run Simulation
         </button>
+        <div className="flex items-center gap-1">
+          <span className="text-[9px] text-slate-500">Seed</span>
+          <input
+            type="number"
+            min={0}
+            value={simSeed}
+            onChange={(e) => setSimSeed(parseInt(e.target.value) || 0)}
+            className="w-14 bg-slate-800 border border-slate-700 rounded px-1.5 py-1 text-[10px] text-white font-mono text-center focus:outline-none focus:border-sky-600"
+          />
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-[9px] text-slate-500">Dur(h)</span>
+          <input
+            type="number"
+            min={1}
+            max={99999}
+            value={maxSimTime}
+            onChange={(e) => setMaxSimTime(parseInt(e.target.value) || 99999)}
+            className="w-16 bg-slate-800 border border-slate-700 rounded px-1.5 py-1 text-[10px] text-white font-mono text-center focus:outline-none focus:border-sky-600"
+          />
+        </div>
 
         {telemetryHistory.length > 0 && (
           <>
@@ -1186,6 +1381,7 @@ const CanvasEditor = () => {
                 className="w-32 md:w-40 accent-sky-400 cursor-pointer"
               />
               <span className="text-[10px] text-slate-400 whitespace-nowrap">{(telemetryHistory[telemetryHistory.length - 1]?.time || maxSimTime).toFixed(0)}s</span>
+              <span className="text-[10px] text-amber-400/80 whitespace-nowrap font-mono">Day {(currentPlaybackTime / 24).toFixed(1)}</span>
             </div>
 
             <div className="h-6 w-px bg-slate-800" />
@@ -1205,11 +1401,14 @@ const CanvasEditor = () => {
               </select>
             </div>
 
-            {telemetryEvents.length > 0 && (
+            {(telemetryEvents.length > 0 || dashboardPng) && (
               <>
                 <div className="h-6 w-px bg-slate-800" />
                 <button
-                  onClick={() => setShowEventLog(!showEventLog)}
+                  onClick={() => {
+                    setShowDashboard(false);
+                    setShowEventLog(!showEventLog);
+                  }}
                   className={`flex items-center gap-1.5 py-1.5 px-3 rounded-lg border text-xs font-semibold transition-all ${
                     showEventLog 
                       ? 'bg-amber-950/20 border-amber-500/40 text-amber-300' 
@@ -1219,11 +1418,47 @@ const CanvasEditor = () => {
                   <ListFilter className="w-3.5 h-3.5" />
                   Events ({telemetryEvents.length})
                 </button>
+                {dashboardPng && (
+                  <>
+                    <div className="h-6 w-px bg-slate-800" />
+                    <button
+                      onClick={() => {
+                        setShowEventLog(false);
+                        setShowDashboard(!showDashboard);
+                      }}
+                      className={`flex items-center gap-1.5 py-1.5 px-3 rounded-lg border text-xs font-semibold transition-all ${
+                        showDashboard 
+                          ? 'bg-emerald-950/20 border-emerald-500/40 text-emerald-300' 
+                          : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      Dashboard
+                    </button>
+                  </>
+                )}
               </>
             )}
           </>
         )}
       </div>
+
+      {/* Floating Dashboard Panel */}
+      {showDashboard && dashboardPng && (
+        <div className="absolute top-16 right-6 w-[90vw] max-w-[1200px] bg-slate-900/95 backdrop-blur-md border border-slate-800 rounded-xl p-4 shadow-2xl z-20 flex flex-col max-h-[85vh] select-none text-slate-100">
+          <div className="flex justify-between items-center pb-2 mb-3 border-b border-slate-800">
+            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Diagnostic Dashboard</span>
+            <button
+              onClick={() => setShowDashboard(false)}
+              className="text-slate-400 hover:text-white text-xs font-bold"
+            >
+              Close
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto pr-1">
+            <img src={dashboardPng} alt="Diagnostic Dashboard" className="w-full" />
+          </div>
+        </div>
+      )}
 
       {/* Floating Event Timeline Panel */}
       {showEventLog && telemetryEvents.length > 0 && (
@@ -1255,6 +1490,7 @@ const CanvasEditor = () => {
                 >
                   <div className="flex justify-between items-center mb-1 text-[10px]">
                     <span className="font-mono text-sky-400 font-bold">t = {evt.time.toFixed(2)}s</span>
+                    <span className="text-[8px] text-amber-400/70 font-mono">Day {(evt.time / 24).toFixed(2)}</span>
                     <span className="font-sans font-semibold px-1 py-0.2 rounded bg-slate-800 text-slate-300 uppercase text-[8px] tracking-wide">{evt.event_type}</span>
                   </div>
                   <div className="text-xs font-semibold text-slate-200">{evt.source}</div>

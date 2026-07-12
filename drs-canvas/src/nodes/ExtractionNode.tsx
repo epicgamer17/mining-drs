@@ -1,9 +1,11 @@
 import { Handle, Position } from '@xyflow/react';
 import { Pickaxe } from 'lucide-react';
 
+type VariableValue = number | string | { __type__: string; name: string };
+
 interface VariableInfo {
   class: string;
-  value: number;
+  value: VariableValue;
 }
 
 interface ExtractionNodeData {
@@ -50,7 +52,7 @@ export const ExtractionNode = ({ data, selected }: { data: ExtractionNodeData; s
         {Object.entries(data.variables || {}).map(([key, varInfo]) => (
           <div key={key} className="flex justify-between items-center gap-4 bg-slate-950/40 px-2 py-1 rounded">
             <span className="font-mono text-slate-400">{key}</span>
-            <span className="font-semibold text-amber-400">{varInfo.value}</span>
+            <span className="font-semibold text-amber-400">{typeof varInfo.value === 'object' && varInfo.value !== null ? `${varInfo.value.__type__}: ${varInfo.value.name}` : varInfo.value}</span>
           </div>
         ))}
       </div>

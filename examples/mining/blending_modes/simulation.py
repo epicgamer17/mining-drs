@@ -116,7 +116,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # You can also run it a single time and print out the statistics to evaluate how it spends time
-    np.random.seed(42)
+    np.random.seed(11)
     random.seed(11)  # 11
     config = ConcentratorConfig(
         replication_length=99999.0,
