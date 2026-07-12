@@ -4,11 +4,8 @@ from typing import Any, Optional, Union
 
 import drs
 from .module import Module
-from .variables import Variable, Level, Timer, Expression
-from .flow import Flow
-from .data_source import DataPoint
+from .variables import Variable, Level, Timer, Expression, deserialize_val
 from ._execution_context import ExecutionContext
-from .variables import deserialize_val
 
 CLASS_REGISTRY: dict[str, type] = {}
 
@@ -179,218 +176,146 @@ def validate_canvas_json(canvas_data: Union[dict, list], model: Module) -> None:
     _validate(json_tree, model)
 
 
-def compile_canvas_json(
-    canvas_data: Union[dict, list],
-    class_registry: Optional[dict[str, type]] = None,
-    config: Optional[Any] = None,
+def _instantiate_class(
+    cls: type,
+    name: str,
+    attrs: dict,
+    config: Optional[Any],
+    parent_obj: Optional[Module],
 ) -> Module:
-    import math
-    import drs
-    from .module import Module
-    from .variables import Variable, Level, Timer
-    from .flow import Flow
-    from .data_source import DataPoint
+    import inspect
 
-    if isinstance(canvas_data, list):
-        json_tree = _flat_canvas_to_tree(canvas_data)
-    elif isinstance(canvas_data, dict):
-        json_tree = canvas_data
-    else:
-        raise ValueError("canvas_data must be a dictionary or a list of dictionaries.")
-
-    equations_to_resolve = []
-    nodes_info = {}
-
-    def build_module(
-        name: str,
-        node_data: dict,
-        path: str = "",
-        existing_obj: Optional[Module] = None,
-        parent_obj: Optional[Module] = None,
-    ) -> Module:
-        cls_name = node_data.get("class", "Module")
-        cls = _resolve_class(cls_name, class_registry)
-        attrs = node_data.get("attributes", {})
-
-        if existing_obj is not None:
-            obj = existing_obj
-        else:
-            import inspect
-
-            try:
-                sig = inspect.signature(cls.__init__)
-                params = list(sig.parameters.values())
-                params_no_self = [p for p in params if p.name != "self"]
-
-                kwargs = {}
-                has_all_required = True
-                for param in params_no_self:
-                    if param.name in ("config", "cfg") and config is not None:
-                        kwargs[param.name] = config
-                    elif "Config" in str(param.annotation) and config is not None:
-                        kwargs[param.name] = config
-                    elif param.name in attrs:
-                        kwargs[param.name] = attrs[param.name]
-                    elif parent_obj is not None and param.name in getattr(
-                        parent_obj, "_modules", {}
-                    ):
-                        kwargs[param.name] = parent_obj._modules[param.name]
-                    elif parent_obj is not None and hasattr(parent_obj, param.name):
-                        candidate = getattr(parent_obj, param.name)
-                        if isinstance(candidate, Module):
-                            kwargs[param.name] = candidate
-                        elif param.default == inspect.Parameter.empty:
-                            has_all_required = False
-                            break
-                    elif param.default == inspect.Parameter.empty:
-                        has_all_required = False
-                        break
-
-                if has_all_required:
-                    obj = cls(**kwargs)
-                else:
-                    obj = cls()
-            except Exception:
-                obj = cls.__new__(cls)
-                Module.__init__(obj)
-                if config is not None:
-                    obj.config = config
-                if not hasattr(obj, "expected_attributes"):
-                    obj.expected_attributes = []
-                if not hasattr(obj, "name"):
-                    obj.name = name
-
-        if "layout" in node_data:
-            obj.layout = node_data["layout"]
-
-        for k, v in attrs.items():
-            setattr(obj, k, v)
-
-        current_path = f"{path}.{name}" if path else name
-        nodes_info[current_path] = node_data
-
-        variables_data = node_data.get("variables", {})
-        for var_name, var_info in variables_data.items():
-            if isinstance(var_info, str):
-                var_info = {"class": var_info, "value": 0.0}
-
-            var_class_name = var_info.get("class", "Variable")
-            var_value = var_info.get("value", 0.0)
-
-            if isinstance(var_value, dict) and "__type__" in var_value:
-                type_name = var_value["__type__"]
-                obj_name = var_value.get("name")
-                resolved_cls = _resolve_class(type_name, class_registry)
-                if resolved_cls is not None and obj_name is not None:
-                    try:
-                        var_value = resolved_cls(obj_name)
-                    except Exception:
-                        raise ValueError(
-                            f"Could not resolve typed object: __type__='{type_name}', "
-                            f"name='{obj_name}' for variable '{var_name}' at '{current_path}'."
-                        )
-
-            if isinstance(var_value, str):
-                var_value = deserialize_val(var_value)
-
-            var_cls = getattr(drs, var_class_name, None)
-            if var_cls is None:
-                raise ValueError(
-                    f"Variable class '{var_class_name}' not found for variable '{var_name}' at '{current_path}'."
-                )
-
-            existing_var = getattr(obj, var_name, None)
-            if (
-                isinstance(existing_var, Variable)
-                and type(existing_var).__name__ == var_class_name
+    try:
+        sig = inspect.signature(cls.__init__)
+        params = [p for p in sig.parameters.values() if p.name != "self"]
+        kwargs = {}
+        for param in params:
+            if param.name in ("config", "cfg") and config is not None:
+                kwargs[param.name] = config
+            elif "Config" in str(param.annotation) and config is not None:
+                kwargs[param.name] = config
+            elif param.name in attrs:
+                kwargs[param.name] = attrs[param.name]
+            elif parent_obj is not None and param.name in getattr(
+                parent_obj, "_modules", {}
             ):
-                var = existing_var
-                import enum
+                kwargs[param.name] = parent_obj._modules[param.name]
+            elif parent_obj is not None and hasattr(parent_obj, param.name):
+                candidate = getattr(parent_obj, param.name)
+                if isinstance(candidate, Module):
+                    kwargs[param.name] = candidate
+                elif param.default == inspect.Parameter.empty:
+                    return cls()
+            elif param.default == inspect.Parameter.empty:
+                return cls()
 
-                if isinstance(var._value, enum.Enum) and isinstance(var_value, str):
-                    enum_cls = type(var._value)
-                    if var_value not in enum_cls.__members__:
-                        raise ValueError(
-                            f"Invalid value '{var_value}' for enum {enum_cls.__name__} "
-                            f"on variable '{var_name}' at '{current_path}'."
-                        )
-                    var._value = enum_cls[var_value]
-                elif (
-                    hasattr(var._value, "name")
-                    and hasattr(var._value, "id")
-                    and isinstance(var_value, str)
-                ):
-                    cls = type(var._value)
-                    try:
-                        var._value = cls(var_value)
-                    except Exception:
-                        raise ValueError(
-                            f"Could not construct {cls.__name__} from value '{var_value}' "
-                            f"for variable '{var_name}' at '{current_path}'."
-                        )
-                else:
-                    var._value = var_value if not isinstance(var_value, dict) else 0.0
-            else:
-                if var_cls in (Level, Timer):
-                    var = var_cls(
-                        var_name,
-                        initial_value=(
-                            var_value if not isinstance(var_value, dict) else 0.0
-                        ),
-                    )
-                else:
-                    var = var_cls(var_name, var_value)
-                setattr(obj, var_name, var)
+        obj = cls(**kwargs)
+    except Exception:
+        obj = cls.__new__(cls)
+        Module.__init__(obj)
+        if config is not None:
+            obj.config = config
+    return obj
 
-            if var_cls in (Level, Timer):
-                if "lower_threshold" in var_info:
-                    var.lower_threshold = deserialize_val(var_info["lower_threshold"])
-                if "upper_threshold" in var_info:
-                    var.upper_threshold = deserialize_val(var_info["upper_threshold"])
-                rate_val = var_info.get("rate", 0.0)
-                if isinstance(rate_val, dict) and "equation" in rate_val:
-                    equations_to_resolve.append(
-                        (var, rate_val["equation"], current_path)
-                    )
-                elif isinstance(rate_val, str) and rate_val not in (
-                    "Infinity",
-                    "-Infinity",
-                    "NaN",
-                ):
-                    equations_to_resolve.append((var, rate_val, current_path))
-                else:
-                    var.rate = deserialize_val(rate_val)
 
-        children_data = node_data.get("children", {})
-        for child_name, child_data in children_data.items():
-            existing_child = getattr(obj, child_name, None)
-            if isinstance(existing_child, Module):
-                build_module(
-                    child_name,
-                    child_data,
-                    current_path,
-                    existing_obj=existing_child,
-                    parent_obj=obj,
+def _restore_variable(
+    obj: Module,
+    var_name: str,
+    var_info: Any,
+    current_path: str,
+    class_registry: Optional[dict[str, type]],
+    equations: list,
+) -> None:
+    import enum
+
+    if isinstance(var_info, str):
+        var_info = {"class": var_info, "value": 0.0}
+
+    var_class_name = var_info.get("class", "Variable")
+    var_value = var_info.get("value", 0.0)
+
+    if isinstance(var_value, dict) and "__type__" in var_value:
+        type_name = var_value["__type__"]
+        obj_name = var_value.get("name")
+        cls = _resolve_class(type_name, class_registry)
+        if cls is not None and obj_name is not None:
+            try:
+                var_value = cls(obj_name)
+            except Exception:
+                raise ValueError(
+                    f"Could not resolve typed object: __type__='{type_name}', "
+                    f"name='{obj_name}' for variable '{var_name}' at '{current_path}'."
                 )
-            else:
-                child_obj = build_module(
-                    child_name, child_data, current_path, parent_obj=obj
+
+    if isinstance(var_value, str):
+        var_value = deserialize_val(var_value)
+
+    var_cls = getattr(drs, var_class_name, None)
+    if var_cls is None:
+        raise ValueError(
+            f"Variable class '{var_class_name}' not found for variable '{var_name}' at '{current_path}'."
+        )
+
+    existing_var = getattr(obj, var_name, None)
+    if (
+        isinstance(existing_var, Variable)
+        and type(existing_var).__name__ == var_class_name
+    ):
+        var = existing_var
+        if isinstance(var._value, enum.Enum) and isinstance(var_value, str):
+            if var_value not in type(var._value).__members__:
+                raise ValueError(
+                    f"Invalid value '{var_value}' for enum {type(var._value).__name__} "
+                    f"on variable '{var_name}' at '{current_path}'."
                 )
-                setattr(obj, child_name, child_obj)
+            var._value = type(var._value)[var_value]
+        elif (
+            hasattr(var._value, "name")
+            and hasattr(var._value, "id")
+            and isinstance(var_value, str)
+        ):
+            try:
+                var._value = type(var._value)(var_value)
+            except Exception:
+                raise ValueError(
+                    f"Could not construct {type(var._value).__name__} from value '{var_value}' "
+                    f"for variable '{var_name}' at '{current_path}'."
+                )
+        else:
+            var._value = var_value if not isinstance(var_value, dict) else 0.0
+    else:
+        if var_cls in (Level, Timer):
+            var = var_cls(
+                var_name,
+                initial_value=var_value if not isinstance(var_value, dict) else 0.0,
+            )
+        else:
+            var = var_cls(var_name, var_value)
+        setattr(obj, var_name, var)
 
-        return obj
+    if var_cls in (Level, Timer):
+        if "lower_threshold" in var_info:
+            var.lower_threshold = deserialize_val(var_info["lower_threshold"])
+        if "upper_threshold" in var_info:
+            var.upper_threshold = deserialize_val(var_info["upper_threshold"])
+        rate_val = var_info.get("rate", 0.0)
+        if isinstance(rate_val, dict) and "equation" in rate_val:
+            equations.append((var, rate_val["equation"], current_path))
+        elif isinstance(rate_val, str) and rate_val not in (
+            "Infinity",
+            "-Infinity",
+            "NaN",
+        ):
+            equations.append((var, rate_val, current_path))
+        else:
+            var.rate = deserialize_val(rate_val)
 
-    root_name = ""
-    root = build_module(root_name, json_tree, "")
-    root.parent = None
 
-    name_to_mod = {path: mod for path, mod in root.named_modules()}
-    name_to_mod[""] = root
-
+def _resolve_rate_equations(equations: list, name_to_mod: dict[str, Module]) -> None:
     orig_tracing = ExecutionContext.is_tracing()
     ExecutionContext.set_tracing(True)
     try:
-        for var, eq_str, mod_path in equations_to_resolve:
+        for var, eq_str, mod_path in equations:
             mod = name_to_mod[mod_path]
             local_ns = {"self": mod}
             for sib_name, sib_mod in mod._modules.items():
@@ -401,13 +326,12 @@ def compile_canvas_json(
                     local_ns[sib_name] = sib_mod
                 p = p.parent
 
-            cleaned_eq = eq_str.strip()
-            if cleaned_eq.startswith("(") and cleaned_eq.endswith(")"):
-                cleaned_eq = cleaned_eq[1:-1]
+            cleaned = eq_str.strip()
+            if cleaned.startswith("(") and cleaned.endswith(")"):
+                cleaned = cleaned[1:-1]
 
             try:
-                expr = eval(cleaned_eq, {}, local_ns)
-                var.rate = expr
+                var.rate = eval(cleaned, {}, local_ns)
             except Exception as e:
                 raise ValueError(
                     f"Could not resolve rate equation '{eq_str}' for variable "
@@ -416,240 +340,277 @@ def compile_canvas_json(
     finally:
         ExecutionContext.set_tracing(orig_tracing)
 
-    def _is_dummy_forward(func) -> bool:
-        if func is None:
-            return True
-        try:
-            if hasattr(func, "__func__"):
-                func = func.__func__
-            import dis
 
-            instructions = list(dis.get_instructions(func))
-            opnames = [inst.opname for inst in instructions]
-            if "RAISE_VARARGS" in opnames:
-                return False
-            has_calls = any(name.startswith("CALL") for name in opnames)
-            has_stores = any(name.startswith("STORE") for name in opnames)
-            return not has_calls and not has_stores
-        except Exception:
-            pass
+def _record_dependency_edges(name_to_mod: dict[str, Module], nodes_info: dict) -> None:
+    for mod_path, mod in name_to_mod.items():
+        conns = nodes_info.get(mod_path, {}).get("connections", {})
+        for entry in conns.get("flow_inputs", []):
+            src = name_to_mod.get(entry["module"])
+            if src:
+                mod._record_flow_edge(src)
+        for entry in conns.get("data_inputs", []):
+            src = name_to_mod.get(entry["module"])
+            if src:
+                mod._record_data_edge(src)
+        for r_info in conns.get("variable_reads", []):
+            src = name_to_mod.get(r_info["module"])
+            if src and r_info["variable"] in src._variables:
+                mod._record_incoming_edge(src._variables[r_info["variable"]])
+
+
+def _is_dummy_forward(func) -> bool:
+    try:
+        if hasattr(func, "__func__"):
+            func = func.__func__
+        import dis
+
+        opnames = [inst.opname for inst in dis.get_instructions(func)]
+        if "RAISE_VARARGS" in opnames:
+            return False
+        has_calls = any(n.startswith("CALL") for n in opnames)
+        has_stores = any(n.startswith("STORE") for n in opnames)
+        return not has_calls and not has_stores
+    except Exception:
         return False
 
+
+def _topological_sort(children_names: list[str], child_to_info: dict) -> list[str]:
+    adj = {name: set() for name in children_names}
+    in_degree = {name: 0 for name in children_names}
+
+    for name in children_names:
+        for src in child_to_info[name].get("connections", {}).get(
+            "flow_inputs", []
+        ) + child_to_info[name].get("connections", {}).get("data_inputs", []):
+            src_path = src.get("module")
+            if src_path and src_path in adj and name not in adj[src_path]:
+                adj[src_path].add(name)
+                in_degree[name] += 1
+
+    queue = sorted([n for n, d in in_degree.items() if d == 0])
+    order = []
+    while queue:
+        curr = queue.pop(0)
+        order.append(curr)
+        for neighbor in adj[curr]:
+            in_degree[neighbor] -= 1
+            if in_degree[neighbor] == 0:
+                queue.append(neighbor)
+
+    remaining = [n for n in children_names if n not in order]
+    order.extend(remaining)
+    return order
+
+
+def _build_dynamic_forward(
+    mod: Module,
+    mod_path: str,
+    children_names: list[str],
+    child_to_info: dict,
+    restore_rates: list,
+) -> types.MethodType:
+    order = _topological_sort(children_names, child_to_info)
+
+    def forward(self, *args, **kwargs):
+        outputs = {}
+        for child_name in order:
+            child_mod = getattr(self, child_name)
+            c_conns = child_to_info[child_name].get("connections", {})
+
+            child_args = []
+            child_kwargs = {}
+            for conn in c_conns.get("flow_inputs", []) + c_conns.get("data_inputs", []):
+                src_rel = conn["module"]
+                src_output = outputs.get(src_rel)
+                variable = conn.get("variable")
+                output_index = conn.get("output_index")
+
+                if variable:
+                    src = getattr(self, src_rel, None) if src_rel else None
+                    val = (
+                        getattr(src, variable)
+                        if src and hasattr(src, variable)
+                        else src_output
+                    )
+                elif output_index is not None and isinstance(src_output, tuple):
+                    val = (
+                        src_output[output_index]
+                        if output_index < len(src_output)
+                        else None
+                    )
+                else:
+                    val = src_output
+
+                if conn.get("param"):
+                    child_kwargs[conn["param"]] = val
+                else:
+                    child_args.append(val)
+
+            res = child_mod(*child_args, **child_kwargs)
+            if isinstance(res, tuple):
+                outputs[child_name] = res
+                for idx, element in enumerate(res):
+                    outputs[f"{child_name}.{idx}"] = element
+            else:
+                outputs[child_name] = res
+
+        # Apply rate_hooks from node data
+        rate_hooks = child_to_info.get("__rate_hooks__", {})
+        if rate_hooks:
+            ns = {"self": self}
+            for name in order:
+                ns[name] = getattr(self, name)
+            for var_path, expr_str in rate_hooks.items():
+                target = self
+                for part in var_path.split(".")[:-1]:
+                    target = getattr(target, part)
+                setattr(target, var_path.split(".")[-1], eval(expr_str, {}, ns))
+
+        # Restore Expression-based and non-zero rates that _zero_rates would erase
+        for var, val in restore_rates:
+            var.rate = val
+
+        return outputs.get(order[-1]) if order else None
+
+    return types.MethodType(forward, mod)
+
+
+def _apply_termination_condition(mod: Module, expr: str) -> None:
+    def check(self):
+        local_ns = {"self": mod}
+        config_val = getattr(mod, "config", None)
+        if config_val is None:
+            for child_mod in mod._modules.values():
+                if hasattr(child_mod, "config"):
+                    config_val = child_mod.config
+                    break
+        local_ns["config"] = config_val
+        for child_name, child_mod in mod._modules.items():
+            local_ns[child_name] = child_mod
+        try:
+            return bool(eval(expr, {}, local_ns))
+        except Exception:
+            return False
+
+    mod.is_terminating_condition_met = types.MethodType(check, mod)
+
+
+def compile_canvas_json(
+    canvas_data: Union[dict, list],
+    class_registry: Optional[dict[str, type]] = None,
+    config: Optional[Any] = None,
+) -> Module:
+    if isinstance(canvas_data, list):
+        json_tree = _flat_canvas_to_tree(canvas_data)
+    elif isinstance(canvas_data, dict):
+        json_tree = canvas_data
+    else:
+        raise ValueError("canvas_data must be a dictionary or a list of dictionaries.")
+
+    equations = []
+    nodes_info = {}
+
+    def build_module(name, node_data, path="", existing_obj=None, parent_obj=None):
+        cls = _resolve_class(node_data.get("class", "Module"), class_registry)
+        attrs = node_data.get("attributes", {})
+
+        obj = existing_obj or _instantiate_class(cls, name, attrs, config, parent_obj)
+
+        if "layout" in node_data:
+            obj.layout = node_data["layout"]
+        for k, v in attrs.items():
+            setattr(obj, k, v)
+
+        current_path = f"{path}.{name}" if path else name
+        nodes_info[current_path] = node_data
+
+        for var_name, var_info in node_data.get("variables", {}).items():
+            _restore_variable(
+                obj, var_name, var_info, current_path, class_registry, equations
+            )
+
+        for child_name, child_data in node_data.get("children", {}).items():
+            existing = getattr(obj, child_name, None)
+            if isinstance(existing, Module):
+                build_module(
+                    child_name,
+                    child_data,
+                    current_path,
+                    existing_obj=existing,
+                    parent_obj=obj,
+                )
+            else:
+                setattr(
+                    obj,
+                    child_name,
+                    build_module(child_name, child_data, current_path, parent_obj=obj),
+                )
+
+        return obj
+
+    root = build_module("", json_tree, "")
+    root.parent = None
+
+    name_to_mod = {path: mod for path, mod in root.named_modules()}
+    name_to_mod[""] = root
+
+    _resolve_rate_equations(equations, name_to_mod)
+    _record_dependency_edges(name_to_mod, nodes_info)
+
     needs_dynamic_forward = {
-        mod_path
-        for mod_path, mod in name_to_mod.items()
-        if mod._modules and _is_dummy_forward(type(mod).forward)
+        mp
+        for mp, m in name_to_mod.items()
+        if m._modules and _is_dummy_forward(type(m).forward)
     }
-
-    for mod_path, mod in name_to_mod.items():
-        node_info = nodes_info.get(mod_path, {})
-        conns = node_info.get("connections", {})
-
-        flow_inputs = conns.get("flow_inputs", [])
-        data_inputs = conns.get("data_inputs", [])
-        variable_reads = conns.get("variable_reads", [])
-
-        for entry in flow_inputs:
-            src_path = entry["module"]
-            src_mod = name_to_mod.get(src_path)
-            if src_mod:
-                mod._record_flow_edge(src_mod)
-
-        for entry in data_inputs:
-            src_path = entry["module"]
-            src_mod = name_to_mod.get(src_path)
-            if src_mod:
-                mod._record_data_edge(src_mod)
-
-        for r_info in variable_reads:
-            src_path = r_info["module"]
-            var_name = r_info["variable"]
-            src_mod = name_to_mod.get(src_path)
-            if src_mod and var_name in src_mod._variables:
-                mod._record_incoming_edge(src_mod._variables[var_name])
 
     for mod_path in needs_dynamic_forward:
         mod = name_to_mod[mod_path]
         children_names = list(mod._modules.keys())
-
         child_to_info = {}
         for name in children_names:
             full_path = f"{mod_path}.{name}" if mod_path else name
             child_to_info[name] = nodes_info.get(full_path, {})
 
-        adj = {name: set() for name in children_names}
-        in_degree = {name: 0 for name in children_names}
+        restore_rates = []
+        for var in mod._variables.values():
+            if isinstance(var, Level):
+                if isinstance(var._rate, Expression) or (
+                    isinstance(var._rate, (int, float)) and var._rate != 0
+                ):
+                    restore_rates.append((var, var._rate))
 
-        for name in children_names:
-            info = child_to_info[name]
-            child_conns = info.get("connections", {})
-            sources = child_conns.get("flow_inputs", []) + child_conns.get(
-                "data_inputs", []
-            )
-            for src in sources:
-                src_path = src.get("module")
-                if src_path is None:
-                    continue
-                src_suffix = src_path
-                if mod_path:
-                    if src_path.startswith(mod_path + "."):
-                        src_suffix = src_path[len(mod_path) + 1 :]
-                if src_suffix in adj:
-                    if name not in adj[src_suffix]:
-                        adj[src_suffix].add(name)
-                        in_degree[name] += 1
-
-        queue = sorted([name for name, deg in in_degree.items() if deg == 0])
-        execution_order = []
-        while queue:
-            curr = queue.pop(0)
-            execution_order.append(curr)
-            for neighbor in adj[curr]:
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
-
-        if len(execution_order) < len(children_names):
-            remaining = [name for name in children_names if name not in execution_order]
-            execution_order.extend(remaining)
-
-        mod_rate_hooks = nodes_info.get(mod_path, {}).get("rate_hooks", {})
-        mod_tc = nodes_info.get(mod_path, {}).get("termination_condition")
-
-        def make_forward(order, child_to_info_map, m_path, rate_hooks, tc_str):
-            def _rel(src_path):
-                if m_path and src_path.startswith(m_path + "."):
-                    return src_path[len(m_path) + 1 :]
-                return src_path
-
-            def forward(self, *args, **kwargs):
-                outputs = {}
-                for child_name in order:
-                    child_mod = getattr(self, child_name)
-                    info = child_to_info_map[child_name]
-                    c_conns = info.get("connections", {})
-
-                    flow_ins = c_conns.get("flow_inputs", [])
-                    data_ins = c_conns.get("data_inputs", [])
-
-                    child_args = []
-                    child_kwargs = {}
-                    for conn in flow_ins + data_ins:
-                        src_rel = _rel(conn["module"])
-                        src_output = outputs.get(src_rel)
-                        variable = conn.get("variable")
-                        output_index = conn.get("output_index")
-
-                        if variable:
-                            src_mod = getattr(self, src_rel, None) if src_rel else None
-                            if src_mod and hasattr(src_mod, variable):
-                                val = getattr(src_mod, variable)
-                            else:
-                                val = src_output
-                        elif output_index is not None and isinstance(src_output, tuple):
-                            val = (
-                                src_output[output_index]
-                                if output_index < len(src_output)
-                                else None
-                            )
-                        else:
-                            val = src_output
-
-                        if conn.get("param"):
-                            child_kwargs[conn["param"]] = val
-                        else:
-                            child_args.append(val)
-
-                    res = child_mod(*child_args, **child_kwargs)
-                    if isinstance(res, tuple):
-                        outputs[child_name] = res
-                        for idx, element in enumerate(res):
-                            outputs[f"{child_name}.{idx}"] = element
-                    else:
-                        outputs[child_name] = res
-
-                if rate_hooks:
-                    ns = {"self": self}
-                    for child_name in order:
-                        ns[child_name] = getattr(self, child_name)
-                    for var_path, expr_str in rate_hooks.items():
-                        parts = var_path.split(".")
-                        target = self
-                        for part in parts[:-1]:
-                            target = getattr(target, part)
-                        var = getattr(target, parts[-1])
-                        var.rate = eval(expr_str, {}, ns)
-
-                if order:
-                    return outputs.get(order[-1])
-                return None
-
-            return forward
-
-        mod.forward = types.MethodType(
-            make_forward(
-                execution_order, child_to_info, mod_path, mod_rate_hooks, mod_tc
-            ),
-            mod,
+        mod.forward = _build_dynamic_forward(
+            mod, mod_path, children_names, child_to_info, restore_rates
         )
 
-    # Re-apply rate expressions after forward generation to prevent _zero_rates from erasing them
+    # Restore Expression rates for non-dynamic-forward modules
+    # (dynamic-forward modules handle this inside _build_dynamic_forward)
     for mod_path, mod in name_to_mod.items():
-        restore_vars = []
-        has_dynamic = mod_path in needs_dynamic_forward
-        for var_name, var in mod._variables.items():
-            if isinstance(var, Level):
-                if isinstance(var._rate, Expression):
-                    restore_vars.append((var, var._rate))
-                elif (
-                    has_dynamic
-                    and isinstance(var._rate, (int, float))
-                    and var._rate != 0
-                ):
-                    restore_vars.append((var, var._rate))
+        if mod_path in needs_dynamic_forward:
+            continue
+        restore = [
+            (v, v._rate)
+            for v in mod._variables.values()
+            if isinstance(v, Level) and isinstance(v._rate, Expression)
+        ]
+        if not restore:
+            continue
+        orig_f = mod.forward
 
-        if restore_vars:
-            orig_forward = mod.forward
+        def _wrap(f, r):
+            def _wrapped(self, *args, **kw):
+                res = f(*args, **kw)
+                for var, val in r:
+                    var.rate = val
+                return res
 
-            def make_wrapped_forward(orig_f, rvars):
-                def wrapped_forward(self, *args, **kwargs):
-                    res = orig_f(*args, **kwargs)
-                    for var, val in rvars:
-                        var.rate = val
-                    return res
+            return _wrapped
 
-                return wrapped_forward
+        mod.forward = types.MethodType(_wrap(orig_f, restore), mod)
 
-            mod.forward = types.MethodType(
-                make_wrapped_forward(orig_forward, restore_vars), mod
-            )
-
-    # Apply termination conditions
     for mod_path, mod in name_to_mod.items():
         tc = nodes_info.get(mod_path, {}).get("termination_condition")
         if tc:
-
-            def make_termination_check(expr, target_mod):
-                def check(self):
-                    local_ns = {"self": target_mod}
-                    config_val = getattr(target_mod, "config", None)
-                    if config_val is None:
-                        for child_mod in target_mod._modules.values():
-                            if hasattr(child_mod, "config"):
-                                config_val = child_mod.config
-                                break
-                    local_ns["config"] = config_val
-                    for child_name, child_mod in target_mod._modules.items():
-                        local_ns[child_name] = child_mod
-                    try:
-                        return bool(eval(expr, {}, local_ns))
-                    except Exception:
-                        return False
-
-                return check
-
-            mod.is_terminating_condition_met = types.MethodType(
-                make_termination_check(tc, mod), mod
-            )
+            _apply_termination_condition(mod, tc)
 
     return root
