@@ -1,8 +1,12 @@
-import pytest
-import importlib.util
+import sys
 from pathlib import Path
+
+import pytest
 from drs import Module, Variable, Level
 from drs.canvas_compiler import validate_canvas_json
+
+sys.path.insert(0, str(Path(__file__).parents[3] / "drs-canvas"))
+from drs_dev_server.converters import react_flow_to_drs_flat
 
 
 class MineFace(Module):
@@ -181,17 +185,7 @@ def test_canvas_boundary_violation():
         validate_canvas_json(invalid_canvas_data, model)
 
 
-def _load_dev_server_module():
-    path = Path(__file__).parents[3] / "drs-canvas" / "drs_dev_server.py"
-    spec = importlib.util.spec_from_file_location("drs_dev_server", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_react_flow_read_edges_use_explicit_variable_metadata():
-    dev_server = _load_dev_server_module()
     nodes = [
         {
             "id": "stock",
@@ -218,7 +212,7 @@ def test_react_flow_read_edges_use_explicit_variable_metadata():
         }
     ]
 
-    flat = dev_server.react_flow_to_drs_flat(nodes, edges)
+    flat = react_flow_to_drs_flat(nodes, edges)
     controller = next(node for node in flat if node["id"] == "controller")
 
     assert controller["connections"]["variable_reads"] == [
@@ -227,7 +221,6 @@ def test_react_flow_read_edges_use_explicit_variable_metadata():
 
 
 def test_react_flow_read_edges_reject_ambiguous_missing_variable_metadata():
-    dev_server = _load_dev_server_module()
     nodes = [
         {
             "id": "stock",
@@ -254,11 +247,10 @@ def test_react_flow_read_edges_reject_ambiguous_missing_variable_metadata():
     ]
 
     with pytest.raises(ValueError, match="must specify data.variable"):
-        dev_server.react_flow_to_drs_flat(nodes, edges)
+        react_flow_to_drs_flat(nodes, edges)
 
 
 def test_react_flow_legacy_read_edges_infer_current_mass():
-    dev_server = _load_dev_server_module()
     nodes = [
         {
             "id": "stock",
@@ -284,7 +276,7 @@ def test_react_flow_legacy_read_edges_infer_current_mass():
         }
     ]
 
-    flat = dev_server.react_flow_to_drs_flat(nodes, edges)
+    flat = react_flow_to_drs_flat(nodes, edges)
     controller = next(node for node in flat if node["id"] == "controller")
 
     assert controller["connections"]["variable_reads"] == [
