@@ -364,9 +364,22 @@ def _is_dummy_forward(func) -> bool:
             func = func.__func__
         import dis
 
-        opnames = [inst.opname for inst in dis.get_instructions(func)]
-        if "RAISE_VARARGS" in opnames:
-            return False
+        instructions = list(dis.get_instructions(func))
+        opnames = [inst.opname for inst in instructions]
+
+        # Detect `raise NotImplementedError(...)` — this is the Module base
+        # class's forward() which should be treated as dummy/replaceable.
+        for i, inst in enumerate(instructions):
+            if inst.opname == "RAISE_VARARGS":
+                # Check if the exception being raised is NotImplementedError
+                for prev in instructions[:i]:
+                    if prev.opname in ("LOAD_GLOBAL", "PUSH_EXC_INFO") and (
+                        prev.argval == "NotImplementedError"
+                    ):
+                        return True
+                # Other raise patterns: not dummy
+                return False
+
         has_calls = any(n.startswith("CALL") for n in opnames)
         has_stores = any(n.startswith("STORE") for n in opnames)
         return not has_calls and not has_stores

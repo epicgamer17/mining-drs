@@ -3,6 +3,7 @@ from drs.canvas_compiler import register_class
 from .config import ConcentratorConfig
 from .modes import MODES, OperatingMode, RequireDecision
 from .generators import StochasticFaciesGenerator
+from .fleet import ContinuousFleetLogistics
 from .mine_face import ConcentratorMineFace, ContinuousMineFace
 from .plant import ConcentratorPlant
 from .controllers import ConcentratorController, MultiFaceConcentratorController
@@ -17,6 +18,7 @@ for _cls in [
     ConcentratorConfig,
     ConcentratorMineFace,
     ContinuousMineFace,
+    ContinuousFleetLogistics,
     ConcentratorPlant,
     ConcentratorController,
     MultiFaceConcentratorController,

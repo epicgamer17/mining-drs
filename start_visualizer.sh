@@ -18,7 +18,7 @@ kill $(lsof -ti :8000) 2>/dev/null || true
 echo -e "\033[0;32m[+] Starting Python Local Dev Server...\033[0m"
 
 # Start the Python dev server in the background
-.venv/bin/python drs-canvas/drs_dev_server.py &
+(cd drs-canvas && ../.venv/bin/python -m drs_dev_server) &
 PYTHON_PID=$!
 
 # Ensure the python server is terminated when Ctrl+C is pressed
