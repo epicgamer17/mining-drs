@@ -1,0 +1,420 @@
+{
+  "nodes": [
+    {
+      "id": "mine",
+      "type": "extractionNode",
+      "position": {
+        "x": 80,
+        "y": 245
+      },
+      "data": {
+        "label": "Concentrator Mine Face",
+        "class": "ConcentratorMineFace",
+        "variables": {
+          "cumulative_extracted_mass": {
+            "class": "Level",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "parcel_extracted_mass": {
+            "class": "Level",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          }
+        },
+        "layout": {
+          "x": 80,
+          "y": 220
+        }
+      },
+      "measured": {
+        "width": 257,
+        "height": 135
+      },
+      "selected": false,
+      "dragging": false
+    },
+    {
+      "id": "fleet",
+      "type": "factoryNode",
+      "position": {
+        "x": 340,
+        "y": 200
+      },
+      "data": {
+        "label": "Continuous Fleet Logistics",
+        "class": "ContinuousFleetLogistics",
+        "variables": {
+          "stockpile2_routing_fraction": {
+            "class": "Variable",
+            "value": 0
+          }
+        },
+        "layout": {
+          "x": 340,
+          "y": 200
+        }
+      },
+      "measured": {
+        "width": 271,
+        "height": 109
+      },
+      "selected": false
+    },
+    {
+      "id": "ore1_stock",
+      "type": "bufferNode",
+      "position": {
+        "x": 620,
+        "y": 100
+      },
+      "data": {
+        "label": "Ore 1 Stockpile",
+        "class": "Stockpile",
+        "attributes": {
+          "name": "Ore1Stock",
+          "expected_attributes": [
+            "contained_ore_fraction_mass"
+          ]
+        },
+        "variables": {
+          "current_mass": {
+            "class": "Level",
+            "value": 42000,
+            "lower_threshold": 0,
+            "upper_threshold": 60000,
+            "rate": 0
+          },
+          "contained_ore_fraction_mass": {
+            "class": "Level",
+            "value": 12600,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "actual_outflow_rate": {
+            "class": "Variable",
+            "value": 0
+          }
+        }
+      },
+      "measured": {
+        "width": 285,
+        "height": 281
+      }
+    },
+    {
+      "id": "ore2_stock",
+      "type": "bufferNode",
+      "position": {
+        "x": 620,
+        "y": 320
+      },
+      "data": {
+        "label": "Ore 2 Stockpile",
+        "class": "Stockpile",
+        "attributes": {
+          "name": "Ore2Stock",
+          "expected_attributes": [
+            "contained_ore_fraction_mass"
+          ]
+        },
+        "variables": {
+          "current_mass": {
+            "class": "Level",
+            "value": 18000,
+            "lower_threshold": 0,
+            "upper_threshold": 60000,
+            "rate": 0
+          },
+          "contained_ore_fraction_mass": {
+            "class": "Level",
+            "value": 5400,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "actual_outflow_rate": {
+            "class": "Variable",
+            "value": 0
+          }
+        }
+      },
+      "measured": {
+        "width": 279,
+        "height": 281
+      }
+    },
+    {
+      "id": "plant",
+      "type": "factoryNode",
+      "position": {
+        "x": 920,
+        "y": 220
+      },
+      "data": {
+        "label": "Concentrator Plant",
+        "class": "ConcentratorPlant",
+        "variables": {
+          "cumulative_milled_mass": {
+            "class": "Level",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          }
+        }
+      },
+      "measured": {
+        "width": 251,
+        "height": 109
+      }
+    },
+    {
+      "id": "controller",
+      "type": "factoryNode",
+      "position": {
+        "x": 215,
+        "y": 440
+      },
+      "data": {
+        "label": "Concentrator Controller",
+        "class": "ConcentratorController",
+        "variables": {
+          "active_operating_mode": {
+            "class": "Variable",
+            "value": {
+              "__type__": "OperatingMode",
+              "name": "MODE_A"
+            }
+          },
+          "total_system_ore_mass": {
+            "class": "Level",
+            "value": 60000,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "current_campaign_duration": {
+            "class": "Timer",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "current_contingency_duration": {
+            "class": "Timer",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "cumulative_time_mode_a": {
+            "class": "Timer",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "cumulative_time_mode_a_contingency": {
+            "class": "Timer",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "cumulative_time_mode_a_surging": {
+            "class": "Timer",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "cumulative_time_mode_b": {
+            "class": "Timer",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "cumulative_time_mode_b_contingency": {
+            "class": "Timer",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "cumulative_time_mode_b_surging": {
+            "class": "Timer",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "cumulative_time_shutdown": {
+            "class": "Timer",
+            "value": 0,
+            "lower_threshold": "-Infinity",
+            "upper_threshold": "Infinity",
+            "rate": 0
+          },
+          "target_mine_mass_rate": {
+            "class": "Variable",
+            "value": 0
+          },
+          "target_stock1_outflow_rate": {
+            "class": "Variable",
+            "value": 0
+          },
+          "target_stock2_outflow_rate": {
+            "class": "Variable",
+            "value": 0
+          }
+        },
+        "layout": {
+          "x": 315,
+          "y": 440
+        }
+      },
+      "measured": {
+        "width": 371,
+        "height": 499
+      },
+      "selected": true,
+      "dragging": false
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-flow-mine-fleet",
+      "source": "mine",
+      "sourceHandle": "flow-out",
+      "target": "fleet",
+      "targetHandle": "flow-in",
+      "style": {
+        "stroke": "#3b82f6",
+        "strokeWidth": 4
+      }
+    },
+    {
+      "id": "e-flow-fleet-ore1",
+      "source": "fleet",
+      "sourceHandle": "flow-out",
+      "target": "ore1_stock",
+      "targetHandle": "flow-in",
+      "data": {
+        "param": "inflow"
+      },
+      "style": {
+        "stroke": "#3b82f6",
+        "strokeWidth": 4
+      }
+    },
+    {
+      "id": "e-flow-fleet-ore2",
+      "source": "fleet",
+      "sourceHandle": "flow-out",
+      "target": "ore2_stock",
+      "targetHandle": "flow-in",
+      "data": {
+        "param": "inflow"
+      },
+      "style": {
+        "stroke": "#3b82f6",
+        "strokeWidth": 4
+      }
+    },
+    {
+      "id": "e-flow-ore1-plant",
+      "source": "ore1_stock",
+      "sourceHandle": "flow-out",
+      "target": "plant",
+      "targetHandle": "flow-in",
+      "data": {
+        "param": "ore1_outflow"
+      },
+      "style": {
+        "stroke": "#3b82f6",
+        "strokeWidth": 4
+      }
+    },
+    {
+      "id": "e-flow-ore2-plant",
+      "source": "ore2_stock",
+      "sourceHandle": "flow-out",
+      "target": "plant",
+      "targetHandle": "flow-in",
+      "data": {
+        "param": "ore2_outflow"
+      },
+      "style": {
+        "stroke": "#3b82f6",
+        "strokeWidth": 4
+      }
+    },
+    {
+      "id": "e-read-ore1-controller",
+      "source": "ore1_stock",
+      "sourceHandle": "read-out",
+      "target": "controller",
+      "targetHandle": "read-in",
+      "data": {
+        "variable": "current_mass"
+      },
+      "style": {
+        "stroke": "#f59e0b",
+        "strokeWidth": 1.5
+      }
+    },
+    {
+      "id": "e-read-ore2-controller",
+      "source": "ore2_stock",
+      "sourceHandle": "read-out",
+      "target": "controller",
+      "targetHandle": "read-in",
+      "data": {
+        "variable": "current_mass"
+      },
+      "style": {
+        "stroke": "#f59e0b",
+        "strokeWidth": 1.5
+      }
+    },
+    {
+      "id": "e-data-controller-ore1",
+      "source": "controller",
+      "sourceHandle": "data-out",
+      "target": "ore1_stock",
+      "targetHandle": "data-in",
+      "data": {
+        "param": "requested_outflow_rate",
+        "variable": "target_stock1_outflow_rate"
+      },
+      "style": {
+        "stroke": "#10b981",
+        "strokeWidth": 2,
+        "strokeDasharray": "5,5"
+      }
+    },
+    {
+      "id": "e-data-controller-ore2",
+      "source": "controller",
+      "sourceHandle": "data-out",
+      "target": "ore2_stock",
+      "targetHandle": "data-in",
+      "data": {
+        "param": "requested_outflow_rate",
+        "variable": "target_stock2_outflow_rate"
+      },
+      "style": {
+        "stroke": "#10b981",
+        "strokeWidth": 2,
+        "strokeDasharray": "5,5"
+      }
+    }
+  ]
+}

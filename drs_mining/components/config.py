@@ -79,3 +79,61 @@ class ConcentratorConfig(BaseDualStockpileConfig):
     fleet_mechanical_availability: float = 0.85
     loader_payload_tonnes: float = 15.0
     truck_payload_tonnes: float = 30.0
+
+
+@dataclass
+class ShelswellConfig(BaseDualStockpileConfig):
+    # Geometry and Layout (meters)
+    decline_length: float = 2100.0
+    decline_grade: float = 0.05
+    ramp_length: float = 1800.0
+    ramp_grades: tuple = (0.08, 0.13)
+    level_spacing: float = 300.0
+    ore_loadout_distance: float = 40.0
+    waste_loadout_distance: float = 55.0
+    air_door_distance: float = 20.0
+    rom_pad_distance: float = 300.0
+    waste_stockpile_distance: float = 440.0
+    maintenance_shop_distance: float = 260.0
+    fuel_depot_distance: float = 270.0
+    
+    # Speeds (kph)
+    speed_surface_loaded: float = 13.4
+    speed_surface_empty: float = 17.4
+    speed_decline_loaded: float = 11.2
+    speed_decline_empty: float = 15.1
+    speed_ramp_loaded: float = 9.2
+    speed_ramp_empty: float = 12.9
+    speed_level_loaded: float = 6.6
+    speed_level_empty: float = 7.6
+    speed_lhd_loaded: float = 5.89
+    speed_lhd_empty: float = 6.78
+    
+    # Shift "Seat Time" Workable Availability fractions
+    seat_time_fraction_truck: float = 0.5417
+    seat_time_fraction_lhd: float = 0.5833
+    seat_time_fraction_maintenance: float = 0.7917
+    
+    # Cycle times (minutes)
+    lhd_load_spot_minutes: float = 0.46
+    lhd_load_minutes: float = 0.88
+    lhd_dump_minutes: float = 0.73
+    lhd_tram_distance: float = 35.0
+    lhd_acquisition_delay_minutes: float = 1.5
+    
+    truck_load_spot_minutes: float = 0.82
+    truck_dump_spot_minutes: float = 0.57
+    truck_dump_minutes: float = 0.88
+    
+    # Capacity and payloads (tonnes)
+    truck_payload_ore: float = 26.1
+    truck_payload_waste: float = 24.6
+    lhd_payload_ore: float = 14.0
+    lhd_payload_waste: float = 12.5
+    
+    # Fleet sizes and availability (defaults)
+    total_truck_count: float = 10.0
+    total_operators: float = 10.0
+    overall_mechanical_availability: float = 1.0
+    traffic_delay_per_truck_hours: float = 0.005
+
