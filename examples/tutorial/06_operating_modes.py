@@ -1,5 +1,5 @@
 """
-Tutorial 7: Operating Modes & Controllers
+Tutorial 6: Operating Modes & Controllers
 ==========================================
 Illustrating clean architectural separation and state-dependent mode controllers.
 """
@@ -7,12 +7,15 @@ Illustrating clean architectural separation and state-dependent mode controllers
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.append(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 import drs
 from drs import Module, Level, Variable
 from drs.engine import DRSEngine
 from drs.telemetry import Telemetry
+
 
 # --- Step 1: The Physical Components ---
 class PhysicalStockpile(Module):
@@ -40,10 +43,10 @@ class BlendingController(Module):
         super().__init__()
         self.stockpile = stockpile
         self.mill = mill
-        
+
         # State variable to track the active decision mode
         self.active_mode = Variable("mode", "NORMAL")
-        
+
         # Output target variables
         self.mine_target = Variable("mine_target", 80.0)
         self.mill_target = Variable("mill_target", 100.0)
@@ -57,29 +60,37 @@ class BlendingController(Module):
         if current_mode == "NORMAL":
             if pile_mass <= 100.0 + 1e-6:
                 self.active_mode.value = "CONTINGENCY"
-                print(f"[CONTROLLER] t={self.current_time():.2f}: Stockpile low ({pile_mass:.1f}t). Switching to CONTINGENCY.")
+                print(
+                    f"[CONTROLLER] t={self.current_time():.2f}: Stockpile low ({pile_mass:.1f}t). Switching to CONTINGENCY."
+                )
         elif current_mode == "CONTINGENCY":
             if pile_mass >= 200.0 - 1e-6:
                 self.active_mode.value = "NORMAL"
-                print(f"[CONTROLLER] t={self.current_time():.2f}: Stockpile recovered ({pile_mass:.1f}t). Returning to NORMAL.")
+                print(
+                    f"[CONTROLLER] t={self.current_time():.2f}: Stockpile recovered ({pile_mass:.1f}t). Returning to NORMAL."
+                )
             elif pile_mass <= 10.0 + 1e-6:
                 self.active_mode.value = "SHUTDOWN"
-                print(f"[CONTROLLER] t={self.current_time():.2f}: Stockpile critically empty ({pile_mass:.1f}t). Switching to SHUTDOWN.")
+                print(
+                    f"[CONTROLLER] t={self.current_time():.2f}: Stockpile critically empty ({pile_mass:.1f}t). Switching to SHUTDOWN."
+                )
         elif current_mode == "SHUTDOWN":
             if pile_mass >= 150.0 - 1e-6:
                 self.active_mode.value = "CONTINGENCY"
-                print(f"[CONTROLLER] t={self.current_time():.2f}: Stockpile partially recovered ({pile_mass:.1f}t). Switching to CONTINGENCY.")
+                print(
+                    f"[CONTROLLER] t={self.current_time():.2f}: Stockpile partially recovered ({pile_mass:.1f}t). Switching to CONTINGENCY."
+                )
 
         # 3. Apply target dynamics based on active mode
         if self.active_mode.value == "NORMAL":
             self.mine_target.value = 80.0
             self.mill_target.value = 100.0
         elif self.active_mode.value == "CONTINGENCY":
-            self.mine_target.value = 100.0 # surge mining
+            self.mine_target.value = 100.0  # surge mining
             self.mill_target.value = 40.0  # throttle milling
         elif self.active_mode.value == "SHUTDOWN":
             self.mine_target.value = 100.0
-            self.mill_target.value = 0.0   # shutdown milling
+            self.mill_target.value = 0.0  # shutdown milling
 
         # 4. Bind thresholds to stockpiles to trigger re-evaluations
         if self.active_mode.value == "NORMAL":
@@ -94,6 +105,7 @@ class BlendingController(Module):
 
     def current_time(self) -> float:
         from drs._execution_context import ExecutionContext
+
         engine = ExecutionContext.get_engine()
         return engine.current_time if engine else 0.0
 
@@ -109,7 +121,7 @@ class MiningSystem(Module):
     def forward(self):
         # 1. Run the controller first to update mode and routing decisions
         self.controller()
-        
+
         # 2. Propagate targets to physical components (pass the Variable objects themselves!)
         self.stockpile(self.controller.mine_target, self.controller.mill_target)
         self.mill(self.controller.mill_target)

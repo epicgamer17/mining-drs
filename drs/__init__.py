@@ -22,7 +22,6 @@ from .serialize import (
     save_checkpoint,
     load_checkpoint,
 )
-from .canvas_compiler import compile_canvas_json, register_class
 
 __all__ = [
     "DRSEngine",
@@ -47,6 +46,4 @@ __all__ = [
     "export_architecture",
     "save_checkpoint",
     "load_checkpoint",
-    "compile_canvas_json",
-    "register_class",
 ]

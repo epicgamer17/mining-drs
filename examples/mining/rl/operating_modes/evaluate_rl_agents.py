@@ -548,10 +548,6 @@ def generate_rl_dashboard(
 
     result = env.engine.run(max_time=env.config.replication_length)
 
-    from drs.vis.module_graph import save_module_graph_report
-
-    save_module_graph_report(env.sim, path_prefix=f"plots/{model_name}_Module_Graph")
-
     df = result.history
 
     # --- Mode Transition Log ---

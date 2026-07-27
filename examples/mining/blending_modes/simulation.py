@@ -141,10 +141,6 @@ if __name__ == "__main__":
 
     sim.print_statistics()
 
-    from drs.vis.module_graph import save_module_graph_report
-
-    save_module_graph_report(sim, path_prefix="plots/Concentrator_Module_Graph")
-
     df = result.history
 
     # --- Mode Transition Log ---

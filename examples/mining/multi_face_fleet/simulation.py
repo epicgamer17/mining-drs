@@ -531,13 +531,6 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     result = engine.run(max_time=config.replication_length)
     sim.print_statistics()
 
-    from drs.vis.module_graph import save_module_graph_report
-
-    prefix = name.replace(" ", "_")
-    save_module_graph_report(
-        sim, path_prefix=f"plots/Concentrator_Module_Graph_{prefix}"
-    )
-
     df = result.history
 
     # --- Mode Transition Log ---

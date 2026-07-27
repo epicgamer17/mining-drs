@@ -1,5 +1,3 @@
-from drs.canvas_compiler import register_class
-
 from .config import ConcentratorConfig
 from .modes import MODES, OperatingMode, RequireDecision
 from .generators import StochasticFaciesGenerator
@@ -13,22 +11,6 @@ from .models import (
     ConcentratorModel,
 )
 from .stockpiles import Stockpile
-
-for _cls in [
-    ConcentratorConfig,
-    ConcentratorMineFace,
-    ContinuousMineFace,
-    ContinuousFleetLogistics,
-    ConcentratorPlant,
-    ConcentratorController,
-    MultiFaceConcentratorController,
-    ActiveFleetConcentratorModel,
-    BaseBlendingModel,
-    ConcentratorModel,
-    Stockpile,
-    OperatingMode,
-]:
-    register_class(_cls)
 
 __all__ = [
     "BaseBlendingModel",

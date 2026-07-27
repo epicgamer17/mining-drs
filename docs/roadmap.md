@@ -3,7 +3,6 @@
 This file consolidates all action items, open questions, and tasks across the mining-drs project.
 
 ## 1. Immediate Tasks (Before Monday)
-* [ ] Get Visualizations Working
 * [x] Get Fleet Simulation Example Working
 * [ ] Get SGS (Sequential Gaussian Simulation) working
 * [ ] RENAME PAPERS LIKE I DID WITH RL!
@@ -23,7 +22,6 @@ This file consolidates all action items, open questions, and tasks across the mi
 * [ ] **Maximize Throughput:** maximize the daily tonnage time average (maximize daily throughput).
 * [ ] **Stochasticity:** add stochastic drive times.
 * [ ] **Conveyors:** add a conveyor and make parcel additions to stockpile gradual.
-* [ ] **Visualization Updates:** The route policy in our visualization doesn't seem true to our current system. The controller tooltip is hard to read. Sensor logic inputs vs outputs could be more clear. The concept of "grade" could be improved.
 * [ ] **Financials:** Look at citation 11 to add NPV and IRR to existing models and plots (APE1455294.pdf).
 
 ## 4. Base Scenarios & Fleet Management Examples

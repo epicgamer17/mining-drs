@@ -41,8 +41,7 @@ nav:
       - 3. Streaming Inputs & Data Sources: tutorials/03_data_streams.md
       - 4. Checkpointing & State Serialization: tutorials/04_serialization.md
       - 5. Telemetry & Custom Callbacks: tutorials/05_telemetry_callbacks.md
-      - 6. Visualizing Module Graphs: tutorials/06_visualization.md
-      - "7. Design Patterns: Operating Modes": tutorials/07_operating_modes.md
+      - "6. Design Patterns: Operating Modes": tutorials/06_operating_modes.md
   - API Reference:
       - Engine: api/engine.md
       - Module: api/module.md
@@ -52,5 +51,4 @@ nav:
       - Configuration: api/config.md
       - Serialization: api/serialization.md
       - Exceptions: api/exceptions.md
-      - Visualization: api/visualization.md
   - Roadmap: roadmap.md

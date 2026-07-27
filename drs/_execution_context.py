@@ -68,7 +68,7 @@ class ExecutionContext:
         Power User Note: Used to provide modules access to simulation clock and configs.
         """
         cls._local.engine = engine
-    
+
     @classmethod
     def get_engine(cls):
         """
@@ -76,14 +76,12 @@ class ExecutionContext:
 
         Power User Note: Accesses thread-local storage to retrieve the running engine instance.
         """
-        return getattr(cls._local, 'engine', None)
+        return getattr(cls._local, "engine", None)
 
     @classmethod
     def record_flow_edge(cls, source, target):
         """
         [INTERNAL] Record a transient flow edge between a source and target module.
-
-        Power User Note: Stores the edge in thread-local storage for graph visualization.
         """
         if source is not None:
             if not hasattr(cls._local, "flow_edges"):
