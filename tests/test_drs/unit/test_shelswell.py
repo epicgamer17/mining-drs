@@ -1,9 +1,12 @@
 import math
 import pytest
 from drs import DRSEngine
-from drs_mining.components.config import ShelswellConfig
-from drs_mining.components.shelswell_routing import get_travel_times_hours, get_truck_loading_time_hours
-from drs_mining.components.shelswell_controller import ShelswellHaulageModel
+from examples.mining.lht.shelswell_baseline import (
+    ShelswellConfig,
+    get_travel_times_hours,
+    get_truck_loading_time_hours,
+    ShelswellHaulageModel,
+)
 
 def test_routing_times():
     config = ShelswellConfig()
