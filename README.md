@@ -1,8 +1,35 @@
+<div align="center">
+
 # Mining-DRS: Discrete Rate Simulation Framework
+
+![Mining-DRS](docs/assets/social-preview.png)
+
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python: 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
+![Language: Python](https://img.shields.io/badge/language-Python-yellow)
+
+**Keywords:** `discrete rate simulation` `mining simulation` `material flow` `supply chain`
+`stockpile modeling` `fleet management` `mineral processing` `Monte Carlo simulation` `process simulation` `Python`
+
+</div>
 
 Welcome to **Mining-DRS**! Whether you are a mining engineer who has never written a line of Python, or a Python developer who thinks "milling" has something to do with flour, this guide is for you.
 
-This is an object-oriented framework for simulating complex supply chains where material flows continuously over time. We specifically focus on mining operations, but the underlying engine can model any system with continuous flows (like water pipes, electrical grids, or traffic). This library is a Python-based, using concepts similar to PyTorch. 
+This is an object-oriented framework for simulating complex supply chains where material flows continuously over time. We specifically focus on mining operations (extraction faces, haulage fleets, stockpiles, and processing plants), but the underlying engine can model any system with continuous flows (like water pipes, electrical grids, or traffic). This library is a Python-based, using concepts similar to PyTorch.
+
+---
+
+## Quick Links
+
+| Topic | Where to Look |
+|-------|---------------|
+| What is a "DRS"? | [Section 1](#1-the-basics-demystifying-the-jargon) |
+| Features & trade-offs | [Section 2](#2-features-pros-and-cons) |
+| PyTorch parallels | [Section 3](#3-the-pytorch-parallels-dictionary) |
+| Engine internals | [Section 4](#4-how-the-engine-works-the-core-logic) |
+| Your first simulator | [Section 5](#5-building-your-first-simulator) |
+| Design philosophy | [Section 6](#6-advanced-design-choices--philosophy) |
+| Roadmap | [Section 7](#7-whats-next-roadmap) |
 
 ---
 
