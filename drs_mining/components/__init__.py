@@ -1,7 +1,9 @@
 from .config import ConcentratorConfig
 from .modes import MODES, OperatingMode, RequireDecision
 from .generators import StochasticFaciesGenerator
-from .fleet import ContinuousFleetLogistics
+from .fleet import ContinuousFleetLogistics, TruckState, Truck, LHD
+from .topology import DRSRoadSegment
+from .bays import DRSLoadingBay, DRSDumpingBay
 from .mine_face import ConcentratorMineFace, ContinuousMineFace
 from .plant import ConcentratorPlant
 from .controllers import ConcentratorController, MultiFaceConcentratorController
@@ -19,4 +21,10 @@ __all__ = [
     "MultiFaceConcentratorController",
     "ContinuousMineFace",
     "Stockpile",
+    "TruckState",
+    "Truck",
+    "LHD",
+    "DRSRoadSegment",
+    "DRSLoadingBay",
+    "DRSDumpingBay",
 ]

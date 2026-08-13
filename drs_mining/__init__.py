@@ -10,7 +10,15 @@ from drs_mining.components import (
     MultiFaceConcentratorController,
     ContinuousMineFace,
     Stockpile,
+    TruckState,
+    Truck,
+    LHD,
+    DRSRoadSegment,
+    DRSLoadingBay,
+    DRSDumpingBay,
 )
+from drs_mining.controllers.dispatch import ShelswellDispatchController
+from drs_mining.simulation import ShelswellHybridSimulation
 
 __all__ = [
     "BaseBlendingModel",
@@ -20,4 +28,12 @@ __all__ = [
     "MultiFaceConcentratorController",
     "ContinuousMineFace",
     "Stockpile",
+    "TruckState",
+    "Truck",
+    "LHD",
+    "DRSRoadSegment",
+    "DRSLoadingBay",
+    "DRSDumpingBay",
+    "ShelswellDispatchController",
+    "ShelswellHybridSimulation",
 ]
