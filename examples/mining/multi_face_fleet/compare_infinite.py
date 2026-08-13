@@ -8,7 +8,6 @@ from dataclasses import replace
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
-from drs_mining.components.config import ConcentratorConfig
 from .simulation import _run_capacity_case
 
 
@@ -17,15 +16,19 @@ def plot_theoretical_fleet_diminishing_returns():
     Shows the mathematical diminishing returns of adding trucks to a face,
     incorporating traffic delay, cycle time increases, and match factor saturation.
     """
-    c = ConcentratorConfig()
-
-    # We will hold loaders constant, and vary trucks from 1 to 40
-    lhd_alloc = c.total_lhd_count
+    total_lhd_count = 3.0
     truck_allocs = np.linspace(1, 40, 100)
 
     # Face 1 properties
-    distance = c.face_haul_distance[0]
-    travel_time = (2 * distance) / c.truck_velocity
+    distance = 1.5
+    truck_velocity = 15.0
+    loader_cycle_time_hours = 0.0833
+    truck_payload_tonnes = 30.0
+    loader_payload_tonnes = 15.0
+    truck_dump_time_hours = 0.033
+    traffic_delay_per_truck_hours = 0.015
+
+    travel_time = (2 * distance) / truck_velocity
 
     cycle_times = []
     match_factors = []
@@ -33,32 +36,32 @@ def plot_theoretical_fleet_diminishing_returns():
 
     for truck_alloc in truck_allocs:
         # 1. Traffic Delay
-        traffic_delay = c.traffic_delay_per_truck_hours * truck_alloc
+        traffic_delay = traffic_delay_per_truck_hours * truck_alloc
 
         # Calculate how long it takes to completely fill one truck
-        truck_loading_time_hours = c.loader_cycle_time_hours * (
-            c.truck_payload_tonnes / c.loader_payload_tonnes
+        truck_loading_time_hours = loader_cycle_time_hours * (
+            truck_payload_tonnes / loader_payload_tonnes
         )
 
         # 2. Cycle Time
         truck_cycle_time = (
             travel_time
             + truck_loading_time_hours
-            + c.truck_dump_time_hours
+            + truck_dump_time_hours
             + traffic_delay
         )
         cycle_times.append(truck_cycle_time)
 
         # 3. Match Factor
-        mf = (truck_alloc * truck_loading_time_hours) / (lhd_alloc * truck_cycle_time)
+        mf = (truck_alloc * truck_loading_time_hours) / (total_lhd_count * truck_cycle_time)
         match_factors.append(mf)
 
         # 4. Throughput
         if mf < 1.0:
-            rate = (truck_alloc / truck_cycle_time) * c.truck_payload_tonnes * 24.0
+            rate = (truck_alloc / truck_cycle_time) * truck_payload_tonnes * 24.0
         else:
             rate = (
-                (lhd_alloc / c.loader_cycle_time_hours) * c.loader_payload_tonnes * 24.0
+                (total_lhd_count / loader_cycle_time_hours) * loader_payload_tonnes * 24.0
             )
 
         throughputs.append(rate)
@@ -71,7 +74,7 @@ def plot_theoretical_fleet_diminishing_returns():
     axes[0].set_ylabel("Extraction Rate (t/d)", fontsize=12)
     axes[0].set_xlabel("Number of Trucks Assigned to Face", fontsize=12)
     axes[0].set_title(
-        f"Diminishing Returns: Throughput vs Fleet Size ({int(lhd_alloc)} LHDs Constant)",
+        f"Diminishing Returns: Throughput vs Fleet Size ({int(total_lhd_count)} LHDs Constant)",
         fontsize=14,
     )
     axes[0].grid(True, alpha=0.3)
@@ -106,13 +109,10 @@ def plot_theoretical_fleet_diminishing_returns():
 
 
 def generate_infinite_vs_constrained_plots():
-    base_config = ConcentratorConfig()
-
     cases = [
         (
             "Severely Constrained (10 Trucks, 40kt/d Target)",
-            replace(
-                base_config,
+            dict(
                 total_truck_count=10.0,
                 mode_a_ore1_milling_rate=24000.0,
                 mode_a_ore2_milling_rate=16000.0,
@@ -122,8 +122,7 @@ def generate_infinite_vs_constrained_plots():
         ),
         (
             "Heavily Constrained (20 Trucks, 40kt/d Target)",
-            replace(
-                base_config,
+            dict(
                 total_truck_count=20.0,
                 mode_a_ore1_milling_rate=24000.0,
                 mode_a_ore2_milling_rate=16000.0,
@@ -133,8 +132,7 @@ def generate_infinite_vs_constrained_plots():
         ),
         (
             "Maximum Capacity (40 Trucks, 40kt/d Target)",
-            replace(
-                base_config,
+            dict(
                 total_truck_count=40.0,
                 mode_a_ore1_milling_rate=24000.0,
                 mode_a_ore2_milling_rate=16000.0,
@@ -144,8 +142,7 @@ def generate_infinite_vs_constrained_plots():
         ),
         (
             "Infinite Fleet (200 Trucks, 200 LHDs, 40kt/d Target)",
-            replace(
-                base_config,
+            dict(
                 total_truck_count=200.0,
                 total_lhd_count=200.0,
                 traffic_delay_per_truck_hours=0.0,

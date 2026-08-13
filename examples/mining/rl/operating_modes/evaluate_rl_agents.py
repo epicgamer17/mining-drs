@@ -8,8 +8,7 @@ import argparse
 # Ensure the root directory is on the path so we can import 'examples.mining'
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
-from drs_mining.rl.environments import MiningRLEnv, RLMineConfig
-from drs_mining.components import ConcentratorConfig
+from drs_mining.rl.environments import MiningRLEnv
 from dqn_surging_modes import DQN
 from ppo_surging_modes import ActorCritic
 from ppo_lstm_surging_modes import ActorCriticLSTM
@@ -112,13 +111,11 @@ def plot_rl_monte_carlo_throughput(
 
     print(f"\n--- Running Monte Carlo Evaluation for {model_name} (N={N}) ---")
     for sigma in sigmas:
-        sim_config = ConcentratorConfig(
+        env = MiningRLEnv(
             replication_length=99999.0,
             std_dev_ore_fraction=sigma / 100.0,
             target_ore_stock_level=total_stockpile_level,
         )
-        config = RLMineConfig(sim_config=sim_config)
-        env = MiningRLEnv(config)
 
         throughputs = []
         for seed in range(N):
@@ -164,11 +161,11 @@ def plot_rl_monte_carlo_throughput(
 
 
 def plot_policy_decision_heatmap(
-    model, model_name: str, device, config: RLMineConfig, times=[250, 500, 750, 1000]
+    model, model_name: str, device, config=None, times=[250, 500, 750, 1000]
 ):
     print(f"\n--- Generating Policy Decision Heatmap for {model_name} ---")
-    target_stock = config.sim_config.target_ore_stock_level
-    time_scale = config.time_scaling_factor
+    target_stock = getattr(config, "target_ore_stock_level", getattr(getattr(config, "sim_config", None), "target_ore_stock_level", 60000.0)) if config is not None else 60000.0
+    time_scale = getattr(config, "time_scaling_factor", 1000.0) if config is not None else 1000.0
 
     ore1_vals = np.linspace(0, target_stock, 100)
     ore_fraction_vals = np.linspace(0, 100, 100)
@@ -310,12 +307,12 @@ def plot_non_stationary_time_slice(
     model,
     model_name: str,
     device,
-    config: RLMineConfig,
+    config=None,
     ore_fractions=[10, 25, 50, 75, 90],
 ):
     print(f"\n--- Generating Non-Stationary Time Slice for {model_name} ---")
-    target_stock = config.sim_config.target_ore_stock_level
-    time_scale = config.time_scaling_factor
+    target_stock = getattr(config, "target_ore_stock_level", getattr(getattr(config, "sim_config", None), "target_ore_stock_level", 60000.0)) if config is not None else 60000.0
+    time_scale = getattr(config, "time_scaling_factor", 1000.0) if config is not None else 1000.0
 
     time_vals = np.linspace(0, 1200, 100)
     ore1_vals = np.linspace(0, target_stock, 100)
@@ -468,11 +465,11 @@ def generate_rl_dashboard(
         f"\n--- Generating Comprehensive Dashboard for {model_name} (Seed={seed}) ---"
     )
     # 2. Get Obs Shape
-    sim_config = ConcentratorConfig(
-        replication_length=99999.0, target_ore_stock_level=total_stockpile_level
+    env = MiningRLEnv(
+        replication_length=99999.0,
+        target_ore_stock_level=total_stockpile_level,
+        enable_telemetry=True,
     )
-    config = RLMineConfig(sim_config=sim_config)
-    env = MiningRLEnv(config, enable_telemetry=True)
 
     # Run the simulation
     obs, _ = env.reset(seed=seed)
@@ -846,10 +843,11 @@ import io
 
 
 def generate_policy_decision_video(
-    model, model_name: str, device, config: RLMineConfig, seed: int = 42
+    model, model_name: str, device, config=None, seed: int = 42
 ):
     print(f"\n--- Generating Policy Decision Video for {model_name} (Seed={seed}) ---")
-    env = MiningRLEnv(config, enable_telemetry=True)
+    target_stock = getattr(config, "target_ore_stock_level", getattr(getattr(config, "sim_config", None), "target_ore_stock_level", 60000.0)) if config is not None else 60000.0
+    env = MiningRLEnv(target_ore_stock_level=target_stock, enable_telemetry=True)
     obs, _ = env.reset(seed=seed)
     terminated = False
 
@@ -1093,12 +1091,10 @@ if __name__ == "__main__":
     device = torch.device("cpu")
 
     # We need to temporarily instantiate an env to get shapes
-    temp_sim_config = ConcentratorConfig(
+    temp_env = MiningRLEnv(
         target_ore_stock_level=args.total_stockpile_level,
         std_dev_ore_fraction=args.std_dev_ore_fraction,
     )
-    temp_config = RLMineConfig(sim_config=temp_sim_config)
-    temp_env = MiningRLEnv(temp_config)
     obs_shape = temp_env.observation_space.shape
     num_actions = temp_env.action_space.n
 

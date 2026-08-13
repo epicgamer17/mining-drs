@@ -14,11 +14,11 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import types
 
-from drs_mining.components import ConcentratorConfig, ConcentratorModel
+from drs_mining.components import ConcentratorModel
 from drs import DRSEngine
 
 
-def evaluate_throughput(config: ConcentratorConfig, N: int) -> tuple[float, float]:
+def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
     """
     Runs the simulation N times, extracting throughputs.
     Returns (mean_throughput, std_dev_throughput).
@@ -26,26 +26,22 @@ def evaluate_throughput(config: ConcentratorConfig, N: int) -> tuple[float, floa
     throughputs = []
 
     for idx in range(N):
-        # By setting the replication length very high we let it hit the 6.6M extraction condition
-        # and then the model automatically terminates
-        sim = ConcentratorModel(config)
+        sim = ConcentratorModel(**config_kwargs)
 
         engine = DRSEngine(sim)
 
-        # Set a random seed so different replications are different
         np.random.seed(idx)
         random.seed(idx)
 
-        engine.run(max_time=config.replication_length)
+        engine.run(max_time=config_kwargs.get("replication_length", float("inf")))
 
-        # Calculate Throughput manually as the paper defined it
         active_time = (
             engine.current_time - sim.controller.cumulative_time_shutdown.value
         )
         if active_time > 0:
             throughput = (
                 sim.mine.cumulative_extracted_mass.value
-                - sim.config.ore_to_be_extracted_during_warming_period
+                - sim.mine.ore_to_be_extracted_during_warming_period
             ) / active_time
             throughputs.append(throughput)
 
@@ -60,13 +56,13 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
 
     print(f"\n--- Running Monte Carlo Evaluation for Standard (N={N}) ---")
     for sigma in sigmas:
-        config = ConcentratorConfig(
+        config_kwargs = dict(
             replication_length=99999.0,
             std_dev_ore_fraction=sigma / 100.0,
             target_ore_stock_level=total_stockpile_level,
             prob_new_facies=0.3,
         )
-        mean, std = evaluate_throughput(config, N)
+        mean, std = evaluate_throughput(config_kwargs, N)
         results.append((sigma, mean, std))
         print(f"Sigma: {sigma}%, Mean Throughput: {mean:.2f}, Std Dev: {std:.2f}")
 
@@ -115,27 +111,24 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=1)
     args = parser.parse_args()
 
-    # You can also run it a single time and print out the statistics to evaluate how it spends time
     np.random.seed(11)
-    random.seed(11)  # 11
-    config = ConcentratorConfig(
+    random.seed(11)
+    sim = ConcentratorModel(
         replication_length=99999.0,
         target_ore_stock_level=args.total_stockpile_level,
         std_dev_ore_fraction=args.std_dev_ore_fraction,
         prob_new_facies=0.3,
+        enable_telemetry=True,
     )
-    sim = ConcentratorModel(config, enable_telemetry=True)
 
-    # Generates an interactive dashboard spanning all operating modes
     from drs_mining.components.modes import MODES
 
-    # Run your massive Monte Carlo simulation at lightning speed
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine(sim, progress_bar=True, log_level="INFO")
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
-    result = engine.run(max_time=config.replication_length)
+    result = engine.run(max_time=99999.0)
 
     print(result.summary())
 

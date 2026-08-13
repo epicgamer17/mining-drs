@@ -41,9 +41,9 @@ from functional.utils import (
     to_numpy_action,
 )
 
-# Import the custom environment and config
-from drs_mining.rl.environments import MiningRLEnv, RLMineConfig
-from drs_mining.components import ConcentratorConfig
+# Import the custom environment
+import gymnasium as gym
+import drs_mining.rl.environments
 
 # Constants
 BATCH_SIZE = 128
@@ -87,14 +87,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # --- 1. Initialization (Defining the State) ---
-    sim_config = ConcentratorConfig(
+    # NOTE: DQN fails without dense rewards
+    env = gym.make(
+        "MiningEnv-v0",
         replication_length=9999.0,
         target_ore_stock_level=args.total_stockpile_level,
         std_dev_ore_fraction=args.std_dev_ore_fraction,
+        reward_type="dense",
     )
-    config = RLMineConfig(sim_config=sim_config)
-    # NOTE: DQN fails without dense rewards
-    env = MiningRLEnv(config, reward_type="dense")
     env = gym.wrappers.RecordEpisodeStatistics(env)
 
     # Convert shapes for the buffer since Observation is Box(4,)

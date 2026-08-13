@@ -1,11 +1,12 @@
-from typing import Optional
+from typing import Optional, Dict, Any, Union, List
+import json
 import drs
 from .fleet import Truck
 
 
 class DRSRoadSegment:
     """Models a single-lane road segment or passing bay as a continuous availability timer in DRS.
-    
+
     When a truck enters the segment, time_until_free is initialized to travel_time = L / v.
     The continuous engine integrates a -1.0 s/s decay rate down to 0.0.
     """
@@ -52,3 +53,52 @@ class DRSRoadSegment:
             self.time_until_free.value = max(0.0, self.time_until_free.value - dt)
             if self.time_until_free.value <= 0.0:
                 self.occupying_truck = None
+
+
+# TODO: should this be in python-drs?
+def load_topology_dict(topology: Union[dict, list, str, bytes]) -> Union[dict, list]:
+    """Loads native Python dictionary/list topology representation.
+
+    Accepts native Python dict/list directly, or JSON string/filepath.
+    """
+    if isinstance(topology, (dict, list)):
+        return topology
+    if isinstance(topology, (str, bytes)):
+        try:
+            return json.loads(topology)
+        except (json.JSONDecodeError, TypeError):
+            with open(topology, "r", encoding="utf-8") as f:
+                return json.load(f)
+    raise TypeError(f"Unsupported topology input type: {type(topology)}")
+
+
+# TODO: should this be in python-drs?
+def build_simulation_from_dict(
+    topology: Union[dict, list, str],
+    enable_telemetry: bool = False,
+    **kwargs,
+):
+    """Builds a simulation model directly from a native Python topology dictionary/list
+    or JSON filepath without intermediate Config objects.
+    """
+    from .models import ConcentratorModel, ActiveFleetConcentratorModel
+
+    data = load_topology_dict(topology)
+
+    # Extract model attributes or override with direct kwargs
+    if isinstance(data, list):
+        model_node = next(
+            (node for node in data if node.get("class") == "DRSModel"), {}
+        )
+        attrs = model_node.get("attributes", {})
+    elif isinstance(data, dict):
+        attrs = data.get("attributes", {})
+    else:
+        attrs = {}
+
+    params = {**attrs, **kwargs}
+    is_multi_face = params.pop("multi_face", False)
+    if is_multi_face:
+        return ActiveFleetConcentratorModel(enable_telemetry=enable_telemetry, **params)
+    else:
+        return ConcentratorModel(enable_telemetry=enable_telemetry, **params)

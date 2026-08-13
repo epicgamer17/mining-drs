@@ -1,8 +1,7 @@
-from .config import ConcentratorConfig
 from .modes import MODES, OperatingMode, RequireDecision
 from .generators import StochasticFaciesGenerator
 from .fleet import ContinuousFleetLogistics, TruckState, Truck, LHD
-from .topology import DRSRoadSegment
+from .topology import DRSRoadSegment, load_topology_dict, build_simulation_from_dict
 from .bays import DRSLoadingBay, DRSDumpingBay
 from .mine_face import ConcentratorMineFace, ContinuousMineFace
 from .plant import ConcentratorPlant
@@ -20,6 +19,9 @@ __all__ = [
     "ActiveFleetConcentratorModel",
     "MultiFaceConcentratorController",
     "ContinuousMineFace",
+    "ConcentratorMineFace",
+    "ConcentratorPlant",
+    "ConcentratorController",
     "Stockpile",
     "TruckState",
     "Truck",
@@ -27,4 +29,6 @@ __all__ = [
     "DRSRoadSegment",
     "DRSLoadingBay",
     "DRSDumpingBay",
+    "load_topology_dict",
+    "build_simulation_from_dict",
 ]

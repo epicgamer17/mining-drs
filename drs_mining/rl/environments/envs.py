@@ -1,30 +1,70 @@
+import math
 import random
+from typing import Optional
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from drs_mining.components.modes import RequireDecision
 from drs import DRSEngine
-from .config import RLMineConfig
 from .models import RL_ConcentratorModel
 
 
-# TODO: could i make this into a Generic DRSEnv instead? Maybe put it in the main drs/ folder?
 class MiningRLEnv(gym.Env):
     """
     Gymnasium environment wrapping the DRS Mining Simulation.
-    NOTE: This is a discrete action space, we could also make a continuous action space which sets threshold values and possibly the total stockpile value at the start of an episode
-    NOTE: This is a terminating environment the agent is penalized for each step to encourage maximum throughput, it is also possible to make it an infinite horizon task where reward is throughput
+    Follows standard Gymnasium API conventions.
     """
 
     def __init__(
         self,
-        config: RLMineConfig,
+        target_ore_stock_level: float = 60000.0,
+        total_ore_to_extract: float = 6600000.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
+        critical_ore2_level: float = 20400.0,
+        duration_of_production_campaigns: float = 34.0,
+        duration_of_shutdowns: float = 1.0,
+        duration_of_contingency_segments: float = 1.0,
+        replication_length: float = math.inf,
+        mean_ore_fraction: float = 0.30,
+        std_dev_ore_fraction: float = 0.05,
+        min_ore_mass: float = 30000.0,
+        max_ore_mass: float = 50000.0,
+        prob_new_facies: float = 0.3,
+        variation_same_facies: float = 0.01,
+        dense_reward_target_throughput: float = 5500.0,
+        sparse_reward_time_penalty_scale: float = 35.0,
+        sparse_reward_stock_penalty_weight: float = 0.05,
+        stockpile_scaling_factor: float = 1000.0,
+        time_scaling_factor: float = 1000.0,
+        max_steps: Optional[int] = None,
         enable_telemetry: bool = False,
         reward_type: str = "sparse",
+        **kwargs,
     ):
         super().__init__()
-        self.rl_config = config
-        self.config = config.sim_config
+        self.target_ore_stock_level = target_ore_stock_level
+        self.total_ore_to_extract = total_ore_to_extract
+        self.ore_to_be_extracted_during_warming_period = (
+            ore_to_be_extracted_during_warming_period
+        )
+        self.critical_ore2_level = critical_ore2_level
+        self.duration_of_production_campaigns = duration_of_production_campaigns
+        self.duration_of_shutdowns = duration_of_shutdowns
+        self.duration_of_contingency_segments = duration_of_contingency_segments
+        self.replication_length = replication_length
+        self.mean_ore_fraction = mean_ore_fraction
+        self.std_dev_ore_fraction = std_dev_ore_fraction
+        self.min_ore_mass = min_ore_mass
+        self.max_ore_mass = max_ore_mass
+        self.prob_new_facies = prob_new_facies
+        self.variation_same_facies = variation_same_facies
+
+        self.dense_reward_target_throughput = dense_reward_target_throughput
+        self.sparse_reward_time_penalty_scale = sparse_reward_time_penalty_scale
+        self.sparse_reward_stock_penalty_weight = sparse_reward_stock_penalty_weight
+        self.stockpile_scaling_factor = stockpile_scaling_factor
+        self.time_scaling_factor = time_scaling_factor
+        self.max_steps = max_steps
         self.enable_telemetry = enable_telemetry
         self.reward_type = reward_type
 
@@ -39,7 +79,8 @@ class MiningRLEnv(gym.Env):
         self.sim = None
         self.engine = None
         self.last_extraction = 0.0
-        self.last_time = 0.0  # <--- Add this
+        self.last_time = 0.0
+        self.current_step = 0
 
     def _get_current_time(self):
         """Helper to safely calculate total elapsed simulation days."""
@@ -61,76 +102,83 @@ class MiningRLEnv(gym.Env):
             np.random.seed(seed)
 
         self.sim = RL_ConcentratorModel(
-            self.config, enable_telemetry=self.enable_telemetry
+            mean_ore_fraction=self.mean_ore_fraction,
+            std_dev_ore_fraction=self.std_dev_ore_fraction,
+            target_ore_stock_level=self.target_ore_stock_level,
+            total_ore_to_extract=self.total_ore_to_extract,
+            ore_to_be_extracted_during_warming_period=self.ore_to_be_extracted_during_warming_period,
+            critical_ore2_level=self.critical_ore2_level,
+            duration_of_production_campaigns=self.duration_of_production_campaigns,
+            duration_of_shutdowns=self.duration_of_shutdowns,
+            duration_of_contingency_segments=self.duration_of_contingency_segments,
+            min_ore_mass=self.min_ore_mass,
+            max_ore_mass=self.max_ore_mass,
+            prob_new_facies=self.prob_new_facies,
+            variation_same_facies=self.variation_same_facies,
+            replication_length=self.replication_length,
+            enable_telemetry=self.enable_telemetry,
         )
         self.engine = DRSEngine(self.sim)
         if self.enable_telemetry and hasattr(self.sim, "telemetry"):
             self.engine.attach_telemetry(self.sim.telemetry)
         self.last_extraction = 0.0
-        self.last_time = 0.0  # <--- Reset time
+        self.last_time = 0.0
+        self.current_step = 0
 
         try:
-            # Step the engine until the first shutdown
-            self.engine.run(max_time=self.config.replication_length)
+            self.engine.run(max_time=self.replication_length)
         except RequireDecision:
             pass
 
-        # Update time and extraction after the first initial run to the first decision point
         self.last_time = self._get_current_time()
         self.last_extraction = self.sim.mine.cumulative_extracted_mass.value
 
         return self._get_obs(), {}
 
     def _calculate_dense_reward(self, dt: float, tons_processed: float) -> float:
-        target_throughput = self.rl_config.dense_reward_target_throughput
+        target_throughput = self.dense_reward_target_throughput
         return (
             tons_processed - (target_throughput * dt)
-        ) / self.rl_config.stockpile_scaling_factor
+        ) / self.stockpile_scaling_factor
 
     def _calculate_sparse_reward(self, dt: float) -> float:
-        # --- 1. True Time Penalty Calculation ---
-        # A normal campaign takes 35 days (34 prod + 1 shutdown).
-        # We divide by 35 so the penalty stays around -1.0 for a standard step.
-        reward_time_penalty = -(dt / self.rl_config.sparse_reward_time_penalty_scale)
-
-        # 3. Stock Penalty
-        stock_penalty_weight = self.rl_config.sparse_reward_stock_penalty_weight
+        reward_time_penalty = -(dt / self.sparse_reward_time_penalty_scale)
+        stock_penalty_weight = self.sparse_reward_stock_penalty_weight
         total_stock = (
             self.sim.ore1_stock.current_mass.value
             + self.sim.ore2_stock.current_mass.value
         )
-        overstock = max(0.0, total_stock - self.config.target_ore_stock_level)
-        overstock_scaled = overstock / self.rl_config.stockpile_scaling_factor
-
-        # --- 3. Total Reward ---
+        overstock = max(0.0, total_stock - self.target_ore_stock_level)
+        overstock_scaled = overstock / self.stockpile_scaling_factor
         return reward_time_penalty - (stock_penalty_weight * overstock_scaled)
 
     def step(self, action):
-        # 1. Queue the RL action
-        # TODO: note to add action masking so if surging is needed only that mode can be selected
+        self.current_step += 1
+
         if (
             action == 0
             and self.sim.controller.total_system_ore_mass.value
-            > self.config.target_ore_stock_level
+            > self.target_ore_stock_level
         ):
             action = 2  # Mode A Mine Surging
         elif (
             action == 1
             and self.sim.controller.total_system_ore_mass.value
-            > self.config.target_ore_stock_level
+            > self.target_ore_stock_level
         ):
             action = 3  # Mode B Mine Surging
 
         self.sim.controller.pending_rl_action = action
 
-        # 2. Resume the simulation
         try:
-            self.engine.run(max_time=self.config.replication_length)
+            self.engine.run(max_time=self.replication_length)
         except RequireDecision:
             pass
 
-        # 1. Did we hit the 6.6M target?
         terminated = self.sim.is_terminating_condition_met()
+        truncated = False
+        if self.max_steps is not None and self.current_step >= self.max_steps:
+            truncated = True
 
         current_time = self._get_current_time()
         current_extraction = self.sim.mine.cumulative_extracted_mass.value
@@ -146,20 +194,10 @@ class MiningRLEnv(gym.Env):
         else:
             reward = self._calculate_sparse_reward(dt)
 
-        # if terminated:
-        # Terminal penalty: subtract the absolute distance from the 60,000 target
-        # Scaled by 1000.0 to keep magnitudes comparable to the time penalties
-        # TODO: scaling value for this, right now it is arbitrary.
-        # TODO: should this be unified with the overstock penalty?
-        # abs_distance = abs(
-        #     self.sim.controller.total_system_ore_mass.value - self.config.target_ore_stock_level
-        # )
-        # reward -= abs_distance / 1000.0
-
-        return self._get_obs(), float(reward), terminated, False, {}
+        return self._get_obs(), float(reward), terminated, truncated, {}
 
     def _get_obs(self):
-        target = self.config.target_ore_stock_level
+        target = self.target_ore_stock_level
 
         return np.array(
             [
@@ -167,7 +205,7 @@ class MiningRLEnv(gym.Env):
                 self.sim.ore2_stock.current_mass.value / target,
                 self.sim.controller.total_system_ore_mass.value / target,
                 self.sim.fleet.stockpile2_routing_fraction.value,
-                self._get_current_time() / self.rl_config.time_scaling_factor,
+                self._get_current_time() / self.time_scaling_factor,
             ],
             dtype=np.float32,
         )

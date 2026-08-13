@@ -1,7 +1,6 @@
 import drs
 from drs.flow import Flow
 from .modes import OperatingMode, RequireDecision
-from .config import ConcentratorConfig
 from .mine_face import BaseMineFace, ConcentratorMineFace
 from .fleet import ContinuousFleetLogistics
 from .plant import BaseMetallurgicalPlant, ConcentratorPlant
@@ -22,22 +21,34 @@ class BaseBlendingController(drs.Module):
 
     def __init__(
         self,
-        config,
         mine: BaseMineFace,
         fleet: ContinuousFleetLogistics,
         plant: BaseMetallurgicalPlant,
+        target_ore_stock_level: float = 60000.0,
+        critical_ore2_level: float = 20400.0,
+        duration_of_production_campaigns: float = 34.0,
+        duration_of_shutdowns: float = 1.0,
+        duration_of_contingency_segments: float = 1.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
     ):
         super().__init__()
-        self.config = config
         self.mine = mine
         self.fleet = fleet
         self.plant = plant
+        self.target_ore_stock_level = target_ore_stock_level
+        self.critical_ore2_level = critical_ore2_level
+        self.duration_of_production_campaigns = duration_of_production_campaigns
+        self.duration_of_shutdowns = duration_of_shutdowns
+        self.duration_of_contingency_segments = duration_of_contingency_segments
+        self.ore_to_be_extracted_during_warming_period = (
+            ore_to_be_extracted_during_warming_period
+        )
 
         self.active_operating_mode = drs.Variable(
             "active_operating_mode", MODES["MODE_A"]
         )
         self.total_system_ore_mass = drs.Level(
-            "total_system_ore_mass", initial_value=config.target_ore_stock_level
+            "total_system_ore_mass", initial_value=self.target_ore_stock_level
         )
 
         self.current_campaign_duration = drs.Timer(
@@ -77,12 +88,11 @@ class BaseBlendingController(drs.Module):
         )
 
     def is_campaign_complete(self) -> bool:
-        c = self.config
         m = self.active_operating_mode.value.name
         threshold = (
-            c.duration_of_shutdowns
+            self.duration_of_shutdowns
             if m == "SHUTDOWN"
-            else c.duration_of_production_campaigns
+            else self.duration_of_production_campaigns
         )
 
         self.current_campaign_duration.upper_threshold = threshold
@@ -90,8 +100,7 @@ class BaseBlendingController(drs.Module):
         return self.current_campaign_duration.value >= (threshold - 1e-6)
 
     def is_contingency_complete(self) -> bool:
-        c = self.config
-        threshold = c.duration_of_contingency_segments
+        threshold = self.duration_of_contingency_segments
 
         self.current_contingency_duration.upper_threshold = threshold
 
@@ -104,13 +113,12 @@ class BaseBlendingController(drs.Module):
         self.current_contingency_duration.reset()
 
     def forward(self) -> Flow:
-        c = self.config
         mine = self.mine
 
-        if (
+        if mine is not None and (
             abs(
                 mine.cumulative_extracted_mass.value
-                - c.ore_to_be_extracted_during_warming_period
+                - self.ore_to_be_extracted_during_warming_period
             )
             < 1e-6
         ):
@@ -145,47 +153,45 @@ class BaseBlendingController(drs.Module):
         self.target_stock2_outflow_rate.value = targets.ore2_milling_rate
 
     def _update_timers(self, m: str):
-        c = self.config
         timer_attr = self._TIMER_MAP.get(m)
         if timer_attr:
             getattr(self, timer_attr).rate = 1.0
         self.current_campaign_duration.rate = 1.0
         self.current_campaign_duration.upper_threshold = (
-            c.duration_of_shutdowns
+            self.duration_of_shutdowns
             if m == "SHUTDOWN"
-            else c.duration_of_production_campaigns
+            else self.duration_of_production_campaigns
         )
         if m in self._CONTINGENCY_MODES:
             self.current_contingency_duration.rate = 1.0
             self.current_contingency_duration.upper_threshold = (
-                c.duration_of_contingency_segments
+                self.duration_of_contingency_segments
             )
 
-    def _choose_next_campaign_mode(self, config):
+    def _choose_next_campaign_mode(self):
         ore2 = self.parent.ore2_stock.current_mass.value
         total_stock = self.total_system_ore_mass.value
         EPS = 1e-6
-        if ore2 > config.critical_ore2_level:
+        if ore2 > self.critical_ore2_level:
             return (
                 MODES["MODE_A"]
-                if total_stock <= config.target_ore_stock_level + EPS
+                if total_stock <= self.target_ore_stock_level + EPS
                 else MODES["MODE_A_MINE_SURGING"]
             )
         else:
             return (
                 MODES["MODE_B"]
-                if total_stock <= config.target_ore_stock_level + EPS
+                if total_stock <= self.target_ore_stock_level + EPS
                 else MODES["MODE_B_MINE_SURGING"]
             )
 
     def controller_decision(self):
-        c = self.config
         m = self.active_operating_mode.value.name
 
         if self.is_campaign_complete():
             self.reset_campaign_timer()
             if m == "SHUTDOWN":
-                return self._choose_next_campaign_mode(c)
+                return self._choose_next_campaign_mode()
             return MODES["SHUTDOWN"]
 
         if m.endswith("_CONTINGENCY"):
@@ -197,34 +203,99 @@ class BaseBlendingController(drs.Module):
 class ConcentratorController(BaseBlendingController):
     def __init__(
         self,
-        config: ConcentratorConfig,
         mine: ConcentratorMineFace,
         fleet: ContinuousFleetLogistics,
         plant: ConcentratorPlant,
+        target_ore_stock_level: float = 60000.0,
+        critical_ore2_level: float = 20400.0,
+        duration_of_production_campaigns: float = 34.0,
+        duration_of_shutdowns: float = 1.0,
+        duration_of_contingency_segments: float = 1.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
     ):
-        super().__init__(config, mine, fleet, plant)
+        super().__init__(
+            mine=mine,
+            fleet=fleet,
+            plant=plant,
+            target_ore_stock_level=target_ore_stock_level,
+            critical_ore2_level=critical_ore2_level,
+            duration_of_production_campaigns=duration_of_production_campaigns,
+            duration_of_shutdowns=duration_of_shutdowns,
+            duration_of_contingency_segments=duration_of_contingency_segments,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        )
 
 
 class MultiFaceConcentratorController(BaseBlendingController):
-    """Controller for multi-face mine operations.
+    """Controller for multi-face mine operations."""
 
-    Uses pre-computed fixed face allocation fractions per operating mode,
-    computed from each face's generator mean ore fraction. This avoids
-    per-timestep linear solves and provides stable campaign-long allocations.
-
-    NOTE: Allocation fractions are computed from face generator means (not
-    current parcel values) for stability. The effective ore1 fraction for
-    each face is 1.0 - generator.mean_fraction (due to the inversion in
-    ContinuousMineFace).
-
-    When the target blend is structurally impossible with the given face
-    means, negative face rates are clamped to zero. The resulting stockpile
-    imbalance naturally triggers surging mode.
-    """
-
-    def __init__(self, config, faces, fleet, plant):
-        super().__init__(config, mine=None, fleet=fleet, plant=plant)
+    def __init__(
+        self,
+        faces,
+        fleet,
+        plant,
+        target_ore_stock_level: float = 60000.0,
+        critical_ore2_level: float = 20400.0,
+        duration_of_production_campaigns: float = 34.0,
+        duration_of_shutdowns: float = 1.0,
+        duration_of_contingency_segments: float = 1.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
+        mode_a_ore1_milling_rate: float = 3600.0,
+        mode_a_ore2_milling_rate: float = 2400.0,
+        mode_a_contingency_ore1_milling_rate: float = 3900.0,
+        mode_b_ore1_milling_rate: float = 4600.0,
+        mode_b_ore2_milling_rate: float = 800.0,
+        mode_b_contingency_ore2_milling_rate: float = 2500.0,
+        fleet_shift_duration: float = 0.5,
+        total_lhd_count: float = 3.0,
+        total_truck_count: float = 10.0,
+        max_lhds_per_face: float = 2.0,
+        max_trucks_per_face: float = 6.0,
+        face_haul_distance: tuple = (1.5, 2.2),
+        face_accessibility_fraction: tuple = (0.93, 0.91),
+        truck_velocity: float = 15.0,
+        loader_cycle_time_hours: float = 0.0833,
+        truck_dump_time_hours: float = 0.033,
+        traffic_delay_per_truck_hours: float = 0.015,
+        fleet_mechanical_availability: float = 0.85,
+        loader_payload_tonnes: float = 15.0,
+        truck_payload_tonnes: float = 30.0,
+        development_rate_per_extra_truck: float = 50.0,
+    ):
+        super().__init__(
+            mine=None,
+            fleet=fleet,
+            plant=plant,
+            target_ore_stock_level=target_ore_stock_level,
+            critical_ore2_level=critical_ore2_level,
+            duration_of_production_campaigns=duration_of_production_campaigns,
+            duration_of_shutdowns=duration_of_shutdowns,
+            duration_of_contingency_segments=duration_of_contingency_segments,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        )
         self.faces = list(faces)
+        self.mode_a_ore1_milling_rate = mode_a_ore1_milling_rate
+        self.mode_a_ore2_milling_rate = mode_a_ore2_milling_rate
+        self.mode_a_contingency_ore1_milling_rate = mode_a_contingency_ore1_milling_rate
+        self.mode_b_ore1_milling_rate = mode_b_ore1_milling_rate
+        self.mode_b_ore2_milling_rate = mode_b_ore2_milling_rate
+        self.mode_b_contingency_ore2_milling_rate = mode_b_contingency_ore2_milling_rate
+        self.fleet_shift_duration = fleet_shift_duration
+        self.total_lhd_count = total_lhd_count
+        self.total_truck_count = total_truck_count
+        self.max_lhds_per_face = max_lhds_per_face
+        self.max_trucks_per_face = max_trucks_per_face
+        self.face_haul_distance = face_haul_distance
+        self.face_accessibility_fraction = face_accessibility_fraction
+        self.truck_velocity = truck_velocity
+        self.loader_cycle_time_hours = loader_cycle_time_hours
+        self.truck_dump_time_hours = truck_dump_time_hours
+        self.traffic_delay_per_truck_hours = traffic_delay_per_truck_hours
+        self.fleet_mechanical_availability = fleet_mechanical_availability
+        self.loader_payload_tonnes = loader_payload_tonnes
+        self.truck_payload_tonnes = truck_payload_tonnes
+        self.development_rate_per_extra_truck = development_rate_per_extra_truck
+
         self.total_extra_trucks = drs.Variable("total_extra_trucks", 0.0)
         self.cumulative_mine_development = drs.Level(
             "cumulative_mine_development", initial_value=0.0
@@ -256,17 +327,17 @@ class MultiFaceConcentratorController(BaseBlendingController):
                 self, f"face{i}_operational_downtime_fraction", operational_downtime
             )
             setattr(self, f"face{i}_shift_allocation_fraction", allocation_fraction)
-            
+
             lhd_alloc = drs.Variable(f"face{i}_lhd_allocation", 0.0)
             truck_alloc = drs.Variable(f"face{i}_truck_allocation", 0.0)
             setattr(self, f"face{i}_lhd_allocation", lhd_alloc)
             setattr(self, f"face{i}_truck_allocation", truck_alloc)
-            
+
             match_factor = drs.Variable(f"face{i}_match_factor", 0.0)
             truck_cycle = drs.Variable(f"face{i}_truck_cycle_time", 0.0)
             setattr(self, f"face{i}_match_factor", match_factor)
             setattr(self, f"face{i}_truck_cycle_time", truck_cycle)
-            
+
             self.face_target_extraction_rates.append(target)
             self.face_real_extraction_rates.append(real_extraction)
             self.face_achieved_extraction_rates.append(achieved)
@@ -289,20 +360,20 @@ class MultiFaceConcentratorController(BaseBlendingController):
 
         modes_to_compute = {
             "MODE_A": (
-                self.config.mode_a_ore1_milling_rate,
-                self.config.mode_a_ore2_milling_rate,
+                self.mode_a_ore1_milling_rate,
+                self.mode_a_ore2_milling_rate,
             ),
             "MODE_A_CONTINGENCY": (
-                self.config.mode_a_contingency_ore1_milling_rate,
+                self.mode_a_contingency_ore1_milling_rate,
                 0.0,
             ),
             "MODE_B": (
-                self.config.mode_b_ore1_milling_rate,
-                self.config.mode_b_ore2_milling_rate,
+                self.mode_b_ore1_milling_rate,
+                self.mode_b_ore2_milling_rate,
             ),
             "MODE_B_CONTINGENCY": (
                 0.0,
-                self.config.mode_b_contingency_ore2_milling_rate,
+                self.mode_b_contingency_ore2_milling_rate,
             ),
         }
         result = {}
@@ -337,7 +408,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
         return fracs
 
     def _face_config_value(self, name, face_index, default):
-        values = getattr(self.config, name, None)
+        values = getattr(self, name, None)
         if values is None:
             return default
         if face_index < len(values):
@@ -352,105 +423,85 @@ class MultiFaceConcentratorController(BaseBlendingController):
             return
         for i, factor in enumerate(self.face_shift_allocation_fractions):
             factor.value = self.current_shift_allocations[i]
-            
+
         self._distribute_discrete_fleet(self.current_shift_allocations)
 
     def _distribute_discrete_fleet(self, fracs):
         import math
-        c = self.config
-        total_lhd = int(getattr(c, "total_lhd_count", 5.0))
-        total_truck = int(getattr(c, "total_truck_count", 10.0))
-        max_lhds = int(getattr(c, "max_lhds_per_face", float('inf')))
-        max_trucks = int(getattr(c, "max_trucks_per_face", float('inf')))
-        
+
+        total_lhd = int(getattr(self, "total_lhd_count", 3.0))
+        total_truck = int(getattr(self, "total_truck_count", 10.0))
+        max_lhds = int(getattr(self, "max_lhds_per_face", float("inf")))
+        max_trucks = int(getattr(self, "max_trucks_per_face", float("inf")))
+
         num_faces = len(self.faces)
         if num_faces == 0:
             return
-            
-        # Distribute LHDs
+
         unassigned_lhds = total_lhd
         lhd_assignments = [0] * num_faces
-        
-        # Sort faces by their target fraction, descending
-        # so the face that wants the most gets priority for rounding
+
         face_priorities = sorted(range(num_faces), key=lambda i: fracs[i], reverse=True)
-        
-        # Base assignment: integer floor, clamped to physical limits
+
         for i in face_priorities:
             target = math.floor(total_lhd * fracs[i])
             assigned = min(target, max_lhds, unassigned_lhds)
             lhd_assignments[i] = assigned
             unassigned_lhds -= assigned
-            
-        # Distribute remaining unassigned LHDs sequentially
+
         for i in face_priorities:
             if unassigned_lhds <= 0:
                 break
             if lhd_assignments[i] < max_lhds:
                 lhd_assignments[i] += 1
                 unassigned_lhds -= 1
-                
-        # Update DRS variables
+
         for i in range(num_faces):
             self.face_lhd_allocations[i].value = float(lhd_assignments[i])
-            
-        # Distribute Trucks
+
         unassigned_trucks = total_truck
         truck_assignments = [0] * num_faces
-        
+
         for i in face_priorities:
             target = math.floor(total_truck * fracs[i])
             assigned = min(target, max_trucks, unassigned_trucks)
             truck_assignments[i] = assigned
             unassigned_trucks -= assigned
-            
+
         for i in face_priorities:
             if unassigned_trucks <= 0:
                 break
             if truck_assignments[i] < max_trucks:
                 truck_assignments[i] += 1
                 unassigned_trucks -= 1
-                
+
         for i in range(num_faces):
             self.face_truck_allocations[i].value = float(truck_assignments[i])
 
     def _face_real_extraction_rate(self, face_index, target_extraction_rate):
-        c = self.config
-        
-        # Read the discrete integer assignments
         lhd_alloc = self.face_lhd_allocations[face_index].value
         truck_alloc = self.face_truck_allocations[face_index].value
-        
+
         distance = self._face_config_value("face_haul_distance", face_index, 0.0)
         accessibility = self._clamp(
             self._face_config_value("face_accessibility_fraction", face_index, 1.0),
             0.0,
             1.0,
         )
-        mechanical_availability = getattr(c, "fleet_mechanical_availability", 1.0)
+        mechanical_availability = getattr(self, "fleet_mechanical_availability", 0.85)
 
-        # 1. Calculate Traffic Delay (function of number of trucks)
-        # TODO: Implement non-linear gridlock delay. Currently traffic delay is linear,
-        # meaning adding trucks always strictly increases throughput asymptotically.
-        # In reality, cramming too many trucks into a face causes gridlock where
-        # marginal throughput becomes negative.
-        traffic_delay = c.traffic_delay_per_truck_hours * truck_alloc
+        traffic_delay = self.traffic_delay_per_truck_hours * truck_alloc
 
-        # 2. Calculate Truck Cycle Time (Travel + Load + Dump + Traffic Delay)
-        travel_time = (2 * distance) / c.truck_velocity
-        
-        # Calculate how long it takes to completely fill one truck
-        truck_loading_time_hours = c.loader_cycle_time_hours * (c.truck_payload_tonnes / c.loader_payload_tonnes)
-        
-        # TODO: Implement blasted inventory limits (drill & blast cycle).
-        # Currently the face is assumed to have infinite blasted muck ready.
-        # Surging 100% of production from one face should rapidly deplete the blasted 
-        # inventory, forcing downtime for drilling and blasting.
-        
+        travel_time = (2 * distance) / self.truck_velocity
+
+        truck_loading_time_hours = self.loader_cycle_time_hours * (
+            self.truck_payload_tonnes / self.loader_payload_tonnes
+        )
+
         truck_cycle_time = (
             travel_time
             + truck_loading_time_hours
-            + c.truck_dump_time_hours
+            + self.truck_dump_time_hours
             + traffic_delay
         )
 
@@ -459,44 +510,34 @@ class MultiFaceConcentratorController(BaseBlendingController):
             self.face_truck_cycle_times[face_index].value = truck_cycle_time
             return 0.0
 
-        # 3. Calculate Match Factor
-        # MF = (Number of Trucks * Time to Load One Truck) / (Number of Loaders * Truck Cycle Time)
         match_factor = (truck_alloc * truck_loading_time_hours) / (
             lhd_alloc * truck_cycle_time
         )
         self.face_match_factors[face_index].value = match_factor
         self.face_truck_cycle_times[face_index].value = truck_cycle_time
 
-        # 4. Calculate Efficiency & Throughput based on Match Factor
         if match_factor < 1.0:
-            # Under-trucked: Trucks dictate production
             max_rate = (
-                (truck_alloc / truck_cycle_time) * c.truck_payload_tonnes * 24.0
-            )  # tonnes per day
+                (truck_alloc / truck_cycle_time) * self.truck_payload_tonnes * 24.0
+            )
         else:
-            # Over-trucked: Loaders dictate production (trucks wait)
             max_rate = (
-                (lhd_alloc / c.loader_cycle_time_hours) * c.loader_payload_tonnes * 24.0
-            )  # tonnes per day
+                (lhd_alloc / self.loader_cycle_time_hours)
+                * self.loader_payload_tonnes
+                * 24.0
+            )
 
-        # Apply accessibility, mechanical availability, and allocation fractions
-        final_real_extraction_rate = (
-            max_rate * accessibility * mechanical_availability
-        )
+        final_real_extraction_rate = max_rate * accessibility * mechanical_availability
 
-        # 5. Calculate Extra Trucks for Development
-        # If we are over-trucked (MF > 1), or if real_rate > target_extraction_rate, we have spare trucks
         if (
             final_real_extraction_rate > target_extraction_rate
             and target_extraction_rate > 0
         ):
-            # Fraction of fleet actually needed
             utilization = target_extraction_rate / final_real_extraction_rate
             unused_trucks = truck_alloc * (1.0 - utilization)
         else:
             unused_trucks = 0.0
 
-        # Accumulate extra trucks to global development pool
         self.total_extra_trucks.value += unused_trucks
 
         return max(0.0, final_real_extraction_rate)
@@ -509,12 +550,10 @@ class MultiFaceConcentratorController(BaseBlendingController):
         self.fleet_shift_count.value += 1
 
     def forward(self):
-        c = self.config
-
         self.total_extra_trucks.value = 0.0
 
         total_extracted = sum(f.cumulative_extracted_mass.value for f in self.faces)
-        if abs(total_extracted - c.ore_to_be_extracted_during_warming_period) < 1e-6:
+        if abs(total_extracted - self.ore_to_be_extracted_during_warming_period) < 1e-6:
             self.cumulative_time_mode_a.reset()
             self.cumulative_time_mode_a_contingency.reset()
             self.cumulative_time_mode_a_surging.reset()
@@ -542,9 +581,9 @@ class MultiFaceConcentratorController(BaseBlendingController):
         self._update_timers(mode_name)
 
         self.fleet_shift_timer.rate = 1.0
-        self.fleet_shift_timer.upper_threshold = c.fleet_shift_duration
+        self.fleet_shift_timer.upper_threshold = self.fleet_shift_duration
 
-        shift_due = self.fleet_shift_timer.value >= c.fleet_shift_duration - 1e-6
+        shift_due = self.fleet_shift_timer.value >= self.fleet_shift_duration - 1e-6
         mode_changed = mode_name != self.current_shift_mode_name
         if self.current_shift_allocations is None or shift_due or mode_changed:
             self.fleet_shift_timer.reset()
@@ -575,5 +614,5 @@ class MultiFaceConcentratorController(BaseBlendingController):
                 self.face_operational_downtime_fractions[i].value = 0.0
 
         self.cumulative_mine_development.rate = (
-            self.total_extra_trucks.value * c.development_rate_per_extra_truck
+            self.total_extra_trucks.value * self.development_rate_per_extra_truck
         )

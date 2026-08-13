@@ -6,9 +6,11 @@ from drs_mining.components import (
     BaseBlendingModel,
     ConcentratorModel,
     ActiveFleetConcentratorModel,
-    ConcentratorConfig,
     MultiFaceConcentratorController,
     ContinuousMineFace,
+    ConcentratorMineFace,
+    ConcentratorPlant,
+    ConcentratorController,
     Stockpile,
     TruckState,
     Truck,
@@ -16,6 +18,8 @@ from drs_mining.components import (
     DRSRoadSegment,
     DRSLoadingBay,
     DRSDumpingBay,
+    load_topology_dict,
+    build_simulation_from_dict,
 )
 from drs_mining.controllers.dispatch import ShelswellDispatchController
 from drs_mining.simulation import ShelswellHybridSimulation
@@ -24,9 +28,11 @@ __all__ = [
     "BaseBlendingModel",
     "ConcentratorModel",
     "ActiveFleetConcentratorModel",
-    "ConcentratorConfig",
     "MultiFaceConcentratorController",
     "ContinuousMineFace",
+    "ConcentratorMineFace",
+    "ConcentratorPlant",
+    "ConcentratorController",
     "Stockpile",
     "TruckState",
     "Truck",
@@ -34,6 +40,8 @@ __all__ = [
     "DRSRoadSegment",
     "DRSLoadingBay",
     "DRSDumpingBay",
+    "load_topology_dict",
+    "build_simulation_from_dict",
     "ShelswellDispatchController",
     "ShelswellHybridSimulation",
 ]

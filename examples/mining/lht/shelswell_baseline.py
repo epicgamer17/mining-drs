@@ -4,73 +4,15 @@ Shelswell (2017) Baseline Truck Haulage Simulation (Hybrid DRS Architecture)
 ===============================================================================
 1. SUMMARY OF SHELSWELL (2017) PAPER SPECIFICATIONS
 ===============================================================================
-
-Trucks vary in size, capacity and dump method to accommodate mine designs. Additional options include engine type, or modifications like sideboards.
-
-Key strength to truck haulage is the ability to adapt accordingly in response to the current operations, future mining processes, and expansions or changes in mine plans as the life of the mine progresses.
-
-Especially important in the absence of rail lines, conveyors and shafts.
-
-Key limitations: wear and tear on equipment. Downtime is impacted by: fleet age, muck fragmentation, truck payloads, truck loading practices, roadway conditions, ventilation and cooling, haulage distance, productivity targets, maintenance regimes, and mine design.
-
-It is important to maximize truck availability with respect to the underground conditions.
-
-Operators are also important. Too few and available trucks can't be used, too many is unnecessary cost.
-
-Need operator and equipment availability with randomness.
-
-Upstream boundary used was the production of ore from stopes and the generation of waste from lateral development.
-Assumed that mining activities were able to efficiently generate sufficient tonnes to meet the production and development targets for the simulation.
-
-Downstream boundary was the dumping of material at the run of mine pad and waste stockpile site on surface. ROM and stockpile were considered unconstrained.
-
-Exact mine design:
-- 2100m long 5% grade decline access to a single spiral ramp system.
-- Ramp was 1800m long and a grade between 8 and 13% with seven primary mine levels. Sublevels not included.
-- Distance between each mine level on the ramp was 300m.
-- Each level had 2 loadouts: one for ore and one for waste along the access drift of the ramp.
-- Ore loadouts were 40m off the ramp while waste loadouts were 55m from the ramp.
-- Single truck air doors were incorporated 20m down the level access drift coming off the ramp to control ventilation.
-- ROM was located 300m from the portal while the waste stockpile dump was located 440m from the portal.
-- Maintenance shop and fuel depot were located on the surface at 260m and 270m respectively.
-
-Production & Schedule:
-- The production and development schedule represented mine targets for 1 calendar year (365 days) with a 5.5:1 ratio of ore to waste.
-- 11 non-production days were included for holidays, maintenance events, and random shutdowns.
-- Ore and waste tonnes were scheduled daily based on a triangular distribution. Tonnes scheduled additively to muck bays.
-
-Shift Schedules & Availabilities:
-- 2 shifts per day, 10.5 hours each (12h elapsed).
-- Workable availabilities: Haulage 54.17%, Underground LHD 58.33%, Surface Maintenance 79.17%.
-
-Equipment Specs:
-- Payload - ore: Truck 26.1 t, LHD 14.0 t
-- Payload - waste: Truck 24.6 t, LHD 12.5 t
-- Load spot duration: Truck 0.82 min, LHD 0.46 min
-- Load duration (ore/waste): Truck 6.69 min, LHD 0.88 min
-- Dump spot duration: Truck 0.57 min, LHD 0.55 min
-- Dump duration: Truck 0.88 min, LHD 0.73 min
-- Speed - surface: loaded 13.4 kph, empty 17.4 kph
-- Speed - decline: loaded 11.2 kph, empty 15.1 kph
-- Speed - ramp: loaded 9.2 kph, empty 12.9 kph
-- Speed - level: loaded 6.6 kph, empty 7.6 kph (LHD: loaded 5.89 kph, empty 6.78 kph)
-- Acquisition delay max: 3.0 min (avg 1.5 min)
-- Remuck stockpile tram distance: 35 m
-- Scheduled PM-associated availability: 99.8 - 100%
-- Random failure-associated availability: 30.2 - 95%
-
-Dispatch & Operation Rules:
-- Payload type determined by 5.5:1 ore vs waste ratio.
-- Dispatched to loadout with highest "unclaimed" tonnes remaining.
-- 1 LHD active per level.
-- Bounded effective fleet: eff_trucks = min(N_trucks * Availability, N_operators).
-- Availability formulas:
-  PM Availability = (FreqPM / (FreqPM + DurPM)) * (FreqFUEL / (FreqFUEL + DurFUEL))
-  Random Failure Availability = (AVGMTBF / (AVGMTBF + AVGMTTR))
-  Overall Mechanical Availability = PM Availability * Random Failure Availability
+- Mine Layout: 2100m access decline (5% grade) + 1800m spiral ramp connecting 7 mine levels (300m spacing).
+- Loadouts: 40m access drift off ramp for Ore, 55m access drift for Waste. Air doors 20m off ramp.
+- Surface Destinations: ROM crusher pad at 300m, Waste Dump at 440m, Maintenance Shop at 260m, Fuel Depot at 270m.
+- Production Schedule: 365 calendar days with 5.5:1 ratio of Ore to Waste.
+- Shift Schedule: 2 shifts per day, 10.5 hours working time each (12h total, 1.5h shift gap).
+- Equipment Specs: CAT AD30 haul trucks (26.1t Ore, 24.6t Waste) and underground LHD loaders (14.0t Ore, 12.5t Waste).
 
 ===============================================================================
-2. DRS IMPLEMENTATION DIFFERENCES FROM PAPER
+2. THREE-LAYER HYBRID DISCRETE RATE SYSTEM (DRS) ARCHITECTURE
 ===============================================================================
 This implementation uses a Pythonic Three-Layer Hybrid DRS Pattern:
 - Layer 1: Discrete Domain Model (Trucks, LHDs, Fuel/Maintenance state, Unclaimed Tonnes Dispatch Logic).
@@ -82,6 +24,7 @@ import os
 import random
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 from drs_mining.simulation import ShelswellHybridSimulation
 from drs_mining.components.fleet import Truck, TruckState, LHD
@@ -90,13 +33,14 @@ from drs_mining.components.bays import DRSLoadingBay, DRSDumpingBay
 from drs_mining.controllers.dispatch import ShelswellDispatchController
 
 
-def run_simulation(trucks: int, operators: int, availability: float) -> float:
+def run_simulation(trucks: int, operators: int, availability: float, dt: float = 60.0) -> float:
     """Executes a single Hybrid DRS simulation run for a given fleet configuration.
 
     Args:
         trucks: Number of haul trucks in fleet (3 to 10).
         operators: Number of truck operators available per shift (1 to 10).
         availability: Mechanical availability fraction (0.5 to 1.0).
+        dt: Integration time step in seconds (default 60.0s).
 
     Returns:
         float: Average daily haulage productivity (tonnes/day).
@@ -109,22 +53,18 @@ def run_simulation(trucks: int, operators: int, availability: float) -> float:
         num_operators=operators,
         mechanical_availability=availability,
     )
-    return sim.run_simulation(total_days=365.0)
+    return sim.run_simulation(total_days=365.0, dt=dt, show_progress=False)
 
 
 def generate_figure_2():
     """Replicates Figure 2 from Shelswell (2017): Productivity vs Fleet Size without operator constraints."""
-    print(
-        "Generating Figure 2 (Productivity vs Fleet Size without operator constraints)..."
-    )
+    print("Generating Figure 2 (Productivity vs Fleet Size without operator constraints)...")
     availabilities = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     truck_sizes = list(range(3, 11))
 
     # Baseline reference productivity (10 trucks, 10 ops, 100% availability)
     base_prod = run_simulation(10, 10, 1.0)
-    print(
-        f"Base Hybrid DRS productivity (10 trucks, 10 ops, 100% avail): {base_prod:.2f} t/d"
-    )
+    print(f"Base Hybrid DRS productivity (10 trucks, 10 ops, 100% avail): {base_prod:.2f} t/d")
 
     plt.figure(figsize=(10, 6))
     colors = {
@@ -136,11 +76,15 @@ def generate_figure_2():
         1.0: "black",
     }
 
+    total_runs = len(availabilities) * len(truck_sizes)
+    pbar = tqdm(total=total_runs, desc="Figure 2 Sweep Progress")
+
     for avail in availabilities:
         prod_list = []
         for trucks in truck_sizes:
             prod = run_simulation(trucks, trucks, avail)
             prod_list.append(prod / base_prod)
+            pbar.update(1)
 
         plt.plot(
             truck_sizes,
@@ -150,6 +94,7 @@ def generate_figure_2():
             color=colors[avail],
         )
 
+    pbar.close()
     plt.title(
         "Haulage productivity analysis without haulage operator constraints (Hybrid DRS)",
         fontsize=14,
@@ -183,10 +128,10 @@ def generate_figures_3_to_8():
         10: "black",
     }
 
+    total_runs = len(availabilities) * len(truck_counts) * len(operator_counts)
+    pbar = tqdm(total=total_runs, desc="Figures 3-8 Sweep Progress")
+
     for avail in availabilities:
-        print(
-            f"Generating productivity curves for {int(avail*100)}% mechanical availability..."
-        )
         base_prod = run_simulation(10, 10, avail)
 
         plt.figure(figsize=(10, 6))
@@ -195,6 +140,7 @@ def generate_figures_3_to_8():
             for ops in operator_counts:
                 prod = run_simulation(trucks, min(ops, trucks), avail)
                 prod_list.append(prod / base_prod)
+                pbar.update(1)
 
             plt.plot(
                 operator_counts,
@@ -217,7 +163,9 @@ def generate_figures_3_to_8():
         fig_num = {1.0: 3, 0.9: 4, 0.8: 5, 0.7: 6, 0.6: 7, 0.5: 8}[avail]
         plt.savefig(f"plots/shelswell_fig{fig_num}.png", dpi=300, bbox_inches="tight")
         plt.close()
-        print(f"Saved plots/shelswell_fig{fig_num}.png")
+
+    pbar.close()
+    print("Saved plots/shelswell_fig3.png through plots/shelswell_fig8.png")
 
 
 if __name__ == "__main__":

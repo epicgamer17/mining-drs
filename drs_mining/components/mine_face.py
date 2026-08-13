@@ -2,14 +2,20 @@ import random
 import drs
 from drs.flow import Flow
 from .data import MineOutput
-from .config import ConcentratorConfig
 from .generators import StochasticFaciesGenerator
 
 
 class BaseMineFace(drs.Module):
-    def __init__(self, config):
+    def __init__(
+        self,
+        total_ore_to_extract: float = 6600000.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
+    ):
         super().__init__()
-        self.config = config
+        self.total_ore_to_extract = total_ore_to_extract
+        self.ore_to_be_extracted_during_warming_period = (
+            ore_to_be_extracted_during_warming_period
+        )
 
         self.active_parcel_initial_mass = drs.Variable(
             "active_parcel_initial_mass", 0.0
@@ -43,14 +49,14 @@ class BaseMineFace(drs.Module):
 
         if (
             self.cumulative_extracted_mass.value
-            < self.config.ore_to_be_extracted_during_warming_period
+            < self.ore_to_be_extracted_during_warming_period
         ):
             self.cumulative_extracted_mass.upper_threshold = (
-                self.config.ore_to_be_extracted_during_warming_period
+                self.ore_to_be_extracted_during_warming_period
             )
         else:
             self.cumulative_extracted_mass.upper_threshold = (
-                self.config.total_ore_to_extract
+                self.total_ore_to_extract
             )
 
         self.parcel_extracted_mass.upper_threshold = (
@@ -68,14 +74,33 @@ class BaseMineFace(drs.Module):
 
 
 class ConcentratorMineFace(BaseMineFace):
-    def __init__(self, config: ConcentratorConfig):
-        super().__init__(config)
+    def __init__(
+        self,
+        mean_ore_fraction: float = 0.30,
+        std_dev_ore_fraction: float = 0.05,
+        prob_new_facies: float = 0.3,
+        variation_same_facies: float = 0.01,
+        min_ore_mass: float = 30000.0,
+        max_ore_mass: float = 50000.0,
+        total_ore_to_extract: float = 6600000.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
+    ):
+        super().__init__(
+            total_ore_to_extract=total_ore_to_extract,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        )
+        self.mean_ore_fraction = mean_ore_fraction
+        self.std_dev_ore_fraction = std_dev_ore_fraction
+        self.prob_new_facies = prob_new_facies
+        self.variation_same_facies = variation_same_facies
+        self.min_ore_mass = min_ore_mass
+        self.max_ore_mass = max_ore_mass
 
         self.generator = StochasticFaciesGenerator(
-            mean_fraction=self.config.mean_ore_fraction,
-            std_dev=self.config.std_dev_ore_fraction,
-            prob_new_facies=self.config.prob_new_facies,
-            variation_same_facies=self.config.variation_same_facies,
+            mean_fraction=self.mean_ore_fraction,
+            std_dev=self.std_dev_ore_fraction,
+            prob_new_facies=self.prob_new_facies,
+            variation_same_facies=self.variation_same_facies,
         )
         self.active_parcel_ore_fraction = drs.Variable(
             "active_parcel_ore_fraction", 0.0
@@ -88,7 +113,7 @@ class ConcentratorMineFace(BaseMineFace):
             parcel = parcel_flow.value
 
             self.active_parcel_initial_mass.value = random.uniform(
-                self.config.min_ore_mass, self.config.max_ore_mass
+                self.min_ore_mass, self.max_ore_mass
             )
             self.active_parcel_ore_fraction.value = 1.0 - parcel.ore1_frac
         except StopIteration:
@@ -99,11 +124,26 @@ class ConcentratorMineFace(BaseMineFace):
 
 
 class ContinuousMineFace(BaseMineFace):
-    def __init__(self, config, face_id, generator):
-        super().__init__(config)
+    def __init__(
+        self,
+        face_id: int,
+        generator,
+        min_ore_mass: float = 30000.0,
+        max_ore_mass: float = 50000.0,
+        total_ore_to_extract: float = 6600000.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
+    ):
+        super().__init__(
+            total_ore_to_extract=total_ore_to_extract,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        )
         self.face_id = face_id
         self.generator = generator
-        self.active_parcel_ore_fraction = drs.Variable(f"face{face_id}_ore_fraction", 0.0)
+        self.min_ore_mass = min_ore_mass
+        self.max_ore_mass = max_ore_mass
+        self.active_parcel_ore_fraction = drs.Variable(
+            f"face{face_id}_ore_fraction", 0.0
+        )
         self._load_next_batch()
 
     def _load_next_batch(self):
@@ -111,7 +151,7 @@ class ContinuousMineFace(BaseMineFace):
             parcel_flow = self.generator()
             parcel = parcel_flow.value
             self.active_parcel_initial_mass.value = random.uniform(
-                self.config.min_ore_mass, self.config.max_ore_mass
+                self.min_ore_mass, self.max_ore_mass
             )
             self.active_parcel_ore_fraction.value = 1.0 - parcel.ore1_frac
         except StopIteration:
@@ -138,14 +178,14 @@ class ContinuousMineFace(BaseMineFace):
 
         if (
             self.cumulative_extracted_mass.value
-            < self.config.ore_to_be_extracted_during_warming_period
+            < self.ore_to_be_extracted_during_warming_period
         ):
             self.cumulative_extracted_mass.upper_threshold = (
-                self.config.ore_to_be_extracted_during_warming_period
+                self.ore_to_be_extracted_during_warming_period
             )
         else:
             self.cumulative_extracted_mass.upper_threshold = (
-                self.config.total_ore_to_extract
+                self.total_ore_to_extract
             )
 
         self.parcel_extracted_mass.upper_threshold = (

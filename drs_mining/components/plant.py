@@ -1,17 +1,13 @@
 import drs
 from drs.flow import Flow
-from .config import ConcentratorConfig
 from .fleet import ContinuousFleetLogistics
-
-# TODO: can we get this down to one kind of Plant.
 
 
 class BaseMetallurgicalPlant(drs.Module):
     def __init__(
-        self, config, mine, fleet: ContinuousFleetLogistics, ore1_stock, ore2_stock
+        self, mine, fleet: ContinuousFleetLogistics, ore1_stock, ore2_stock
     ):
         super().__init__()
-        self.config = config
         self.mine = mine
         self.fleet = fleet
 
@@ -30,13 +26,12 @@ class BaseMetallurgicalPlant(drs.Module):
 class ConcentratorPlant(BaseMetallurgicalPlant):
     def __init__(
         self,
-        config: ConcentratorConfig,
         mine,
         fleet: ContinuousFleetLogistics,
         ore1_stock,
         ore2_stock,
     ):
-        super().__init__(config, mine, fleet, ore1_stock, ore2_stock)
+        super().__init__(mine, fleet, ore1_stock, ore2_stock)
 
     def forward(self, ore1_outflow, ore2_outflow):
         super().forward(ore1_outflow, ore2_outflow)

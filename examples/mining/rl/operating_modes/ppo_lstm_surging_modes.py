@@ -51,9 +51,9 @@ from functional.utils import (
 )
 
 
-# Import the custom environment and config
-from drs_mining.rl.environments import MiningRLEnv, RLMineConfig
-from drs_mining.components import ConcentratorConfig
+# Import the custom environment
+import gymnasium as gym
+import drs_mining.rl.environments
 
 # Constants
 LEARNING_RATE = 2.5e-4
@@ -196,13 +196,12 @@ if __name__ == "__main__":
 
     def make_env(seed, idx):
         def thunk():
-            sim_config = ConcentratorConfig(
+            env = gym.make(
+                "MiningEnv-v0",
                 replication_length=99999.0,
                 std_dev_ore_fraction=args.std_dev_ore_fraction,
                 target_ore_stock_level=args.total_stockpile_level,
             )
-            config = RLMineConfig(sim_config=sim_config)
-            env = MiningRLEnv(config)
             env = gym.wrappers.RecordEpisodeStatistics(env)
             env.action_space.seed(seed)
             env.observation_space.seed(seed)

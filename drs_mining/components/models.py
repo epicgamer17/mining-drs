@@ -1,7 +1,7 @@
+import math
 import drs
 from drs.telemetry import Telemetry
 
-from .config import BaseDualStockpileConfig, ConcentratorConfig
 from .stockpiles import Stockpile
 from .mine_face import BaseMineFace, ConcentratorMineFace, ContinuousMineFace
 from .fleet import ContinuousFleetLogistics
@@ -23,9 +23,19 @@ def _equipment_schedules(total_units, downtime_start, downtime_duration, schedul
 
 
 class BaseBlendingModel(drs.Module):
-    def __init__(self, config: BaseDualStockpileConfig, enable_telemetry: bool = False):
+    def __init__(
+        self,
+        total_ore_to_extract: float = 6600000.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
+        target_ore_stock_level: float = 60000.0,
+        enable_telemetry: bool = False,
+    ):
         super().__init__()
-        self.config = config
+        self.total_ore_to_extract = total_ore_to_extract
+        self.ore_to_be_extracted_during_warming_period = (
+            ore_to_be_extracted_during_warming_period
+        )
+        self.target_ore_stock_level = target_ore_stock_level
         self.enable_telemetry = enable_telemetry
 
         self.generator = None
@@ -39,7 +49,7 @@ class BaseBlendingModel(drs.Module):
     def setup_telemetry(self):
         if self.enable_telemetry:
             self.telemetry = Telemetry(self)
-            
+
             self.telemetry.register_metric(
                 "MassOfCurrentParcel",
                 lambda t, m, s, _: m.mine.active_parcel_initial_mass.value,
@@ -58,7 +68,6 @@ class BaseBlendingModel(drs.Module):
             )
 
     def forward(self):
-        # TODO: why do we need to do this, shouldnt it be default? also do this in two places.
         self.global_time.rate = 1.0
 
         self.controller()
@@ -82,7 +91,7 @@ class BaseBlendingModel(drs.Module):
     def is_terminating_condition_met(self) -> bool:
         return (
             self.mine.cumulative_extracted_mass.value
-            >= self.config.total_ore_to_extract
+            >= self.total_ore_to_extract
         )
 
     def print_statistics(self):
@@ -129,7 +138,7 @@ class BaseBlendingModel(drs.Module):
             else:
                 total_ore_processed = (
                     self.mine.cumulative_extracted_mass.value
-                    - self.config.ore_to_be_extracted_during_warming_period
+                    - self.ore_to_be_extracted_during_warming_period
                 )
 
             throughput = total_ore_processed / active_time
@@ -139,67 +148,169 @@ class BaseBlendingModel(drs.Module):
 
 
 class ConcentratorModel(BaseBlendingModel):
-    def __init__(self, config: ConcentratorConfig, enable_telemetry: bool = False):
-        super().__init__(config, enable_telemetry)
+    def __init__(
+        self,
+        mean_ore_fraction: float = 0.30,
+        std_dev_ore_fraction: float = 0.05,
+        target_ore_stock_level: float = 60000.0,
+        total_ore_to_extract: float = 6600000.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
+        critical_ore2_level: float = 20400.0,
+        duration_of_production_campaigns: float = 34.0,
+        duration_of_shutdowns: float = 1.0,
+        duration_of_contingency_segments: float = 1.0,
+        min_ore_mass: float = 30000.0,
+        max_ore_mass: float = 50000.0,
+        prob_new_facies: float = 0.3,
+        variation_same_facies: float = 0.01,
+        replication_length: float = math.inf,
+        enable_telemetry: bool = False,
+    ):
+        super().__init__(
+            total_ore_to_extract=total_ore_to_extract,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+            target_ore_stock_level=target_ore_stock_level,
+            enable_telemetry=enable_telemetry,
+        )
+        self.mean_ore_fraction = mean_ore_fraction
+        self.std_dev_ore_fraction = std_dev_ore_fraction
+        self.critical_ore2_level = critical_ore2_level
+        self.duration_of_production_campaigns = duration_of_production_campaigns
+        self.duration_of_shutdowns = duration_of_shutdowns
+        self.duration_of_contingency_segments = duration_of_contingency_segments
+        self.min_ore_mass = min_ore_mass
+        self.max_ore_mass = max_ore_mass
+        self.prob_new_facies = prob_new_facies
+        self.variation_same_facies = variation_same_facies
+        self.replication_length = replication_length
 
-        self.mine = ConcentratorMineFace(self.config)
+        self.mine = ConcentratorMineFace(
+            mean_ore_fraction=mean_ore_fraction,
+            std_dev_ore_fraction=std_dev_ore_fraction,
+            prob_new_facies=prob_new_facies,
+            variation_same_facies=variation_same_facies,
+            min_ore_mass=min_ore_mass,
+            max_ore_mass=max_ore_mass,
+            total_ore_to_extract=total_ore_to_extract,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        )
         self.fleet = ContinuousFleetLogistics()
 
-        initial_fraction = self.config.mean_ore_fraction
-        initial_mass1 = (1 - initial_fraction) * self.config.target_ore_stock_level
+        initial_fraction = mean_ore_fraction
+        initial_mass1 = (1 - initial_fraction) * target_ore_stock_level
         self.ore1_stock = Stockpile(
             name="Ore1Stock",
             expected_attributes=["contained_ore_fraction_mass"],
             initial_mass=initial_mass1,
             initial_attributes={
-                "contained_ore_fraction_mass": initial_mass1
-                * self.config.mean_ore_fraction
+                "contained_ore_fraction_mass": initial_mass1 * mean_ore_fraction
             },
         )
-        initial_mass2 = initial_fraction * self.config.target_ore_stock_level
+        initial_mass2 = initial_fraction * target_ore_stock_level
         self.ore2_stock = Stockpile(
             name="Ore2Stock",
             expected_attributes=["contained_ore_fraction_mass"],
             initial_mass=initial_mass2,
             initial_attributes={
-                "contained_ore_fraction_mass": initial_mass2
-                * self.config.mean_ore_fraction
+                "contained_ore_fraction_mass": initial_mass2 * mean_ore_fraction
             },
         )
 
         self.plant = ConcentratorPlant(
-            self.config, self.mine, self.fleet, self.ore1_stock, self.ore2_stock
+            self.mine, self.fleet, self.ore1_stock, self.ore2_stock
         )
         self.controller = ConcentratorController(
-            self.config, self.mine, self.fleet, self.plant
+            mine=self.mine,
+            fleet=self.fleet,
+            plant=self.plant,
+            target_ore_stock_level=target_ore_stock_level,
+            critical_ore2_level=critical_ore2_level,
+            duration_of_production_campaigns=duration_of_production_campaigns,
+            duration_of_shutdowns=duration_of_shutdowns,
+            duration_of_contingency_segments=duration_of_contingency_segments,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
         )
 
         self.setup_telemetry()
 
 
 class ActiveFleetConcentratorModel(BaseBlendingModel):
-    def __init__(self, config: ConcentratorConfig, enable_telemetry: bool = False):
-        super().__init__(config, enable_telemetry)
+    def __init__(
+        self,
+        mean_ore_fraction: float = 0.30,
+        std_dev_ore_fraction: float = 0.05,
+        target_ore_stock_level: float = 60000.0,
+        total_ore_to_extract: float = 6600000.0,
+        ore_to_be_extracted_during_warming_period: float = 600000.0,
+        critical_ore2_level: float = 20400.0,
+        duration_of_production_campaigns: float = 34.0,
+        duration_of_shutdowns: float = 1.0,
+        duration_of_contingency_segments: float = 1.0,
+        prob_new_facies: float = 0.3,
+        variation_same_facies: float = 0.01,
+        replication_length: float = math.inf,
+        mode_a_ore1_milling_rate: float = 3600.0,
+        mode_a_ore2_milling_rate: float = 2400.0,
+        mode_a_contingency_ore1_milling_rate: float = 3900.0,
+        mode_b_ore1_milling_rate: float = 4600.0,
+        mode_b_ore2_milling_rate: float = 800.0,
+        mode_b_contingency_ore2_milling_rate: float = 2500.0,
+        fleet_shift_duration: float = 0.5,
+        total_lhd_count: float = 3.0,
+        total_truck_count: float = 10.0,
+        max_lhds_per_face: float = 2.0,
+        max_trucks_per_face: float = 6.0,
+        face_haul_distance: tuple = (1.5, 2.2),
+        face_accessibility_fraction: tuple = (0.93, 0.91),
+        truck_velocity: float = 15.0,
+        loader_cycle_time_hours: float = 0.0833,
+        truck_dump_time_hours: float = 0.033,
+        traffic_delay_per_truck_hours: float = 0.015,
+        fleet_mechanical_availability: float = 0.85,
+        loader_payload_tonnes: float = 15.0,
+        truck_payload_tonnes: float = 30.0,
+        development_rate_per_extra_truck: float = 50.0,
+        enable_telemetry: bool = False,
+    ):
+        super().__init__(
+            total_ore_to_extract=total_ore_to_extract,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+            target_ore_stock_level=target_ore_stock_level,
+            enable_telemetry=enable_telemetry,
+        )
+        self.mean_ore_fraction = mean_ore_fraction
+        self.std_dev_ore_fraction = std_dev_ore_fraction
+        self.replication_length = replication_length
 
         gen1 = StochasticFaciesGenerator(
             mean_fraction=0.15,
             std_dev=0.075,
-            prob_new_facies=config.prob_new_facies,
-            variation_same_facies=config.variation_same_facies,
+            prob_new_facies=prob_new_facies,
+            variation_same_facies=variation_same_facies,
         )
         gen2 = StochasticFaciesGenerator(
             mean_fraction=0.45,
             std_dev=0.025,
-            prob_new_facies=config.prob_new_facies,
-            variation_same_facies=config.variation_same_facies,
+            prob_new_facies=prob_new_facies,
+            variation_same_facies=variation_same_facies,
         )
 
-        self.face1 = ContinuousMineFace(config, face_id=1, generator=gen1)
-        self.face2 = ContinuousMineFace(config, face_id=2, generator=gen2)
+        self.face1 = ContinuousMineFace(
+            face_id=1,
+            generator=gen1,
+            total_ore_to_extract=total_ore_to_extract,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        )
+        self.face2 = ContinuousMineFace(
+            face_id=2,
+            generator=gen2,
+            total_ore_to_extract=total_ore_to_extract,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        )
         self.fleet = ContinuousFleetLogistics()
 
-        initial_fraction = self.config.mean_ore_fraction
-        initial_mass1 = (1 - initial_fraction) * config.target_ore_stock_level
+        initial_fraction = mean_ore_fraction
+        initial_mass1 = (1 - initial_fraction) * target_ore_stock_level
         self.ore1_stock = Stockpile(
             name="Ore1Stock",
             expected_attributes=["contained_ore_fraction_mass"],
@@ -208,7 +319,7 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
                 "contained_ore_fraction_mass": initial_mass1 * initial_fraction
             },
         )
-        initial_mass2 = initial_fraction * config.target_ore_stock_level
+        initial_mass2 = initial_fraction * target_ore_stock_level
         self.ore2_stock = Stockpile(
             name="Ore2Stock",
             expected_attributes=["contained_ore_fraction_mass"],
@@ -219,11 +330,40 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
         )
 
         self.plant = ConcentratorPlant(
-            config, None, self.fleet, self.ore1_stock, self.ore2_stock
+            None, self.fleet, self.ore1_stock, self.ore2_stock
         )
 
         self.controller = MultiFaceConcentratorController(
-            config, faces=[self.face1, self.face2], fleet=self.fleet, plant=self.plant
+            faces=[self.face1, self.face2],
+            fleet=self.fleet,
+            plant=self.plant,
+            target_ore_stock_level=target_ore_stock_level,
+            critical_ore2_level=critical_ore2_level,
+            duration_of_production_campaigns=duration_of_production_campaigns,
+            duration_of_shutdowns=duration_of_shutdowns,
+            duration_of_contingency_segments=duration_of_contingency_segments,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+            mode_a_ore1_milling_rate=mode_a_ore1_milling_rate,
+            mode_a_ore2_milling_rate=mode_a_ore2_milling_rate,
+            mode_a_contingency_ore1_milling_rate=mode_a_contingency_ore1_milling_rate,
+            mode_b_ore1_milling_rate=mode_b_ore1_milling_rate,
+            mode_b_ore2_milling_rate=mode_b_ore2_milling_rate,
+            mode_b_contingency_ore2_milling_rate=mode_b_contingency_ore2_milling_rate,
+            fleet_shift_duration=fleet_shift_duration,
+            total_lhd_count=total_lhd_count,
+            total_truck_count=total_truck_count,
+            max_lhds_per_face=max_lhds_per_face,
+            max_trucks_per_face=max_trucks_per_face,
+            face_haul_distance=face_haul_distance,
+            face_accessibility_fraction=face_accessibility_fraction,
+            truck_velocity=truck_velocity,
+            loader_cycle_time_hours=loader_cycle_time_hours,
+            truck_dump_time_hours=truck_dump_time_hours,
+            traffic_delay_per_truck_hours=traffic_delay_per_truck_hours,
+            fleet_mechanical_availability=fleet_mechanical_availability,
+            loader_payload_tonnes=loader_payload_tonnes,
+            truck_payload_tonnes=truck_payload_tonnes,
+            development_rate_per_extra_truck=development_rate_per_extra_truck,
         )
 
         self.setup_telemetry()
@@ -284,39 +424,39 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
             )
             self.telemetry.register_metric(
                 "face1_real_capacity",
-                lambda t, m, s, h: m.controller.face_real_extraction_rates[0].value
+                lambda t, m, s, h: m.controller.face_real_extraction_rates[0].value,
             )
             self.telemetry.register_metric(
                 "face1_target_rate",
-                lambda t, m, s, h: m.controller.face_target_rates[0].value
+                lambda t, m, s, h: m.controller.face_target_rates[0].value,
             )
             self.telemetry.register_metric(
                 "face1_match_factor",
-                lambda t, m, s, h: m.controller.face_match_factors[0].value 
+                lambda t, m, s, h: m.controller.face_match_factors[0].value,
             )
             self.telemetry.register_metric(
                 "face1_truck_cycle_time_hours",
-                lambda t, m, s, h: m.controller.face_truck_cycle_times[0].value
+                lambda t, m, s, h: m.controller.face_truck_cycle_times[0].value,
             )
             self.telemetry.register_metric(
                 "face2_real_capacity",
-                lambda t, m, s, h: m.controller.face_real_extraction_rates[1].value
+                lambda t, m, s, h: m.controller.face_real_extraction_rates[1].value,
             )
             self.telemetry.register_metric(
                 "face2_target_rate",
-                lambda t, m, s, h: m.controller.face_target_rates[1].value
+                lambda t, m, s, h: m.controller.face_target_rates[1].value,
             )
             self.telemetry.register_metric(
                 "face2_match_factor",
-                lambda t, m, s, h: m.controller.face_match_factors[1].value 
+                lambda t, m, s, h: m.controller.face_match_factors[1].value,
             )
             self.telemetry.register_metric(
                 "face2_truck_cycle_time_hours",
-                lambda t, m, s, h: m.controller.face_truck_cycle_times[1].value
+                lambda t, m, s, h: m.controller.face_truck_cycle_times[1].value,
             )
             self.telemetry.register_metric(
                 "total_unused_trucks",
-                lambda t, m, s, h: m.controller.total_extra_trucks.value
+                lambda t, m, s, h: m.controller.total_extra_trucks.value,
             )
             self.telemetry.register_metric(
                 "ore2_ratio",
@@ -374,9 +514,6 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
             )
 
     def setup_telemetry(self):
-        # NOTE: Intentionally NOT calling super().setup_telemetry() because
-        # the base class registers metrics referencing m.mine which is None
-        # in the multi-face case. Face/parcel metrics are registered below.
         if self.enable_telemetry:
             self.telemetry = Telemetry(self)
             self.register_post_step_hook(self.telemetry.snapshot)
@@ -413,4 +550,4 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
             self.face1.cumulative_extracted_mass.value
             + self.face2.cumulative_extracted_mass.value
         )
-        return total_extracted >= self.config.total_ore_to_extract
+        return total_extracted >= self.total_ore_to_extract

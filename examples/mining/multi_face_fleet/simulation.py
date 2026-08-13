@@ -25,7 +25,6 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from drs_mining.components import (
-    ConcentratorConfig,
     ConcentratorModel,
     ActiveFleetConcentratorModel,
 )
@@ -33,27 +32,24 @@ from drs_mining.components.controllers import MultiFaceConcentratorController
 from drs import DRSEngine
 
 
-def evaluate_throughput(config: ConcentratorConfig, N: int) -> tuple[float, float]:
+def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, float]:
     """
     Runs the simulation N times, extracting throughputs.
     Returns (mean_throughput, std_dev_throughput).
     """
+    kwargs = config_kwargs or {}
     throughputs = []
 
     for idx in range(N):
-        # By setting the replication length very high we let it hit the 6.6M extraction condition
-        # and then the model automatically terminates
-        sim = ActiveFleetConcentratorModel(config)
+        sim = ActiveFleetConcentratorModel(**kwargs)
 
         engine = DRSEngine(sim)
 
-        # Set a random seed so different replications are different
         np.random.seed(idx)
         random.seed(idx)
 
-        engine.run(max_time=config.replication_length)
+        engine.run(max_time=kwargs.get("replication_length", float("inf")))
 
-        # Calculate Throughput manually as the paper defined it
         active_time = (
             engine.current_time - sim.controller.cumulative_time_shutdown.value
         )
@@ -78,13 +74,13 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
 
     print(f"\n--- Running Monte Carlo Evaluation for Standard (N={N}) ---")
     for sigma in sigmas:
-        config = ConcentratorConfig(
+        config_kwargs = dict(
             replication_length=99999.0,
             std_dev_ore_fraction=sigma / 100.0,
             target_ore_stock_level=total_stockpile_level,
             prob_new_facies=0.3,
         )
-        mean, std = evaluate_throughput(config, N)
+        mean, std = evaluate_throughput(config_kwargs, N)
         results.append((sigma, mean, std))
         print(f"Sigma: {sigma}%, Mean Throughput: {mean:.2f}, Std Dev: {std:.2f}")
 
@@ -127,23 +123,6 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
 import types
 
 
-def _apply_equal_allocation(sim):
-    n = len(sim.controller.faces)
-    fracs = [1.0 / n] * n
-    # Force the physical fleet dispatch to always be evenly split
-    for k in sim.controller._mode_allocations.keys():
-        sim.controller._mode_allocations[k] = fracs
-
-    orig_forward = sim.controller.forward
-
-    def _equal_forward(self):
-        orig_forward()  # wait, orig_forward is bound method?
-        # If we use types.MethodType, orig_forward is an unbound function?
-        # Actually in run_and_analyze we did orig_forward = MultiFaceConcentratorController.forward
-        pass
-
-
-# Let's write it cleaner.
 def _apply_equal_allocation_to_sim(sim):
     from drs_mining.components.controllers import MultiFaceConcentratorController
     import types
@@ -168,8 +147,8 @@ def _apply_equal_allocation_to_sim(sim):
 
 def _run_capacity_case(
     label: str,
-    config: ConcentratorConfig,
-    max_time: float,
+    config_kwargs: dict = None,
+    max_time: float = 60.0,
     equal_allocation: bool = False,
     np_seed: int = 42,
     random_seed: int = 11,
@@ -179,7 +158,8 @@ def _run_capacity_case(
     np.random.seed(np_seed)
     random.seed(random_seed)
 
-    sim = ActiveFleetConcentratorModel(config, enable_telemetry=True)
+    kwargs = config_kwargs or {}
+    sim = ActiveFleetConcentratorModel(enable_telemetry=True, **kwargs)
     if equal_allocation:
         _apply_equal_allocation_to_sim(sim)
 
@@ -246,7 +226,7 @@ def _run_capacity_case(
 
 
 def run_capacity_comparison(
-    base_config: ConcentratorConfig,
+    base_kwargs: dict = None,
     max_time: float = 60.0,
 ):
     import pandas as pd
@@ -262,7 +242,7 @@ def run_capacity_comparison(
     summaries = []
     for label, is_equal in cases:
         df, summary = _run_capacity_case(
-            label, base_config, max_time=max_time, equal_allocation=is_equal
+            label, base_kwargs, max_time=max_time, equal_allocation=is_equal
         )
         frames.append(df)
         summaries.append(summary)
@@ -910,7 +890,7 @@ if __name__ == "__main__":
     # You can also run it a single time and print out the statistics to evaluate how it spends time
     np.random.seed(42)
     random.seed(11)
-    config = ConcentratorConfig(
+    config_kwargs = dict(
         replication_length=99999.0,
         target_ore_stock_level=args.total_stockpile_level,
         std_dev_ore_fraction=args.std_dev_ore_fraction,
@@ -918,14 +898,14 @@ if __name__ == "__main__":
     )
 
     if args.compare_capacity_cases:
-        run_capacity_comparison(config, max_time=args.comparison_max_time)
+        run_capacity_comparison(config_kwargs, max_time=args.comparison_max_time)
         raise SystemExit(0)
 
     df_managed = run_and_analyze(
-        config, equal_allocation=False, name="Dynamic Fleet Allocation"
+        config_kwargs, equal_allocation=False, name="Dynamic Fleet Allocation"
     )
     df_equal = run_and_analyze(
-        config, equal_allocation=True, name="Equal Fleet Allocation"
+        config_kwargs, equal_allocation=True, name="Equal Fleet Allocation"
     )
 
     # Print summary comparison
