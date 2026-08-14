@@ -1,4 +1,5 @@
 from .config import ConcentratorConfig
+from .planning import AreaReadinessTarget, MiningPriority, StrategicYearTarget
 from .modes import MODES, OperatingMode, RequireDecision
 from .generators import StochasticFaciesGenerator
 from .fleet import ContinuousFleetLogistics
@@ -19,4 +20,7 @@ __all__ = [
     "MultiFaceConcentratorController",
     "ContinuousMineFace",
     "Stockpile",
+    "MiningPriority",
+    "StrategicYearTarget",
+    "AreaReadinessTarget",
 ]
