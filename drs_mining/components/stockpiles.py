@@ -38,11 +38,15 @@ class Stockpile(drs.Module):
     def forward(self, requested_outflow_rate, inflow=None) -> "Flow":
         if inflow is not None:
             material = inflow.value
-            self.current_mass.rate = material.extraction_rate
-            for attr in self.expected_attributes:
-                getattr(self, attr).rate = (
-                    material.extraction_rate * material.attr_value
-                )
+            inflow_rate = material.extraction_rate
+            inflow_attr = material.attr_value
+        else:
+            inflow_rate = 0.0
+            inflow_attr = 0.0
+
+        self.current_mass.rate = inflow_rate
+        for attr in self.expected_attributes:
+            getattr(self, attr).rate = inflow_rate * inflow_attr
 
         current_inflow = self.current_mass.rate
 

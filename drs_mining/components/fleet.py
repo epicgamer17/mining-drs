@@ -98,8 +98,10 @@ class ContinuousFleetLogistics(drs.Module):
 
         if total_rate > 1e-6:
             self.stockpile2_routing_fraction.value = total_ore2_rate / total_rate
-        else:
-            self.stockpile2_routing_fraction.value = 0.0
+        elif len(mine_flows) > 0 and mine_flows[0] is not None:
+            out = mine_flows[0].value
+            if hasattr(out, "attr_value"):
+                self.stockpile2_routing_fraction.value = out.attr_value
 
         # Output pure Ore 1 rate and pure Ore 2 rate
         return Flow(value=MineOutput(extraction_rate=total_ore1_rate, attr_value=1.0)), Flow(

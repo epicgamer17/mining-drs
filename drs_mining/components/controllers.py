@@ -163,6 +163,8 @@ class BaseBlendingController(drs.Module):
         self.target_stock2_outflow_rate.value = targets.ore2_milling_rate
 
     def _update_timers(self, m: str):
+        for timer_name in self._TIMER_MAP.values():
+            getattr(self, timer_name).rate = 0.0
         timer_attr = self._TIMER_MAP.get(m)
         if timer_attr:
             getattr(self, timer_attr).rate = 1.0
@@ -177,6 +179,8 @@ class BaseBlendingController(drs.Module):
             self.current_contingency_duration.upper_threshold = (
                 self.duration_of_contingency_segments
             )
+        else:
+            self.current_contingency_duration.rate = 0.0
 
     def _choose_next_campaign_mode(self):
         ore2 = self.parent.ore2_mass

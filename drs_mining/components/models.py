@@ -525,7 +525,6 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
     def setup_telemetry(self):
         if self.enable_telemetry:
             self.telemetry = Telemetry(self)
-            self.register_post_step_hook(self.telemetry.snapshot)
             self.telemetry.register_metric(
                 "Campaign_Shutdown",
                 lambda t, m, s, _: m.controller.current_campaign_duration.value,

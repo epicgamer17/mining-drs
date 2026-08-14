@@ -87,11 +87,13 @@ class OperatingMode:
             target_stock = getattr(ctrl, "target_ore_stock_level", 60000.0)
             model.controller.total_system_ore_mass.lower_threshold = target_stock
             p = model.stockpile2_routing_fraction
+            if p <= 1e-4 and hasattr(model, "mine") and hasattr(model.mine, "_get_current_attr_value"):
+                p = model.mine._get_current_attr_value()
             if self._name in ("MODE_A_MINE_SURGING"):
-                effective_fraction = max(1.0 - p, 1e-6)
+                effective_fraction = max(1.0 - p, 0.01)
                 raw_extraction = ore1 / effective_fraction
             else:
-                effective_fraction = max(p, 1e-6)
+                effective_fraction = max(p, 0.01)
                 raw_extraction = ore2 / effective_fraction
             extraction = raw_extraction
             return TargetRates(
