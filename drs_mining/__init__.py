@@ -3,12 +3,16 @@ import logging
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 from drs_mining.components import (
+    Storage,
+    Processor,
     BaseBlendingModel,
     ConcentratorModel,
     ActiveFleetConcentratorModel,
     MultiFaceConcentratorController,
+    BaseMineFace,
     ContinuousMineFace,
     ConcentratorMineFace,
+    BaseMetallurgicalPlant,
     ConcentratorPlant,
     ConcentratorController,
     Stockpile,
@@ -25,12 +29,16 @@ from drs_mining.controllers.dispatch import ShelswellDispatchController
 from drs_mining.simulation import ShelswellHybridSimulation
 
 __all__ = [
+    "Storage",
+    "Processor",
     "BaseBlendingModel",
     "ConcentratorModel",
     "ActiveFleetConcentratorModel",
     "MultiFaceConcentratorController",
+    "BaseMineFace",
     "ContinuousMineFace",
     "ConcentratorMineFace",
+    "BaseMetallurgicalPlant",
     "ConcentratorPlant",
     "ConcentratorController",
     "Stockpile",
@@ -45,3 +53,4 @@ __all__ = [
     "ShelswellDispatchController",
     "ShelswellHybridSimulation",
 ]
+

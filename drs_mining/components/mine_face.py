@@ -1,17 +1,21 @@
+import math
 import random
 import drs
+from drs import Processor
 from drs.flow import Flow
 from .data import MineOutput
 from .generators import StochasticFaciesGenerator
 
 
-class BaseMineFace(drs.Module):
+class BaseMineFace(Processor):
     def __init__(
         self,
+        name: str = "mine_face",
         total_ore_to_extract: float = 6600000.0,
         ore_to_be_extracted_during_warming_period: float = 600000.0,
+        max_rate: float = math.inf,
     ):
-        super().__init__()
+        super().__init__(name=name, max_rate=max_rate)
         self.total_ore_to_extract = total_ore_to_extract
         self.ore_to_be_extracted_during_warming_period = (
             ore_to_be_extracted_during_warming_period
@@ -52,6 +56,9 @@ class BaseMineFace(drs.Module):
         else:
             target_extraction_rate = 0.0
 
+        self.target_rate = target_extraction_rate
+        actual_rate = self.actual_rate
+
         if (
             self.parcel_extracted_mass.value
             >= self.active_parcel_initial_mass.value - 1e-6
@@ -78,11 +85,11 @@ class BaseMineFace(drs.Module):
             self.active_parcel_initial_mass.value
         )
 
-        self.cumulative_extracted_mass.rate = target_extraction_rate
-        self.parcel_extracted_mass.rate = target_extraction_rate
+        self.cumulative_extracted_mass.rate = actual_rate
+        self.parcel_extracted_mass.rate = actual_rate
         return Flow(
             value=MineOutput(
-                extraction_rate=target_extraction_rate,
+                extraction_rate=actual_rate,
                 attr_value=self._get_current_attr_value(),
             )
         )
@@ -99,10 +106,14 @@ class ConcentratorMineFace(BaseMineFace):
         max_ore_mass: float = 50000.0,
         total_ore_to_extract: float = 6600000.0,
         ore_to_be_extracted_during_warming_period: float = 600000.0,
+        max_rate: float = math.inf,
+        name: str = "concentrator_mine_face",
     ):
         super().__init__(
+            name=name,
             total_ore_to_extract=total_ore_to_extract,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+            max_rate=max_rate,
         )
         self.mean_ore_fraction = mean_ore_fraction
         self.std_dev_ore_fraction = std_dev_ore_fraction
@@ -152,10 +163,13 @@ class ContinuousMineFace(BaseMineFace):
         max_ore_mass: float = 50000.0,
         total_ore_to_extract: float = 6600000.0,
         ore_to_be_extracted_during_warming_period: float = 600000.0,
+        max_rate: float = math.inf,
     ):
         super().__init__(
+            name=f"mine_face_{face_id}",
             total_ore_to_extract=total_ore_to_extract,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+            max_rate=max_rate,
         )
         self.face_id = face_id
         self.generator = generator
@@ -188,9 +202,14 @@ class ContinuousMineFace(BaseMineFace):
 
     def forward(self, target_rate=None):
         if target_rate is not None:
-            target_extraction_rate = target_rate.value
+            target_extraction_rate = (
+                target_rate.value if hasattr(target_rate, "value") else target_rate
+            )
         else:
             target_extraction_rate = 0.0
+
+        self.target_rate = target_extraction_rate
+        actual_rate = self.actual_rate
 
         if (
             self.parcel_extracted_mass.value
@@ -218,12 +237,13 @@ class ContinuousMineFace(BaseMineFace):
             self.active_parcel_initial_mass.value
         )
 
-        self.cumulative_extracted_mass.rate = target_extraction_rate
-        self.parcel_extracted_mass.rate = target_extraction_rate
+        self.cumulative_extracted_mass.rate = actual_rate
+        self.parcel_extracted_mass.rate = actual_rate
 
         return Flow(
             value=MineOutput(
-                extraction_rate=target_extraction_rate,
+                extraction_rate=actual_rate,
                 attr_value=self.active_parcel_ore_fraction.value,
             )
         )
+

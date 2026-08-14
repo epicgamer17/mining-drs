@@ -1,22 +1,28 @@
+import math
 from typing import List, Dict, Optional
 
 import drs
+from drs import Storage
 from drs.flow import Flow
 
 
-class Stockpile(drs.Module):
+class Stockpile(Storage):
+    """Stockpile component inheriting from drs.Storage."""
+
     def __init__(
         self,
         name: str,
         expected_attributes: List[str],
         initial_mass: float = 0.0,
         initial_attributes: Optional[Dict[str, float]] = None,
+        capacity: float = math.inf,
     ):
-        super().__init__()
+        super().__init__(name=f"{name}_mass", capacity=capacity, initial_level=initial_mass)
         self.name = name
         self.expected_attributes = expected_attributes
 
-        self.current_mass = drs.Level(f"{name}_mass", initial_value=initial_mass)
+        # Bind current_mass to Storage's underlying Level for compatibility
+        self.current_mass = self._level
         self.actual_outflow_rate = drs.Variable(f"{name}_actual_outflow_rate", 0.0)
 
         initial_attributes = initial_attributes or {}
@@ -33,7 +39,7 @@ class Stockpile(drs.Module):
         level = getattr(self, attr, None)
         if level is None:
             return 0.0
-        return level.value / max(1e-6, self.current_mass.value)
+        return level.value / max(1e-6, self.level)
 
     def forward(self, requested_outflow_rate, inflow=None) -> "Flow":
         if inflow is not None:
@@ -51,7 +57,7 @@ class Stockpile(drs.Module):
         current_inflow = self.current_mass.rate
 
         actual_outflow = requested_outflow_rate.value
-        if self.current_mass.value <= 1e-6:
+        if self.level <= 1e-6:
             actual_outflow = min(actual_outflow, current_inflow)
 
         for attr in self.expected_attributes:
@@ -67,3 +73,4 @@ class Stockpile(drs.Module):
 
         self.actual_outflow_rate.value = actual_outflow
         return Flow(value=actual_outflow)
+
