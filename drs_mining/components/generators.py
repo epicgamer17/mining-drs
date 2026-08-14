@@ -3,7 +3,7 @@ import drs
 from drs.flow import Flow
 
 
-class StochasticFaciesGenerator(drs.DataSource):
+class StochasticFaciesGenerator(drs.Module):
     """
     Generates autocorrelated ore fractions using a facies model.
     Decoupled from physical mass generation.
@@ -23,16 +23,11 @@ class StochasticFaciesGenerator(drs.DataSource):
         
         self.next_is_new_facies = True
         self.current_fraction = mean_fraction
-        self.first_call = True
 
     def forward(self):
         return Flow(value=next(self))
 
     def __next__(self) -> drs.DataPoint:
-        if self.first_call:
-            self.first_call = False
-            return drs.DataPoint(ore1_frac=self.mean_fraction)
-
         if self.next_is_new_facies:
             if self.std_dev != 0:
                 fraction = random.gauss(self.mean_fraction, self.std_dev)

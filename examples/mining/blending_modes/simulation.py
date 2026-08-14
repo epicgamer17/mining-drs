@@ -26,12 +26,12 @@ def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
     throughputs = []
 
     for idx in range(N):
+        np.random.seed(idx)
+        random.seed(idx)
+
         sim = ConcentratorModel(**config_kwargs)
 
         engine = DRSEngine(sim)
-
-        np.random.seed(idx)
-        random.seed(idx)
 
         engine.run(max_time=config_kwargs.get("replication_length", float("inf")))
 
@@ -120,7 +120,7 @@ if __name__ == "__main__":
 
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
-    engine = DRSEngine(sim, progress_bar=True, log_level="INFO")
+    engine = DRSEngine(sim, progress_bar=False, log_level="INFO")
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
     result = engine.run(max_time=99999.0)

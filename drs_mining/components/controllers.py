@@ -152,7 +152,7 @@ class BaseBlendingController(drs.Module):
             if decision:
                 next_mode = decision
 
-        if next_mode:
+        if next_mode and not isinstance(next_mode, RequireDecision):
             self.active_operating_mode.value = next_mode
 
         self._update_timers(self.active_operating_mode.value.name)

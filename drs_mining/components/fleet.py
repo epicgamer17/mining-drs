@@ -91,9 +91,9 @@ class ContinuousFleetLogistics(drs.Module):
         for flow in mine_flows:
             if flow is not None:
                 out = flow.value
-                ore1_frac = out.attr_value
-                total_ore1_rate += out.extraction_rate * ore1_frac
-                total_ore2_rate += out.extraction_rate * (1.0 - ore1_frac)
+                ore2_frac = out.attr_value
+                total_ore2_rate += out.extraction_rate * ore2_frac
+                total_ore1_rate += out.extraction_rate * (1.0 - ore2_frac)
                 total_rate += out.extraction_rate
 
         if total_rate > 1e-6:

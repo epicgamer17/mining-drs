@@ -118,19 +118,18 @@ class ConcentratorMineFace(BaseMineFace):
             variation_same_facies=self.variation_same_facies,
         )
         self.active_parcel_ore_fraction = drs.Variable(
-            "active_parcel_ore_fraction", 0.0
+            "active_parcel_ore_fraction", self.mean_ore_fraction
         )
-        self._load_next_batch()
+        self.active_parcel_initial_mass.value = 40000.0
 
     def _load_next_batch(self):
         try:
-            parcel_flow = self.generator()
-            parcel = parcel_flow.value
-
             self.active_parcel_initial_mass.value = random.uniform(
                 self.min_ore_mass, self.max_ore_mass
             )
-            self.active_parcel_ore_fraction.value = 1.0 - parcel.ore1_frac
+            parcel_flow = self.generator()
+            parcel = parcel_flow.value
+            self.active_parcel_ore_fraction.value = parcel.ore1_frac
         except StopIteration:
             pass
 
