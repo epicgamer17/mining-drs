@@ -27,7 +27,8 @@ def test_truck_discrete_state():
 
 def test_road_availability_timer():
     module = HybridDRSModule()
-    engine = drs.DRSEngine(module)
+    engine = drs.DRSEngine()
+    engine.register(module)
     road = DRSRoadSegment(engine, "test_segment", length_m=100.0, segment_type="decline")
 
     assert road.is_available()
@@ -44,7 +45,8 @@ def test_road_availability_timer():
 
 def test_loading_and_dumping_bays():
     module = HybridDRSModule()
-    engine = drs.DRSEngine(module)
+    engine = drs.DRSEngine()
+    engine.register(module)
     bay = DRSLoadingBay(engine, "L1_ORE", "ORE", 1, initial_muck=1000.0)
     truck = Truck(truck_id="T01")
 

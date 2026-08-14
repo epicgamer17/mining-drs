@@ -37,7 +37,7 @@ class BaseMineFace(drs.Module):
         )
 
     def _load_next_batch(self):
-        raise NotImplementedError("Subclasses must define how to parse the DataPoint.")
+        raise NotImplementedError("Subclasses must define how to parse the generator output.")
 
     def _get_current_attr_value(self) -> float:
         raise NotImplementedError("Subclasses must define current ore attribute value.")
@@ -129,7 +129,13 @@ class ConcentratorMineFace(BaseMineFace):
             )
             parcel_flow = self.generator()
             parcel = parcel_flow.value
-            self.active_parcel_ore_fraction.value = parcel.ore1_frac
+            if isinstance(parcel, dict):
+                ore1_frac = parcel["ore1_frac"]
+            elif hasattr(parcel, "ore1_frac"):
+                ore1_frac = parcel.ore1_frac
+            else:
+                ore1_frac = float(parcel)
+            self.active_parcel_ore_fraction.value = ore1_frac
         except StopIteration:
             pass
 
@@ -167,7 +173,13 @@ class ContinuousMineFace(BaseMineFace):
             self.active_parcel_initial_mass.value = random.uniform(
                 self.min_ore_mass, self.max_ore_mass
             )
-            self.active_parcel_ore_fraction.value = 1.0 - parcel.ore1_frac
+            if isinstance(parcel, dict):
+                ore1_frac = parcel["ore1_frac"]
+            elif hasattr(parcel, "ore1_frac"):
+                ore1_frac = parcel.ore1_frac
+            else:
+                ore1_frac = float(parcel)
+            self.active_parcel_ore_fraction.value = 1.0 - ore1_frac
         except StopIteration:
             pass
 

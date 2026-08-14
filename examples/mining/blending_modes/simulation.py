@@ -31,9 +31,10 @@ def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
 
         sim = ConcentratorModel(**config_kwargs)
 
-        engine = DRSEngine(sim)
+        engine = DRSEngine()
+        engine.register(sim)
 
-        engine.run(max_time=config_kwargs.get("replication_length", float("inf")))
+        engine.run(until=config_kwargs.get("replication_length", float("inf")))
 
         active_time = sim.controller.active_duration(engine.current_time)
         if active_time > 0:
@@ -120,10 +121,11 @@ if __name__ == "__main__":
 
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
-    engine = DRSEngine(sim, progress_bar=False, log_level="INFO")
+    engine = DRSEngine()
+    engine.register(sim)
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
-    result = engine.run(max_time=99999.0)
+    result = engine.run(until=99999.0)
 
     print(result.summary())
 

@@ -43,12 +43,13 @@ def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, 
     for idx in range(N):
         sim = ActiveFleetConcentratorModel(**kwargs)
 
-        engine = DRSEngine(sim)
+        engine = DRSEngine()
+        engine.register(sim)
 
         np.random.seed(idx)
         random.seed(idx)
 
-        engine.run(max_time=kwargs.get("replication_length", float("inf")))
+        engine.run(until=kwargs.get("replication_length", float("inf")))
 
         active_time = sim.controller.active_duration(engine.current_time)
         if active_time > 0:
@@ -159,8 +160,9 @@ def _run_capacity_case(
 
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
-    engine = DRSEngine(sim)
-    engine.run(max_time=max_time)
+    engine = DRSEngine()
+    engine.register(sim)
+    engine.run(until=max_time)
 
     df = sim.telemetry.to_dataframe()
     df["scenario"] = label
@@ -490,7 +492,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     """Run the multi-face simulation and produce full diagnostics dashboard."""
     np.random.seed(42)
     random.seed(11)
-    sim = ActiveFleetConcentratorModel(config, enable_telemetry=True)
+    sim = ActiveFleetConcentratorModel(enable_telemetry=True, **config)
 
     if equal_allocation:
         _apply_equal_allocation_to_sim(sim)
@@ -499,10 +501,11 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
 
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
-    engine = DRSEngine(sim)
+    engine = DRSEngine()
+    engine.register(sim)
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
-    result = engine.run(max_time=config.replication_length)
+    result = engine.run(until=config.get("replication_length", 99999.0))
     sim.print_statistics()
 
     df = result.history
@@ -523,8 +526,10 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
         print(
             f"Time: {row['time']:.2f} | Transition: {row['prev_mode_name']} -> {row['active_operating_mode_name']}"
         )
+        crit_lvl = config.get("critical_ore2_level", 20400.0)
+        target_lvl = config.get("target_ore_stock_level", 60000.0)
         print(
-            f"  ↳ Ore1 Stock: {row['Ore1Stock_mass']:.1f} | Ore2 Stock: {row['Ore2Stock_mass']:.1f} (Critical: {config.critical_ore2_level}) | Total Stock: {row['total_system_ore_mass']:.1f} (Target: {config.target_ore_stock_level})"
+            f"  ↳ Ore1 Stock: {row['Ore1Stock_mass']:.1f} | Ore2 Stock: {row['Ore2Stock_mass']:.1f} (Critical: {crit_lvl}) | Total Stock: {row['total_system_ore_mass']:.1f} (Target: {target_lvl})"
         )
         print(
             f"  ↳ Campaign/Shutdown Timer: {row['current_campaign_duration']:.2f} | Contingency Timer: {row['current_contingency_duration']:.2f}"
@@ -864,6 +869,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     fig_comp = build_dashboard(
         df, configs, title=f"Comprehensive Mine Diagnostics ({name})", figsize=(18, 69)
     )
+    prefix = name.lower().replace(" ", "_")
     fig_comp.savefig(f"plots/Comprehensive_Diagnostics_Plot_{prefix}.png")
     plt.close(fig_comp)
 

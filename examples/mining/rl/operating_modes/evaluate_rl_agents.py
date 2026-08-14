@@ -532,7 +532,7 @@ def generate_rl_dashboard(
                 [terminated or truncated], dtype=torch.float32, device=device
             )
 
-    result = env.engine.run(max_time=env.config.replication_length)
+    result = env.engine.run(until=env.config.replication_length)
 
     df = result.history
 

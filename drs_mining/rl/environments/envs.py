@@ -109,7 +109,8 @@ class MiningRLEnv(gym.Env):
             replication_length=self.replication_length,
             enable_telemetry=self.enable_telemetry,
         )
-        self.engine = DRSEngine(self.sim)
+        self.engine = DRSEngine()
+        self.engine.register(self.sim)
         if self.enable_telemetry and hasattr(self.sim, "telemetry"):
             self.engine.attach_telemetry(self.sim.telemetry)
         self.last_extraction = 0.0
@@ -117,7 +118,7 @@ class MiningRLEnv(gym.Env):
         self.current_step = 0
 
         try:
-            self.engine.run(max_time=self.replication_length)
+            self.engine.run(until=self.replication_length)
         except RequireDecision:
             pass
 
@@ -159,7 +160,7 @@ class MiningRLEnv(gym.Env):
         self.sim.controller.pending_rl_action = action
 
         try:
-            self.engine.run(max_time=self.replication_length)
+            self.engine.run(until=self.replication_length)
         except RequireDecision:
             pass
 

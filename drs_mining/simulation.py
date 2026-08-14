@@ -50,7 +50,8 @@ class ShelswellHybridSimulation:
 
         # 1. Core DRS Module & Engine
         self.module = HybridDRSModule()
-        self.engine = drs.DRSEngine(self.module)
+        self.engine = drs.DRSEngine()
+        self.engine.register(self.module)
 
         # 2. Mine Topology & Availability Timers
         self.decline = DRSRoadSegment(self.engine, "decline_2100m", 2100.0, "decline")

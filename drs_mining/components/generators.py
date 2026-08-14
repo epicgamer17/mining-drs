@@ -27,7 +27,7 @@ class StochasticFaciesGenerator(drs.Module):
     def forward(self):
         return Flow(value=next(self))
 
-    def __next__(self) -> drs.DataPoint:
+    def __next__(self) -> dict[str, float]:
         if self.next_is_new_facies:
             if self.std_dev != 0:
                 fraction = random.gauss(self.mean_fraction, self.std_dev)
@@ -40,5 +40,5 @@ class StochasticFaciesGenerator(drs.Module):
         self.current_fraction = max(0.0, min(1.0, fraction))
         self.next_is_new_facies = random.random() <= self.prob_new_facies
 
-        return drs.DataPoint(ore1_frac=self.current_fraction)
+        return {"ore1_frac": self.current_fraction}
 
