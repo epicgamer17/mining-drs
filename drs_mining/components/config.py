@@ -1,5 +1,7 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from .planning import AreaReadinessTarget, StrategicYearTarget
 
 
 @dataclass
@@ -21,6 +23,68 @@ class BaseDualStockpileConfig:
     duration_of_shutdowns: float = 1.0
     duration_of_contingency_segments: float = 1.0
     fleet_shift_duration: float = 0.5  # 12 hours; simulation time is in days.
+
+    # Strategic / Tactical planning horizons.
+    # Strategic planning sets annual commitments; the existing controller
+    # reviews progress monthly. Zero targets preserve the current baseline.
+    strategic_period_days: float = 365.0
+    tactical_review_period_days: float = 30.0
+    tactical_progress_tolerance: float = 0.90
+    strategic_targets: tuple = field(
+        default_factory=lambda: (StrategicYearTarget(),)
+    )
+
+    # Future-area readiness is a long-horizon strategic commitment.  It is
+    # tracked cumulatively from the start of strategic planning and does not
+    # reset at the annual boundary.
+    area2_readiness_target: AreaReadinessTarget = field(
+        default_factory=AreaReadinessTarget
+    )
+
+    # Fractions of the EXISTING total development rate allocated specifically to
+    # the future Area 2 project. These are scenario/control assumptions.
+    area2_development_fraction_production: float = 0.35
+    area2_development_fraction_balanced: float = 0.60
+    area2_development_fraction_development: float = 0.85
+
+    # Face index is zero-based; 1 means the second production face.
+    area2_physical_unlock_enabled: bool = True
+    area2_face_index: int = 1
+    area2_redeploy_locked_face_trucks_to_development: bool = True
+
+    # Explicit development unit calibration. The legacy
+    # `development_rate_per_extra_truck=50` is intentionally NOT used as metres.
+    # 5 m per extra-truck-day is a research calibration parameter.
+    development_metres_per_extra_truck_per_day: float = 5.0
+    annual_development_benchmark_metres: float = 10000.0
+
+    # Counterfactual switch used only for the true incremental-NPV comparison.
+    # When True, Area 2 is permanently unavailable and no Area-2 project
+    # development is charged.
+    area2_counterfactual_disable: bool = False
+
+    # Keep operating targets inside the blend that currently available faces can
+    # sustain, especially while the Area 2 face is physically locked.
+    mode_blend_feasibility_enabled: bool = True
+
+    # When annual development falls behind plan and the tactical review selects
+    # DEVELOPMENT, reserve part of the production truck fleet for development.
+    development_priority_truck_reservation_fraction: float = 0.20
+
+    # Strategic economic assumptions.  All unit values/costs default to zero so
+    # strategic accounting does not change physical simulation behaviour.  Value
+    # is recognized when ore is processed by the plant, not when it is mined.
+    annual_discount_rate: float = 0.08
+    ore1_net_value_per_processed_tonne: float = 0.0
+    ore2_net_value_per_processed_tonne: float = 0.0
+    production_cost_per_tonne: float = 0.0
+    development_cost_per_unit: float = 0.0
+    fixed_cost_per_day: float = 0.0
+
+    # Optional strategic proxy for future value unlocked when Area 2 becomes
+    # ready.  Keep at zero when Area 2 production is explicitly modelled later
+    # to avoid double counting future value.
+    area2_future_access_value_at_readiness: float = 0.0
 
     # Helper Constants
     stockout_epsilon: float = 1e-9

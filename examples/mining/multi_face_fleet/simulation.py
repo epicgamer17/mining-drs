@@ -6,8 +6,8 @@ Surging = extreme allocation	Surging must produce an OFF-target blend to drain t
 50/50 face composition	Face means chosen so a 50/50 split matches the single-face's effective 70% ore1.
 """
 
-import sys
 import os
+import sys
 from dataclasses import replace
 
 # Ensure the root directory is on the path so we can import 'examples.mining'
@@ -27,10 +27,14 @@ import matplotlib.pyplot as plt
 from drs_mining.components import (
     ConcentratorConfig,
     ConcentratorModel,
+    StrategicYearTarget,
+    AreaReadinessTarget,
     ActiveFleetConcentratorModel,
 )
 from drs_mining.components.controllers import MultiFaceConcentratorController
 from drs import DRSEngine
+
+os.makedirs("plots", exist_ok=True)
 
 
 def evaluate_throughput(config: ConcentratorConfig, N: int) -> tuple[float, float]:
@@ -124,26 +128,6 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
     print("Saved 'plots/Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
 
 
-import types
-
-
-def _apply_equal_allocation(sim):
-    n = len(sim.controller.faces)
-    fracs = [1.0 / n] * n
-    # Force the physical fleet dispatch to always be evenly split
-    for k in sim.controller._mode_allocations.keys():
-        sim.controller._mode_allocations[k] = fracs
-
-    orig_forward = sim.controller.forward
-
-    def _equal_forward(self):
-        orig_forward()  # wait, orig_forward is bound method?
-        # If we use types.MethodType, orig_forward is an unbound function?
-        # Actually in run_and_analyze we did orig_forward = MultiFaceConcentratorController.forward
-        pass
-
-
-# Let's write it cleaner.
 def _apply_equal_allocation_to_sim(sim):
     from drs_mining.components.controllers import MultiFaceConcentratorController
     import types
@@ -512,6 +496,304 @@ def run_capacity_comparison(
     return combined, summary_df
 
 
+def _mode_duration_summary(df):
+    # Duration by mode using the interval AFTER each recorded state.
+    if df is None or len(df) == 0:
+        return {}, 0.0
+
+    work = df.copy()
+    if "active_operating_mode_name" in work.columns:
+        modes = work["active_operating_mode_name"].astype(str)
+    else:
+        modes = work["active_operating_mode"].apply(
+            lambda x: x.name if x is not None else "None"
+        )
+
+    dt = (work["time"].shift(-1) - work["time"]).fillna(0.0).clip(lower=0.0)
+    duration = {}
+    for mode, interval in zip(modes, dt):
+        duration[mode] = duration.get(mode, 0.0) + float(interval)
+
+    return duration, float(dt.sum())
+
+
+def _print_consistent_output_statistics(df, sim, name):
+    # Print mode shares and throughput from this run's own dataframe history.
+    print(f"\n--- Output Statistics ({name}) ---")
+    duration, total_time = _mode_duration_summary(df)
+    if total_time <= 1e-12:
+        print("No history available.")
+        return
+
+    shutdown_time = duration.get("SHUTDOWN", 0.0)
+    active_time = max(0.0, total_time - shutdown_time)
+
+    def share(mode):
+        return duration.get(mode, 0.0) / total_time
+
+    print(f"PortionOfTimeInModeA: {share('MODE_A'):.4f}")
+    print(f"PortionOfTimeInModeAContingency: {share('MODE_A_CONTINGENCY'):.4f}")
+    print(f"PortionOfTimeInModeAMineSurging: {share('MODE_A_MINE_SURGING'):.4f}")
+    print(f"PortionOfTimeInModeB: {share('MODE_B'):.4f}")
+    print(f"PortionOfTimeInModeBContingency: {share('MODE_B_CONTINGENCY'):.4f}")
+    print(f"PortionOfTimeInModeBMineSurging: {share('MODE_B_MINE_SURGING'):.4f}")
+    print(f"PortionOfTimeInShutdown: {share('SHUTDOWN'):.4f}")
+
+    if active_time > 1e-12 and hasattr(sim.plant, "cumulative_milled_mass"):
+        throughput = float(sim.plant.cumulative_milled_mass.value) / active_time
+        print(f"Throughput: {throughput:.4f} tons/day")
+    else:
+        print("Throughput: unavailable")
+
+def _print_area2_summary(df, name):
+    """Compact physical/economic Area 2 validation summary."""
+    required = [
+        "area2_physical_unlocked",
+        "area2_ready_day",
+        "area2_cumulative_development",
+        "cumulative_area2_processed_ore1",
+        "cumulative_area2_processed_ore2",
+        "area2_incremental_npv",
+        "operating_npv_proxy",
+    ]
+    if any(c not in df.columns for c in required) or len(df) == 0:
+        return
+
+    final = df.iloc[-1]
+    unlocked = df[df["area2_physical_unlocked"] == True]
+    unlock_sim_day = float(unlocked["time"].iloc[0]) if len(unlocked) else -1.0
+
+    print(f"\n--- Area 2 Summary ({name}) ---")
+    print(f"Area 2 first physical unlock simulation day: {unlock_sim_day:.2f}")
+    print(f"Area 2 strategic ready day: {float(final['area2_ready_day']):.2f}")
+    print(f"Area 2 development: {float(final['area2_cumulative_development']):,.1f}")
+    print(
+        "Area 2 processed tonnes: "
+        f"Ore1={float(final['cumulative_area2_processed_ore1']):,.1f}, "
+        f"Ore2={float(final['cumulative_area2_processed_ore2']):,.1f}"
+    )
+    print(f"Area 2 attributed NPV (within-run): C${float(final['area2_incremental_npv']):,.0f}")
+    print(f"Whole-mine operating NPV proxy: C${float(final['operating_npv_proxy']):,.0f}")
+    print("-------------------------------------------")
+
+
+def _area2_run_summary(with_area2_df):
+    final = with_area2_df.iloc[-1]
+    unlocked = with_area2_df[with_area2_df["area2_physical_unlocked"] == True]
+    unlock_sim_day = float(unlocked["time"].iloc[0]) if len(unlocked) else -1.0
+
+    return {
+        "area2_ready_day": float(final.get("area2_ready_day", -1.0)),
+        "area2_first_unlock_simulation_day": unlock_sim_day,
+        "area2_completed_late": bool(final.get("area2_completed_late", False)),
+        "area2_deadline_missed": bool(final.get("area2_deadline_missed", False)),
+        "area2_development_m": float(final.get("area2_cumulative_development", 0.0)),
+        "area2_processed_ore1_t": float(
+            final.get("cumulative_area2_processed_ore1", 0.0)
+        ),
+        "area2_processed_ore2_t": float(
+            final.get("cumulative_area2_processed_ore2", 0.0)
+        ),
+        "area2_attributed_npv": float(final.get("area2_incremental_npv", 0.0)),
+    }
+
+
+def _write_strategic_result_summary(
+    npv_with,
+    npv_without,
+    time_with,
+    time_without,
+    with_area2_df,
+):
+    delta_npv = npv_with - npv_without
+    delta_life = time_with - time_without
+    area2 = _area2_run_summary(with_area2_df)
+
+    rows = [
+        {
+            "section": "Counterfactual definition",
+            "metric": "Comparison",
+            "value": (
+                "WITH Area2 access minus WITHOUT Area2 access, "
+                "using identical random seeds"
+            ),
+            "unit": "text",
+            "ppt_label": "Identical-seed Area 2 access counterfactual",
+        },
+        {
+            "section": "Counterfactual definition",
+            "metric": "Ore-base scope",
+            "value": "Fixed ore base",
+            "unit": "text",
+            "ppt_label": "Incremental value of Area 2 access under a fixed ore base",
+        },
+        {
+            "section": "Counterfactual definition",
+            "metric": "WITHOUT Area2 treatment",
+            "value": "Face2 unavailable; no Area2 development cost charged",
+            "unit": "text",
+            "ppt_label": "Strict no-Project counterfactual",
+        },
+        {
+            "section": "Economic result",
+            "metric": "NPV WITH Area2",
+            "value": npv_with,
+            "unit": "C$",
+            "ppt_label": "WITH Area2",
+        },
+        {
+            "section": "Economic result",
+            "metric": "NPV WITHOUT Area2",
+            "value": npv_without,
+            "unit": "C$",
+            "ppt_label": "WITHOUT Area2",
+        },
+        {
+            "section": "Economic result",
+            "metric": "Incremental NPV",
+            "value": delta_npv,
+            "unit": "C$",
+            "ppt_label": "WITH - WITHOUT",
+        },
+        {
+            "section": "Schedule result",
+            "metric": "Mine life WITH Area2",
+            "value": time_with,
+            "unit": "days",
+            "ppt_label": "WITH Area2 mine life",
+        },
+        {
+            "section": "Schedule result",
+            "metric": "Mine life WITHOUT Area2",
+            "value": time_without,
+            "unit": "days",
+            "ppt_label": "WITHOUT Area2 mine life",
+        },
+        {
+            "section": "Schedule result",
+            "metric": "Mine life change",
+            "value": delta_life,
+            "unit": "days",
+            "ppt_label": "Negative means Area2 finishes earlier",
+        },
+        {
+            "section": "Area2 readiness",
+            "metric": "Strategic ready day",
+            "value": area2["area2_ready_day"],
+            "unit": "days",
+            "ppt_label": "Area2 ready day",
+        },
+        {
+            "section": "Area2 readiness",
+            "metric": "First physical unlock simulation day",
+            "value": area2["area2_first_unlock_simulation_day"],
+            "unit": "days",
+            "ppt_label": "Area2 physical unlock",
+        },
+        {
+            "section": "Area2 readiness",
+            "metric": "Deadline missed",
+            "value": area2["area2_deadline_missed"],
+            "unit": "bool",
+            "ppt_label": "Persistent deadline-miss flag",
+        },
+        {
+            "section": "Interpretation",
+            "metric": "Result statement",
+            "value": (
+                "Area2 access accelerates extraction, but is NPV-negative in "
+                "this fixed-ore-base counterfactual because development cost "
+                "is charged only to the WITH Area2 case."
+            ),
+            "unit": "text",
+            "ppt_label": "Main PPT takeaway",
+        },
+    ]
+    pd.DataFrame(rows).to_csv(
+        "strategic_result_summary.csv",
+        index=False,
+        encoding="utf-8",
+    )
+
+
+def run_area2_counterfactual_npv(config, with_area2_df):
+    # Area 2 incremental NPV with an identical-seed counterfactual.
+    from drs_mining.components.modes import MODES
+
+    if "operating_npv_proxy" not in with_area2_df.columns:
+        raise RuntimeError(
+            "WITH-Area2 dataframe is missing operating_npv_proxy telemetry."
+        )
+
+    npv_with = float(with_area2_df["operating_npv_proxy"].iloc[-1])
+    time_with = float(with_area2_df["time"].iloc[-1])
+
+    without_config = replace(
+        config,
+        area2_counterfactual_disable=True,
+    )
+
+    np.random.seed(42)
+    random.seed(11)
+
+    sim_without = ActiveFleetConcentratorModel(
+        without_config,
+        enable_telemetry=False,
+    )
+    sim_without.controller.active_operating_mode.value = MODES["MODE_A"]
+
+    engine_without = DRSEngine(sim_without)
+    engine_without.run(max_time=without_config.replication_length)
+
+    npv_without = float(sim_without.operating_npv_proxy.value)
+    time_without = float(engine_without.current_time)
+    delta_npv = npv_with - npv_without
+
+    rows = [
+        {
+            "scenario": "WITH_AREA2",
+            "operating_npv_proxy": npv_with,
+            "final_time_days": time_with,
+        },
+        {
+            "scenario": "WITHOUT_AREA2",
+            "operating_npv_proxy": npv_without,
+            "final_time_days": time_without,
+        },
+        {
+            "scenario": "AREA2_INCREMENTAL",
+            "operating_npv_proxy": delta_npv,
+            "final_time_days": time_with - time_without,
+        },
+    ]
+    pd.DataFrame(rows).to_csv(
+        "area2_counterfactual_npv.csv",
+        index=False,
+        encoding="utf-8",
+    )
+    _write_strategic_result_summary(
+        npv_with,
+        npv_without,
+        time_with,
+        time_without,
+        with_area2_df,
+    )
+
+    print("\n" + "=" * 72)
+    print("AREA 2 INCREMENTAL NPV - IDENTICAL-SEED COUNTERFACTUAL")
+    print("=" * 72)
+    print(f"NPV WITH Area 2:     C${npv_with:,.0f}")
+    print(f"NPV WITHOUT Area 2:  C${npv_without:,.0f}")
+    print(f"Delta NPV Area 2: C${delta_npv:,.0f}")
+    print(f"WITH mine life:      {time_with:,.2f} days")
+    print(f"WITHOUT mine life:   {time_without:,.2f} days")
+    print("Saved 'area2_counterfactual_npv.csv'.")
+    print("Saved 'strategic_result_summary.csv'.")
+    print("=" * 72 + "\n")
+
+    return delta_npv
+
+
 def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocation"):
     """Run the multi-face simulation and produce full diagnostics dashboard."""
     np.random.seed(42)
@@ -529,9 +811,134 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
     result = engine.run(max_time=config.replication_length)
-    sim.print_statistics()
+    print(
+        "FINAL ACTIVE TARGETS:",
+        sim.controller.annual_target_ore1.value,
+        sim.controller.annual_target_ore2.value,
+        sim.controller.annual_target_development.value,
+    )
 
     df = result.history
+    _print_consistent_output_statistics(df, sim, name)
+    _print_area2_summary(df, name)
+    strategic_cols = [
+        "strategic_planning_started",
+        "strategic_year_index",
+        "tactical_review_count",
+        "mining_priority",
+
+        "annual_target_ore1",
+        "annual_target_ore2",
+        "annual_target_development",
+
+        "ytd_ore1_production",
+        "ytd_ore2_production",
+        "ytd_development",
+
+        "ore1_trajectory_ratio",
+        "ore2_trajectory_ratio",
+        "development_trajectory_ratio",
+
+        # Area 2 readiness
+        "area2_required_development",
+        "area2_ready_by_day",
+        "area2_development_progress",
+        "area2_readiness_fraction",
+        "area2_readiness_trajectory_ratio",
+        "area2_ready",
+        "area2_deadline_missed",
+        "area2_currently_late",
+        "area2_completed_late",
+        "area2_ready_day",
+
+        # Strategic economics
+        "cumulative_processed_ore1",
+        "cumulative_processed_ore2",
+        "discount_factor",
+        "current_cash_flow_rate",
+        "cumulative_discounted_cash_flow",
+        "area2_future_access_value_pv",
+        "npv_proxy",
+    
+        "area2_development_allocation_fraction",
+        "area2_cumulative_development",
+        "area2_physical_unlocked",
+        "current_area2_mined_rate",
+        "current_area2_processed_ore1_rate",
+        "current_area2_processed_ore2_rate",
+        "cumulative_area2_processed_ore1",
+        "cumulative_area2_processed_ore2",
+        "current_area2_incremental_cash_flow_rate",
+        "area2_incremental_npv",
+        "operating_npv_proxy",
+        "unassigned_trucks_to_development",
+        "development_priority_reserved_trucks",
+        "mine_development_rate_m_per_day",
+        "mode_blend_feasible",
+        "constrained_mode_active",
+        "achievable_ore1_fraction",
+        "achievable_ore2_fraction",
+        "area2_attributed_npv",
+]
+
+    print("\n--- Strategic / Tactical Diagnostics ---")
+
+    available = [c for c in strategic_cols if c in df.columns]
+    missing = [c for c in strategic_cols if c not in df.columns]
+
+    print("Available:", available)
+    print("Missing:", missing)
+
+    if available:
+        review_df = df[
+            df["tactical_review_count"].ne(
+                df["tactical_review_count"].shift()
+            )
+        ]
+
+        print(
+            review_df[
+                [
+                    "time",
+                    "strategic_year_index",
+                    "tactical_review_count",
+                    "mining_priority",
+
+                    # Strategic annual targets
+                    "annual_target_ore1",
+                    "annual_target_ore2",
+                    "annual_target_development",
+
+                    # Annual trajectory
+                    "ore1_trajectory_ratio",
+                    "ore2_trajectory_ratio",
+                    "development_trajectory_ratio",
+
+                    # Area 2 readiness
+                    "area2_required_development",
+                    "area2_ready_by_day",
+                    "area2_development_progress",
+                    "area2_readiness_fraction",
+                    "area2_readiness_trajectory_ratio",
+                    "area2_ready",
+                    "area2_deadline_missed",
+                    "area2_currently_late",
+                    "area2_completed_late",
+                    "area2_ready_day",
+
+                    # Economics
+                    "discount_factor",
+                    "cumulative_processed_ore1",
+                    "cumulative_processed_ore2",
+                    "current_cash_flow_rate",
+                    "cumulative_discounted_cash_flow",
+                    "area2_future_access_value_pv",
+                    "npv_proxy",
+                ]
+            ].to_string(index=False)
+        )
+
+    print("----------------------------------------\n")
 
     # --- Mode Transition Log ---
     print(f"\n--- Mode Transition Log ({name}) ---")
@@ -550,10 +957,10 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
             f"Time: {row['time']:.2f} | Transition: {row['prev_mode_name']} -> {row['active_operating_mode_name']}"
         )
         print(
-            f"  ↳ Ore1 Stock: {row['Ore1Stock_mass']:.1f} | Ore2 Stock: {row['Ore2Stock_mass']:.1f} (Critical: {config.critical_ore2_level}) | Total Stock: {row['total_system_ore_mass']:.1f} (Target: {config.target_ore_stock_level})"
+            f"  -> Ore1 Stock: {row['Ore1Stock_mass']:.1f} | Ore2 Stock: {row['Ore2Stock_mass']:.1f} (Critical: {config.critical_ore2_level}) | Total Stock: {row['total_system_ore_mass']:.1f} (Target: {config.target_ore_stock_level})"
         )
         print(
-            f"  ↳ Campaign/Shutdown Timer: {row['current_campaign_duration']:.2f} | Contingency Timer: {row['current_contingency_duration']:.2f}"
+            f"  -> Campaign/Shutdown Timer: {row['current_campaign_duration']:.2f} | Contingency Timer: {row['current_contingency_duration']:.2f}"
         )
     print("---------------------------\n")
 
@@ -886,11 +1293,18 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
             },
         },
     ]
-
+    prefix = (
+        name.lower()
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("+", "plus")
+    )
     fig_comp = build_dashboard(
         df, configs, title=f"Comprehensive Mine Diagnostics ({name})", figsize=(18, 69)
     )
-    fig_comp.savefig(f"plots/Comprehensive_Diagnostics_Plot_{prefix}.png")
+    fig_comp.savefig(
+        f"plots/Comprehensive_Diagnostics_Plot_{prefix}.png"
+    )
     plt.close(fig_comp)
 
     return df
@@ -905,16 +1319,55 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=1)
     parser.add_argument("--compare_capacity_cases", action="store_true")
     parser.add_argument("--comparison_max_time", type=float, default=60.0)
+    parser.add_argument(
+        "--skip_area2_counterfactual",
+        action="store_true",
+        help="Skip the additional WITHOUT-Area2 run used for true incremental NPV.",
+    )
     args = parser.parse_args()
 
-    # You can also run it a single time and print out the statistics to evaluate how it spends time
+    # Run a single seeded case and print the operating diagnostics.
     np.random.seed(42)
     random.seed(11)
+
     config = ConcentratorConfig(
         replication_length=99999.0,
         target_ore_stock_level=args.total_stockpile_level,
         std_dev_ore_fraction=args.std_dev_ore_fraction,
         prob_new_facies=0.3,
+
+        strategic_targets=(
+            StrategicYearTarget(
+                min_development=10000.0,
+                min_ore1_production=1300000.0,
+                min_ore2_production=850000.0,
+            ),
+        ),
+        # Scenario assumption: Area 2 needs 4,000 m of development and should
+        # be ready within 365 strategic-planning days.
+        area2_readiness_target=AreaReadinessTarget(
+            required_development=4000.0,
+            ready_by_day=365.0,
+        ),
+
+        # Illustrative Canadian underground-gold benchmark assumptions, C$.
+        # Public basis: Alamos Gold IGD Expansion (2026) and Agnico Eagle
+        # Amaruq/Odyssey disclosures; see the supporting notes.
+        annual_discount_rate=0.05,
+        ore1_net_value_per_processed_tonne=577.48,
+        ore2_net_value_per_processed_tonne=709.83,
+        production_cost_per_tonne=135.0,
+        development_cost_per_unit=15000.0,
+        fixed_cost_per_day=74460.0,
+        area2_future_access_value_at_readiness=0.0,
+
+        # Face 2 is future Area 2 and unlocks only after readiness.
+        area2_physical_unlock_enabled=True,
+        development_metres_per_extra_truck_per_day=5.0,
+        annual_development_benchmark_metres=10000.0,
+        area2_counterfactual_disable=False,
+        area2_face_index=1,
+        area2_redeploy_locked_face_trucks_to_development=True,
     )
 
     if args.compare_capacity_cases:
@@ -928,6 +1381,9 @@ if __name__ == "__main__":
         config, equal_allocation=True, name="Equal Fleet Allocation"
     )
 
+    if not args.skip_area2_counterfactual:
+        run_area2_counterfactual_npv(config, df_managed)
+
     # Print summary comparison
     print("\n" + "=" * 72)
     print("COMPARISON SUMMARY: Dynamic Fleet Allocation vs Equal Fleet Allocation")
@@ -937,7 +1393,7 @@ if __name__ == "__main__":
         ("Dynamic Fleet Allocation", df_managed),
         ("Equal Fleet Allocation", df_equal),
     ]:
-        dt = df["time"].diff().fillna(0)
+        mode_duration, total_duration = _mode_duration_summary(df)
         final_ore1 = df["Ore1Stock_mass"].iloc[-1]
         final_ore2 = df["Ore2Stock_mass"].iloc[-1]
         total_extracted = (
@@ -948,10 +1404,13 @@ if __name__ == "__main__":
         print(
             f"  Final Ore1 stock: {final_ore1:,.0f} t | Final Ore2 stock: {final_ore2:,.0f} t"
         )
-        print(f"  Mode breakdown:")
-        for mode_name in df["active_operating_mode_name"].unique():
-            mode_dt = dt[df["active_operating_mode_name"] == mode_name].sum()
-            pct = (mode_dt / dt.sum() * 100) if dt.sum() > 0 else 0
+        print("  Mode breakdown:")
+        for mode_name, mode_dt in mode_duration.items():
+            pct = (
+                mode_dt / total_duration * 100.0
+                if total_duration > 1e-12
+                else 0.0
+            )
             print(f"    {str(mode_name):35s}: {mode_dt:8.2f} days ({pct:5.1f}%)")
     print("=" * 72 + "\n")
 
