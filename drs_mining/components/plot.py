@@ -4,7 +4,7 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from drs.plot import _setup_axes
+from drs.plot import _get_ax
 
 
 def plot_ore_with_modes(
@@ -23,7 +23,7 @@ def plot_ore_with_modes(
     elif isinstance(ore_cols, str):
         ore_cols = [ore_cols]
 
-    fig, ax, own_ax = _setup_axes(ax, figsize=(14, 7))
+    ax = _get_ax(ax, figsize=(14, 7))
 
     unique_modes = df[mode_col].unique()
     import matplotlib
@@ -156,10 +156,6 @@ def plot_ore_with_modes(
     ax.set_xlabel("Simulation Time", fontsize=12)
     ax.set_title(title, fontsize=14, pad=15)
 
-    if own_ax:
-        fig = ax.figure
-        fig.tight_layout()
-        return fig
     return ax
 
 
@@ -170,11 +166,9 @@ def plot_state_space(
     title="State Space Trajectory",
     ax=None,
 ):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(8, 8))
+    ax = _get_ax(ax, figsize=(8, 8))
 
     if col_x not in df.columns or col_y not in df.columns:
-        if own_ax:
-            return fig
         return ax
 
     ax.plot(df[col_x], df[col_y], color="gray", alpha=0.5, linewidth=1, zorder=1)
@@ -184,8 +178,7 @@ def plot_state_space(
         df[col_x], df[col_y], c=df[time_col], cmap="viridis", s=10, zorder=2
     )
 
-    if own_ax:
-        plt.colorbar(scatter, ax=ax, label="Simulation Time")
+    ax.figure.colorbar(scatter, ax=ax, label="Simulation Time")
 
     ax.plot(
         df[col_x].iloc[0],
@@ -212,9 +205,6 @@ def plot_state_space(
     ax.legend(loc="upper left")
     ax.grid(True)
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
@@ -226,11 +216,9 @@ def plot_cumulative_throughput(
     title="Cumulative Throughput vs Target",
     ax=None,
 ):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(10, 6))
+    ax = _get_ax(ax, figsize=(10, 6))
 
     if extraction_col not in df.columns or time_col not in df.columns:
-        if own_ax:
-            return fig
         return ax
 
     ax.plot(
@@ -263,9 +251,6 @@ def plot_cumulative_throughput(
     ax.legend(loc="upper left")
     ax.grid(True)
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
@@ -280,7 +265,7 @@ def plot_normalized_deviation_violin(
     col_ore2="Ore2Stock_mass",
     ax=None
 ):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(10, 6))
+    ax = _get_ax(ax, figsize=(10, 6))
 
     if col_total not in df.columns and "OreStock" in df.columns:
         col_total = "OreStock"
@@ -322,15 +307,12 @@ def plot_normalized_deviation_violin(
     ax.xaxis.set_major_formatter(mtick.PercentFormatter(decimals=0))
     ax.legend(loc="upper right")
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
 def plot_attributed_deficit(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass",
                             ideal_rate_per_day=6000.0, title="Cumulative Production Deficit by Mode", ax=None, palette=None):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(12, 6))
+    ax = _get_ax(ax, figsize=(12, 6))
 
     dt = df[time_col].diff().shift(-1).fillna(0)
     actual_extraction_step = df[extraction_col].diff().shift(-1).fillna(0)
@@ -377,14 +359,11 @@ def plot_attributed_deficit(df, time_col="time", mode_col="active_operating_mode
     clean_labels = [str(l).split('.')[-1] for l in labels]
     ax.legend(handles, clean_labels, loc='upper left')
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
 def plot_deficit_disparity(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate=6000.0, title="Mode Efficiency (Time Spent vs. Deficit Caused)", ax=None, verbose=True):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(10, 6))
+    ax = _get_ax(ax, figsize=(10, 6))
 
     df = df.copy()
     df[mode_col] = df[mode_col].astype(str)
@@ -417,17 +396,11 @@ def plot_deficit_disparity(df, time_col="time", mode_col="active_operating_mode"
     ax.set_ylabel("")
     ax.xaxis.set_major_formatter(mtick.PercentFormatter(decimals=0))
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
-
-
-
 def plot_deficit_breakdown_bar(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate_per_day=6000.0, title="Final Deficit Breakdown by Mode (%)", ax=None, palette=None, verbose=True):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(10, 6))
+    ax = _get_ax(ax, figsize=(10, 6))
 
     df = df.copy()
     df['dt'] = df[time_col].diff().shift(-1).fillna(0)
@@ -472,14 +445,11 @@ def plot_deficit_breakdown_bar(df, time_col="time", mode_col="active_operating_m
             transform=ax.transAxes, fontsize=12, fontweight='bold',
             ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.8))
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
 def plot_structural_vs_operational_deficit(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate=6000.0, structural_modes=None, ax=None, verbose=True):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(10, 6))
+    ax = _get_ax(ax, figsize=(10, 6))
 
     df = df.copy()
     df['dt'] = df[time_col].diff().shift(-1).fillna(0)
@@ -520,14 +490,11 @@ def plot_structural_vs_operational_deficit(df, time_col="time", mode_col="active
             transform=ax.transAxes, fontsize=12, color="firebrick", fontweight="bold",
             ha="center", bbox=dict(facecolor='white', alpha=0.8, edgecolor='firebrick'))
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
 def plot_normalized_cumulative_deficit(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate_per_day=6000.0, title="Deficit Composition Over Time (100% Stacked)", ax=None, palette=None):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(12, 6))
+    ax = _get_ax(ax, figsize=(12, 6))
 
     df = df.copy()
     df['dt'] = df[time_col].diff().shift(-1).fillna(0)
@@ -558,14 +525,11 @@ def plot_normalized_cumulative_deficit(df, time_col="time", mode_col="active_ope
     ax.yaxis.set_major_formatter(mtick.PercentFormatter(decimals=0))
     ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
 def plot_structural_vs_operational_by_mode(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate=6000.0, title="Structural vs. Operational Deficit by Base Mode", structural_modes=None, base_mode_mapper=None, ax=None, verbose=True):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(10, 6))
+    ax = _get_ax(ax, figsize=(10, 6))
 
     df = df.copy()
     df['dt'] = df[time_col].diff().shift(-1).fillna(0)
@@ -616,9 +580,6 @@ def plot_structural_vs_operational_by_mode(df, time_col="time", mode_col="active
 
     ax.legend(title="Deficit Classification", loc="upper left")
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
@@ -631,11 +592,9 @@ def plot_mode_distribution(
     palette=None,
     verbose=True,
 ):
-    fig, ax, own_ax = _setup_axes(ax, figsize=(10, 4))
+    ax = _get_ax(ax, figsize=(10, 4))
 
     if mode_col not in df.columns or time_col not in df.columns:
-        if own_ax:
-            return fig
         return ax
 
     df_sorted = df.copy()
@@ -699,9 +658,6 @@ def plot_mode_distribution(
     ax.set_xlim(0, max(100, percentages.max() + 10))
     ax.grid(axis="x", linestyle="--", alpha=0.7)
 
-    if own_ax:
-        fig.tight_layout()
-        return fig
     return ax
 
 
@@ -733,7 +689,7 @@ def plot_mode_dwell_times(
         print(dwell_summary.round(2).to_string())
         print("-" * (8 + len(title)))
 
-    fig, ax, own_ax = _setup_axes(ax, figsize=(10, 6))
+    ax = _get_ax(ax, figsize=(10, 6))
 
     sns.boxplot(
         data=durations,
@@ -761,8 +717,4 @@ def plot_mode_dwell_times(
     )
     ax.legend(loc="lower right")
 
-    if own_ax:
-        fig = ax.figure
-        fig.tight_layout()
-        return fig
     return ax
