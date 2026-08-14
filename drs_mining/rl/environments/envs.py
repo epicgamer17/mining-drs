@@ -111,6 +111,7 @@ class MiningRLEnv(gym.Env):
         )
         self.engine = DRSEngine()
         self.engine.register(self.sim)
+        self.engine.on_step(lambda t: self.sim.step_update())
         if self.enable_telemetry and hasattr(self.sim, "telemetry"):
             self.engine.attach_telemetry(self.sim.telemetry)
         self.last_extraction = 0.0

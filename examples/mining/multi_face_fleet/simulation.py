@@ -45,6 +45,7 @@ def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, 
 
         engine = DRSEngine()
         engine.register(sim)
+        engine.on_step(lambda t: sim.step_update())
 
         np.random.seed(idx)
         random.seed(idx)
@@ -115,29 +116,23 @@ def plot_monte_carlo_throughput(N: int = 1, total_stockpile_level: float = 60000
     print("Saved 'plots/Monte_Carlo_Throughput_Fig5_Standard.png'.\n")
 
 
-import types
-
-
 def _apply_equal_allocation_to_sim(sim):
-    from drs_mining.components.controllers import MultiFaceConcentratorController
-    import types
-
     n = len(sim.controller.faces)
     fracs = [1.0 / n] * n
     # Force the physical fleet dispatch to always be evenly split
     for k in sim.controller._mode_allocations.keys():
         sim.controller._mode_allocations[k] = fracs
 
-    orig_forward = MultiFaceConcentratorController.forward
+    orig_step_update = MultiFaceConcentratorController.step_update
 
-    def _equal_forward(self):
-        orig_forward(self)
+    def _equal_step_update(self):
+        orig_step_update(self)
         rate = self.target_mine_mass_rate.value / n
         for i in range(n):
             self.face_target_rates[i].value = rate
             self.face_shift_allocation_fractions[i].value = fracs[i]
 
-    sim.controller.forward = types.MethodType(_equal_forward, sim.controller)
+    sim.controller.step_update = types.MethodType(_equal_step_update, sim.controller)
 
 
 def _run_capacity_case(
@@ -162,6 +157,9 @@ def _run_capacity_case(
 
     engine = DRSEngine()
     engine.register(sim)
+    engine.on_step(lambda t: sim.step_update())
+    if sim.enable_telemetry and hasattr(sim, "telemetry"):
+        engine.attach_telemetry(sim.telemetry)
     engine.run(until=max_time)
 
     df = sim.telemetry.to_dataframe()
@@ -420,7 +418,7 @@ def run_capacity_comparison(
             palette=palette,
             hlines=[
                 {
-                    "y": base_config.target_ore_stock_level,
+                    "y": base_kwargs.get("target_ore_stock_level", 60000.0),
                     "color": "black",
                     "linestyle": "--",
                     "linewidth": 1.5,
@@ -428,7 +426,7 @@ def run_capacity_comparison(
                     "label": "Target Total",
                 },
                 {
-                    "y": base_config.critical_ore2_level,
+                    "y": base_kwargs.get("critical_ore2_level", 20400.0),
                     "color": "red",
                     "linestyle": ":",
                     "linewidth": 2,
@@ -503,6 +501,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
 
     engine = DRSEngine()
     engine.register(sim)
+    engine.on_step(lambda t: sim.step_update())
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
     result = engine.run(until=config.get("replication_length", 99999.0))
@@ -694,7 +693,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     )
     plot_dual_axis_step(
         df,
-        y1_col="mixed_extraction_rate",
+        y1_col="mixed_achieved_extraction_rate",
         y2_col="mixed_ore1_fraction",
         y1_label="Combined Extraction Rate (t/d)",
         y2_label="Mixed Ore 1 Fraction",
@@ -706,9 +705,9 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     plot_time_series(
         df,
         y_columns=[
-            "mixed_required_extraction_rate",
-            "mixed_max_extraction_rate",
-            "mixed_extraction_rate",
+            "mixed_target_extraction_rate",
+            "mixed_real_extraction_rate",
+            "mixed_achieved_extraction_rate",
         ],
         title="Fleet-Constrained Extraction Rates",
         is_step=True,

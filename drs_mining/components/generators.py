@@ -1,6 +1,5 @@
 import random
 import drs
-from drs.flow import Flow
 
 
 class StochasticFaciesGenerator(drs.Module):
@@ -24,8 +23,8 @@ class StochasticFaciesGenerator(drs.Module):
         self.next_is_new_facies = True
         self.current_fraction = mean_fraction
 
-    def forward(self):
-        return Flow(value=next(self))
+    def generate_next(self) -> dict[str, float]:
+        return next(self)
 
     def __next__(self) -> dict[str, float]:
         if self.next_is_new_facies:
@@ -41,4 +40,5 @@ class StochasticFaciesGenerator(drs.Module):
         self.next_is_new_facies = random.random() <= self.prob_new_facies
 
         return {"ore1_frac": self.current_fraction}
+
 

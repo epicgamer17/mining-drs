@@ -2,8 +2,6 @@ import math
 import random
 import drs
 from drs import Processor
-from drs.flow import Flow
-from .data import MineOutput
 from .generators import StochasticFaciesGenerator
 
 
@@ -46,15 +44,11 @@ class BaseMineFace(Processor):
     def _get_current_attr_value(self) -> float:
         raise NotImplementedError("Subclasses must define current ore attribute value.")
 
-    def forward(self, target_rate=None):
-        if target_rate is not None:
-            target_extraction_rate = (
-                target_rate.value if hasattr(target_rate, "value") else target_rate
-            )
-        elif self.parent is not None and hasattr(self.parent, "target_mine_mass_rate"):
-            target_extraction_rate = self.parent.target_mine_mass_rate
-        else:
-            target_extraction_rate = 0.0
+    def update_extraction_rate(self, target_rate: float = 0.0) -> tuple[float, float]:
+        """Explicitly updates target extraction rate, checks parcel boundaries, and sets accumulator rates."""
+        target_extraction_rate = (
+            target_rate.value if hasattr(target_rate, "value") else float(target_rate)
+        )
 
         self.target_rate = target_extraction_rate
         actual_rate = self.actual_rate
@@ -87,12 +81,7 @@ class BaseMineFace(Processor):
 
         self.cumulative_extracted_mass.rate = actual_rate
         self.parcel_extracted_mass.rate = actual_rate
-        return Flow(
-            value=MineOutput(
-                extraction_rate=actual_rate,
-                attr_value=self._get_current_attr_value(),
-            )
-        )
+        return actual_rate, self._get_current_attr_value()
 
 
 class ConcentratorMineFace(BaseMineFace):
@@ -138,8 +127,14 @@ class ConcentratorMineFace(BaseMineFace):
             self.active_parcel_initial_mass.value = random.uniform(
                 self.min_ore_mass, self.max_ore_mass
             )
-            parcel_flow = self.generator()
-            parcel = parcel_flow.value
+            if hasattr(self.generator, "generate_next"):
+                parcel = self.generator.generate_next()
+            elif callable(self.generator):
+                parcel = self.generator()
+            else:
+                parcel = next(self.generator)
+            if hasattr(parcel, "value"):
+                parcel = parcel.value
             if isinstance(parcel, dict):
                 ore1_frac = parcel["ore1_frac"]
             elif hasattr(parcel, "ore1_frac"):
@@ -147,7 +142,7 @@ class ConcentratorMineFace(BaseMineFace):
             else:
                 ore1_frac = float(parcel)
             self.active_parcel_ore_fraction.value = ore1_frac
-        except StopIteration:
+        except (StopIteration, TypeError):
             pass
 
     def _get_current_attr_value(self) -> float:
@@ -182,8 +177,14 @@ class ContinuousMineFace(BaseMineFace):
 
     def _load_next_batch(self):
         try:
-            parcel_flow = self.generator()
-            parcel = parcel_flow.value
+            if hasattr(self.generator, "generate_next"):
+                parcel = self.generator.generate_next()
+            elif callable(self.generator):
+                parcel = self.generator()
+            else:
+                parcel = next(self.generator)
+            if hasattr(parcel, "value"):
+                parcel = parcel.value
             self.active_parcel_initial_mass.value = random.uniform(
                 self.min_ore_mass, self.max_ore_mass
             )
@@ -194,56 +195,10 @@ class ContinuousMineFace(BaseMineFace):
             else:
                 ore1_frac = float(parcel)
             self.active_parcel_ore_fraction.value = 1.0 - ore1_frac
-        except StopIteration:
+        except (StopIteration, TypeError):
             pass
 
     def _get_current_attr_value(self) -> float:
         return self.active_parcel_ore_fraction.value
 
-    def forward(self, target_rate=None):
-        if target_rate is not None:
-            target_extraction_rate = (
-                target_rate.value if hasattr(target_rate, "value") else target_rate
-            )
-        else:
-            target_extraction_rate = 0.0
-
-        self.target_rate = target_extraction_rate
-        actual_rate = self.actual_rate
-
-        if (
-            self.parcel_extracted_mass.value
-            >= self.active_parcel_initial_mass.value - 1e-6
-        ):
-            self._load_next_batch()
-            self.parcel_extracted_mass.value = 0.0
-            self.parcel_extracted_mass.upper_threshold = (
-                self.active_parcel_initial_mass.value
-            )
-
-        if (
-            self.cumulative_extracted_mass.value
-            < self.ore_to_be_extracted_during_warming_period
-        ):
-            self.cumulative_extracted_mass.upper_threshold = (
-                self.ore_to_be_extracted_during_warming_period
-            )
-        else:
-            self.cumulative_extracted_mass.upper_threshold = (
-                self.total_ore_to_extract
-            )
-
-        self.parcel_extracted_mass.upper_threshold = (
-            self.active_parcel_initial_mass.value
-        )
-
-        self.cumulative_extracted_mass.rate = actual_rate
-        self.parcel_extracted_mass.rate = actual_rate
-
-        return Flow(
-            value=MineOutput(
-                extraction_rate=actual_rate,
-                attr_value=self.active_parcel_ore_fraction.value,
-            )
-        )
 

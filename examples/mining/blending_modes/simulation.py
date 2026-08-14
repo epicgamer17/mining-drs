@@ -33,6 +33,7 @@ def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
 
         engine = DRSEngine()
         engine.register(sim)
+        engine.on_step(lambda t: sim.step_update())
 
         engine.run(until=config_kwargs.get("replication_length", float("inf")))
 
@@ -123,6 +124,7 @@ if __name__ == "__main__":
 
     engine = DRSEngine()
     engine.register(sim)
+    engine.on_step(lambda t: sim.step_update())
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
     result = engine.run(until=99999.0)

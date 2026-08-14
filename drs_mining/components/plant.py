@@ -1,7 +1,6 @@
 import math
 import drs
 from drs import Processor
-from drs.flow import Flow
 from .fleet import ContinuousFleetLogistics
 
 
@@ -23,13 +22,15 @@ class BaseMetallurgicalPlant(Processor):
             "cumulative_milled_mass", initial_value=0.0
         )
 
-    def forward(self, ore1_outflow, ore2_outflow):
-        o1 = ore1_outflow.value if isinstance(ore1_outflow, Flow) else ore1_outflow
-        o2 = ore2_outflow.value if isinstance(ore2_outflow, Flow) else ore2_outflow
+    def update_milling_rate(self, ore1_outflow: float, ore2_outflow: float) -> float:
+        """Sets target milling rate and updates cumulative milled mass accumulation rate."""
+        o1 = ore1_outflow.value if hasattr(ore1_outflow, "value") else float(ore1_outflow)
+        o2 = ore2_outflow.value if hasattr(ore2_outflow, "value") else float(ore2_outflow)
 
         total_inflow = o1 + o2
         self.target_rate = total_inflow
         self.cumulative_milled_mass.rate = self.actual_rate
+        return self.actual_rate
 
 
 class ConcentratorPlant(BaseMetallurgicalPlant):
@@ -44,6 +45,4 @@ class ConcentratorPlant(BaseMetallurgicalPlant):
     ):
         super().__init__(mine, fleet, ore1_stock, ore2_stock, max_rate=max_rate, name=name)
 
-    def forward(self, ore1_outflow, ore2_outflow):
-        super().forward(ore1_outflow, ore2_outflow)
 

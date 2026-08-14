@@ -11,7 +11,7 @@ from .controllers.dispatch import ShelswellDispatchController
 
 
 class HybridDRSModule(drs.Module):
-    """Container DRS Module registering global variables and simulation accumulators."""
+    """State container for simulation time and haul accumulators."""
 
     def __init__(self):
         super().__init__()
@@ -19,7 +19,7 @@ class HybridDRSModule(drs.Module):
         self.ore_hauled = drs.Level("OreHauled", initial_value=0.0)
         self.waste_hauled = drs.Level("WasteHauled", initial_value=0.0)
 
-    def forward(self):
+    def step_update(self):
         self.global_time.rate = 1.0
 
 
@@ -173,7 +173,7 @@ class ShelswellHybridSimulation:
 
         self.module.ore_hauled.value = self.rom_dump_bay.dumped_total.value
         self.module.waste_hauled.value = self.waste_dump_bay.dumped_total.value
-        self.module.forward()
+        self.module.step_update()
         self.module.global_time._update(dt_step / 86400.0)
 
     def run_simulation(self, total_days: float = 365.0, dt: float = 300.0, show_progress: bool = False) -> float:

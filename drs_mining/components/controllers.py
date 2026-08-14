@@ -1,5 +1,4 @@
 import drs
-from drs.flow import Flow
 from .modes import OperatingMode, RequireDecision
 from .mine_face import BaseMineFace, ConcentratorMineFace
 from .fleet import ContinuousFleetLogistics
@@ -131,7 +130,7 @@ class BaseBlendingController(drs.Module):
     def reset_contingency_timer(self):
         self.current_contingency_duration.reset()
 
-    def forward(self) -> Flow:
+    def step_update(self):
         mine = self.mine
 
         if mine is not None and abs(mine.net_extracted_mass) < 1e-6:
@@ -143,9 +142,11 @@ class BaseBlendingController(drs.Module):
             self.cumulative_time_mode_b_surging.reset()
             self.cumulative_time_shutdown.reset()
 
-        self.total_system_ore_mass.value = self.parent.total_stockpile_mass
+        parent_obj = getattr(self, "parent", None)
+        if parent_obj is not None:
+            self.total_system_ore_mass.value = parent_obj.total_stockpile_mass
 
-        next_mode = self.active_operating_mode.value.check_end_conditions(self.parent)
+        next_mode = self.active_operating_mode.value.check_end_conditions(parent_obj)
 
         if isinstance(next_mode, RequireDecision):
             decision = self.controller_decision()
@@ -157,7 +158,7 @@ class BaseBlendingController(drs.Module):
 
         self._update_timers(self.active_operating_mode.value.name)
 
-        targets = self.active_operating_mode.value.get_target_rates(self.parent)
+        targets = self.active_operating_mode.value.get_target_rates(parent_obj)
         self.target_mine_mass_rate.value = targets.extraction_rate
         self.target_stock1_outflow_rate.value = targets.ore1_milling_rate
         self.target_stock2_outflow_rate.value = targets.ore2_milling_rate
@@ -563,7 +564,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
         self._refresh_shift_allocation_fractions()
         self.fleet_shift_count.value += 1
 
-    def forward(self):
+    def step_update(self):
         self.total_extra_trucks.value = 0.0
 
         total_net_extracted = sum(f.net_extracted_mass for f in self.faces)
@@ -576,9 +577,11 @@ class MultiFaceConcentratorController(BaseBlendingController):
             self.cumulative_time_mode_b_surging.reset()
             self.cumulative_time_shutdown.reset()
 
-        self.total_system_ore_mass.value = self.parent.total_stockpile_mass
+        parent_obj = getattr(self, "parent", None)
+        if parent_obj is not None:
+            self.total_system_ore_mass.value = parent_obj.total_stockpile_mass
 
-        next_mode = self.active_operating_mode.value.check_end_conditions(self.parent)
+        next_mode = self.active_operating_mode.value.check_end_conditions(parent_obj)
 
         if isinstance(next_mode, RequireDecision):
             decision = self.controller_decision()
@@ -600,7 +603,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
             self.fleet_shift_timer.reset()
             self._reallocate_fleet_for_shift()
 
-        targets = self.active_operating_mode.value.get_target_rates(self.parent)
+        targets = self.active_operating_mode.value.get_target_rates(parent_obj)
         self.target_mine_mass_rate.value = targets.extraction_rate
         self.target_stock1_outflow_rate.value = targets.ore1_milling_rate
         self.target_stock2_outflow_rate.value = targets.ore2_milling_rate
@@ -627,3 +630,4 @@ class MultiFaceConcentratorController(BaseBlendingController):
         self.cumulative_mine_development.rate = (
             self.total_extra_trucks.value * self.development_rate_per_extra_truck
         )
+

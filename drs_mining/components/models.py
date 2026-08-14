@@ -87,26 +87,50 @@ class BaseBlendingModel(drs.Module):
                 lambda t, m, s, _: m.controller.current_contingency_duration.value,
             )
 
-    def forward(self):
+    def step_update(self):
         self.global_time.rate = 1.0
 
-        self.controller()
+        if self.controller is not None:
+            self.controller.step_update()
 
-        mine_flow = self.mine()
-        ore1_flow, ore2_flow = self.fleet(mine_flow)
+        # Mine extraction step
+        if hasattr(self, "face1") and hasattr(self, "face2"):
+            out1 = self.face1.update_extraction_rate(
+                self.controller.face_achieved_extraction_rates[0]
+            )
+            out2 = self.face2.update_extraction_rate(
+                self.controller.face_achieved_extraction_rates[1]
+            )
+            (ore1_rate, ore1_attr), (ore2_rate, ore2_attr) = self.fleet.update_routing(out1, out2)
+        elif self.mine is not None:
+            mine_out = self.mine.update_extraction_rate(
+                self.controller.target_mine_mass_rate
+            )
+            (ore1_rate, ore1_attr), (ore2_rate, ore2_attr) = self.fleet.update_routing(mine_out)
+        else:
+            ore1_rate, ore1_attr = 0.0, 1.0
+            ore2_rate, ore2_attr = 0.0, 0.0
 
-        out1 = self.ore1_stock(
-            self.controller.target_stock1_outflow_rate, inflow=ore1_flow
+        # Stockpile update step
+        stock1_outflow = self.ore1_stock.update_rates(
+            inflow_rate=ore1_rate,
+            inflow_attr=ore1_attr,
+            requested_outflow_rate=self.controller.target_stock1_outflow_rate.value,
         )
-        out2 = self.ore2_stock(
-            self.controller.target_stock2_outflow_rate, inflow=ore2_flow
+        stock2_outflow = self.ore2_stock.update_rates(
+            inflow_rate=ore2_rate,
+            inflow_attr=ore2_attr,
+            requested_outflow_rate=self.controller.target_stock2_outflow_rate.value,
         )
 
-        self.plant(out1, out2)
+        # Plant milling step
+        if self.plant is not None:
+            self.plant.update_milling_rate(stock1_outflow, stock2_outflow)
 
-        self.controller.total_system_ore_mass.rate = (
-            self.ore1_stock.current_mass.rate + self.ore2_stock.current_mass.rate
-        )
+        if self.controller is not None:
+            self.controller.total_system_ore_mass.rate = (
+                self.ore1_stock.current_mass.rate + self.ore2_stock.current_mass.rate
+            )
 
     def is_terminating_condition_met(self) -> bool:
         return (
@@ -376,6 +400,7 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
         )
 
         self.setup_telemetry()
+
         if self.enable_telemetry:
             self.telemetry.register_metric(
                 "face1_alloc",
@@ -534,24 +559,6 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
                 lambda t, m, s, _: m.controller.current_contingency_duration.value,
             )
 
-    def forward(self):
-        self.global_time.rate = 1.0
-        self.controller()
-        ore1_flow, ore2_flow = self.fleet(
-            self.face1(self.controller.face_achieved_extraction_rates[0]),
-            self.face2(self.controller.face_achieved_extraction_rates[1]),
-        )
-        out1 = self.ore1_stock(
-            self.controller.target_stock1_outflow_rate, inflow=ore1_flow
-        )
-        out2 = self.ore2_stock(
-            self.controller.target_stock2_outflow_rate, inflow=ore2_flow
-        )
-        self.plant(out1, out2)
-
-        self.controller.total_system_ore_mass.rate = (
-            self.ore1_stock.current_mass.rate + self.ore2_stock.current_mass.rate
-        )
 
     def is_terminating_condition_met(self):
         total_extracted = (
