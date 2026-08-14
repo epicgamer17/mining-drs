@@ -28,6 +28,14 @@ class BaseMineFace(drs.Module):
             "parcel_extracted_mass", initial_value=0.0
         )
 
+    @property
+    def net_extracted_mass(self) -> float:
+        """Encapsulate internal math inside the module."""
+        return (
+            self.cumulative_extracted_mass.value
+            - self.ore_to_be_extracted_during_warming_period
+        )
+
     def _load_next_batch(self):
         raise NotImplementedError("Subclasses must define how to parse the DataPoint.")
 

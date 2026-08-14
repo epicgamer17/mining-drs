@@ -1,5 +1,6 @@
 from typing import List, Dict, Optional, Union
 import random
+import numpy as np
 import drs
 from tqdm import tqdm
 
@@ -24,7 +25,7 @@ class HybridDRSModule(drs.Module):
 
 class ShelswellHybridSimulation:
     """Master Simulation Orchestrator uniting Discrete Domain Entities, 
-    DRS Rate Gateways, and the DRS Core Integration Engine.
+    DRS Rate Gateways, NumPy Vectorization, and Native Event-Driven DRS Integration.
     """
 
     def __init__(
@@ -46,48 +47,48 @@ class ShelswellHybridSimulation:
         self.num_trucks = num_trucks
         self.num_operators = num_operators
         self.mechanical_availability = mechanical_availability
-        self.step_size_sec = step_size_sec
 
-        # 1. Instantiate Core DRS Module & Engine
+        # 1. Core DRS Module & Engine
         self.module = HybridDRSModule()
         self.engine = drs.DRSEngine(self.module)
 
-        # 2. Build Mine Topology & Road Availability Timers
+        # 2. Mine Topology & Availability Timers
         self.decline = DRSRoadSegment(self.engine, "decline_2100m", 2100.0, "decline")
         self.ramp_levels = [
             DRSRoadSegment(self.engine, f"ramp_L{i}", 300.0, "ramp")
-            for i in range(1, 8)  # 7 levels, 300m apart
+            for i in range(1, 8)
         ]
         self.surface_rom_road = DRSRoadSegment(self.engine, "surf_rom", 300.0, "surface")
         self.surface_waste_road = DRSRoadSegment(self.engine, "surf_waste", 440.0, "surface")
 
-        # 3. Instantiate Loading & Dumping Bays
+        # 3. Loading & Dumping Bays (Unconstrained upstream muck supply per paper spec)
         self.loading_bays: List[DRSLoadingBay] = []
         for i in range(1, 8):
             self.loading_bays.append(
-                DRSLoadingBay(self.engine, f"L{i}_ORE", "ORE", i, initial_muck=20000.0)
+                DRSLoadingBay(self.engine, f"L{i}_ORE", "ORE", i, initial_muck=10_000_000.0)
             )
             self.loading_bays.append(
-                DRSLoadingBay(self.engine, f"L{i}_WASTE", "WASTE", i, initial_muck=4000.0)
+                DRSLoadingBay(self.engine, f"L{i}_WASTE", "WASTE", i, initial_muck=2_000_000.0)
             )
 
         self.rom_dump_bay = DRSDumpingBay(self.engine, "ROM_PAD", "ORE", "SURFACE_ROM")
         self.waste_dump_bay = DRSDumpingBay(self.engine, "WASTE_DUMP", "WASTE", "SURFACE_WASTE_DUMP")
         self.dump_bays = [self.rom_dump_bay, self.waste_dump_bay]
 
-        # 4. Instantiate Fleet & Fleet Constraints
+        # 4. Fleet & Vectorized NumPy State Arrays
         eff_trucks_count = int(min(num_trucks * mechanical_availability, num_operators))
         eff_trucks_count = max(1, eff_trucks_count)
+        self.n_fleet = eff_trucks_count
 
         self.trucks = [
             Truck(truck_id=f"T{i:02d}", truck_type="AD30")
             for i in range(1, eff_trucks_count + 1)
         ]
-
         self.dispatch = ShelswellDispatchController(self.trucks, self.loading_bays, {})
 
-        # Internal travel state trackers per truck
-        self.travel_timer: Dict[str, float] = {t.truck_id: 0.0 for t in self.trucks}
+        # Vectorized state trackers (1D NumPy arrays)
+        self.timers = np.zeros(self.n_fleet, dtype=np.float64)
+        self.fuel_pct = np.full(self.n_fleet, 100.0, dtype=np.float64)
 
     def _get_travel_time_sec(self, truck: Truck, is_loaded: bool) -> float:
         """Calculates exact baseline travel duration in seconds based on mine layout."""
@@ -111,89 +112,93 @@ class ShelswellHybridSimulation:
 
         return t_total_s
 
-    def step(self, dt: float = 1.0):
+    def step(self, dt_step: float):
         """Single Simulation Step Execution."""
-        for truck in self.trucks:
+        active_mask = self.timers > 0
+        self.timers[active_mask] = np.maximum(0.0, self.timers[active_mask] - dt_step)
+
+        for i, truck in enumerate(self.trucks):
+            if truck.state in (TruckState.TRAVEL_EMPTY, TruckState.TRAVEL_LOADED):
+                self.fuel_pct[i] -= truck.fuel_burn_rate_pct_per_sec * dt_step
+                truck.fuel_level_pct = self.fuel_pct[i]
+
+        for i, truck in enumerate(self.trucks):
             if truck.state == TruckState.PARKED:
                 self.dispatch.assign_next_destination(truck)
                 if truck.state == TruckState.TRAVEL_EMPTY:
-                    self.travel_timer[truck.truck_id] = self._get_travel_time_sec(truck, is_loaded=False)
+                    t_travel = self._get_travel_time_sec(truck, is_loaded=False)
+                    self.timers[i] = t_travel
 
             elif truck.state == TruckState.TRAVEL_EMPTY:
-                self.travel_timer[truck.truck_id] -= dt
-                if self.travel_timer[truck.truck_id] <= 0.0:
+                if self.timers[i] <= 0.0:
                     truck.state = TruckState.WAITING_LOAD
 
-            elif truck.state == TruckState.WAITING_LOAD:
+            if truck.state == TruckState.WAITING_LOAD:
                 target_bay = next(
                     (b for b in self.loading_bays if b.bay_id == truck.target_bay_id), None
                 )
                 if target_bay and target_bay.start_loading(truck):
-                    pass
-
-            elif truck.state == TruckState.LOADING:
-                pass
+                    self.timers[i] = target_bay.total_load_duration_sec
 
             elif truck.state == TruckState.TRAVEL_LOADED:
-                if self.travel_timer[truck.truck_id] <= 0.0:
-                    self.travel_timer[truck.truck_id] = self._get_travel_time_sec(truck, is_loaded=True)
-
-                self.travel_timer[truck.truck_id] -= dt
-                if self.travel_timer[truck.truck_id] <= 0.0:
+                if self.timers[i] <= 0.0:
                     truck.state = TruckState.WAITING_DUMP
 
-            elif truck.state == TruckState.WAITING_DUMP:
+            if truck.state == TruckState.WAITING_DUMP:
                 target_dump = (
                     self.rom_dump_bay if truck.payload_type == "ORE" else self.waste_dump_bay
                 )
-                target_dump.start_dumping(truck)
-
-            elif truck.state == TruckState.DUMPING:
-                pass
+                if target_dump.start_dumping(truck):
+                    self.timers[i] = target_dump.dump_time_remaining
 
             elif truck.state == TruckState.REFUELING:
+                self.fuel_pct[i] = 100.0
                 truck.fuel_level_pct = 100.0
                 truck.state = TruckState.PARKED
 
-            if truck.state in (TruckState.TRAVEL_EMPTY, TruckState.TRAVEL_LOADED):
-                truck.fuel_level_pct -= truck.fuel_burn_rate_pct_per_sec * dt
-
-        self.decline.update_continuous_step(dt)
+        self.decline.update_continuous_step(dt_step)
         for ramp in self.ramp_levels:
-            ramp.update_continuous_step(dt)
+            ramp.update_continuous_step(dt_step)
         for bay in self.loading_bays:
-            bay.update_continuous_step(dt)
+            bay.update_continuous_step(dt_step)
+            if bay.active_truck is not None and bay.active_truck.state == TruckState.TRAVEL_LOADED:
+                idx = self.trucks.index(bay.active_truck)
+                if self.timers[idx] <= 0.0:
+                    t_travel = self._get_travel_time_sec(bay.active_truck, is_loaded=True)
+                    self.timers[idx] = t_travel
+
         for dump_bay in self.dump_bays:
-            dump_bay.update_continuous_step(dt)
+            dump_bay.update_continuous_step(dt_step)
 
         self.module.ore_hauled.value = self.rom_dump_bay.dumped_total.value
         self.module.waste_hauled.value = self.waste_dump_bay.dumped_total.value
-
         self.module.forward()
-        self.module.global_time._update(dt / 86400.0)
+        self.module.global_time._update(dt_step / 86400.0)
 
-    def run_simulation(self, total_days: float = 365.0, dt: float = 60.0, show_progress: bool = False) -> float:
-        """Runs mine production schedule over specified days (365 calendar days baseline)."""
+    def run_simulation(self, total_days: float = 365.0, dt: float = 300.0, show_progress: bool = False) -> float:
+        """Runs event-driven DRS integration over specified days (365 calendar days baseline)."""
         total_seconds = float(total_days * 24.0 * 3600.0)
-        step_dt = float(dt)
-        total_steps = int(total_seconds / step_dt)
-
-        pbar = tqdm(total=total_steps, desc=f"Simulating {total_days:.0f} days", disable=not show_progress)
         current_sec = 0.0
+        step_dt = float(dt)
+
+        pbar = tqdm(total=int(total_seconds), desc=f"Simulating {total_days:.0f} days", disable=not show_progress)
 
         while current_sec < total_seconds:
             time_in_day = current_sec % 86400.0
-            is_shift_change = (10.5 * 3600.0 < time_in_day < 12.0 * 3600.0) or (
-                22.5 * 3600.0 < time_in_day < 24.0 * 3600.0
+            is_shift_gap = (10.5 * 3600.0 <= time_in_day < 12.0 * 3600.0) or (
+                22.5 * 3600.0 <= time_in_day < 24.0 * 3600.0
             )
 
-            if not is_shift_change:
-                self.step(step_dt)
-            else:
+            if is_shift_gap:
                 self.module.global_time._update(step_dt / 86400.0)
+                current_sec += step_dt
+                pbar.update(int(step_dt))
+                continue
+
+            self.step(step_dt)
 
             current_sec += step_dt
-            pbar.update(1)
+            pbar.update(int(step_dt))
 
         pbar.close()
         total_hauled = (

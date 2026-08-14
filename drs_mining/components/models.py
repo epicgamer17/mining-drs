@@ -96,15 +96,7 @@ class BaseBlendingModel(drs.Module):
 
     def print_statistics(self):
         print("\n--- Output Statistics ---")
-        total_time = (
-            self.controller.cumulative_time_mode_a.value
-            + self.controller.cumulative_time_mode_a_contingency.value
-            + self.controller.cumulative_time_mode_a_surging.value
-            + self.controller.cumulative_time_mode_b.value
-            + self.controller.cumulative_time_mode_b_contingency.value
-            + self.controller.cumulative_time_mode_b_surging.value
-            + self.controller.cumulative_time_shutdown.value
-        )
+        total_time = self.controller.total_duration
 
         if total_time > 0:
             print(
@@ -131,15 +123,12 @@ class BaseBlendingModel(drs.Module):
         else:
             print("Total time is 0. Cannot calculate mode portions.")
 
-        active_time = total_time - self.controller.cumulative_time_shutdown.value
+        active_time = self.controller.active_duration(total_time)
         if active_time > 0:
             if hasattr(self.plant, "cumulative_milled_mass"):
                 total_ore_processed = self.plant.cumulative_milled_mass.value
             else:
-                total_ore_processed = (
-                    self.mine.cumulative_extracted_mass.value
-                    - self.ore_to_be_extracted_during_warming_period
-                )
+                total_ore_processed = self.mine.net_extracted_mass
 
             throughput = total_ore_processed / active_time
             print(f"Throughput: {throughput:.4f} tons/day")

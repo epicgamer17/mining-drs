@@ -50,16 +50,10 @@ def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, 
 
         engine.run(max_time=kwargs.get("replication_length", float("inf")))
 
-        active_time = (
-            engine.current_time - sim.controller.cumulative_time_shutdown.value
-        )
+        active_time = sim.controller.active_duration(engine.current_time)
         if active_time > 0:
             throughput = (
-                (
-                    sim.face1.cumulative_extracted_mass.value
-                    + sim.face2.cumulative_extracted_mass.value
-                )
-                - sim.config.ore_to_be_extracted_during_warming_period
+                sim.face1.net_extracted_mass + sim.face2.net_extracted_mass
             ) / active_time
             throughputs.append(throughput)
 

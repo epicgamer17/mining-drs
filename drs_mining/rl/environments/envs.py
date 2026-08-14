@@ -84,16 +84,7 @@ class MiningRLEnv(gym.Env):
 
     def _get_current_time(self):
         """Helper to safely calculate total elapsed simulation days."""
-        c = self.sim.controller
-        return (
-            c.cumulative_time_mode_a.value
-            + c.cumulative_time_mode_a_contingency.value
-            + c.cumulative_time_mode_a_surging.value
-            + c.cumulative_time_mode_b.value
-            + c.cumulative_time_mode_b_contingency.value
-            + c.cumulative_time_mode_b_surging.value
-            + c.cumulative_time_shutdown.value
-        )
+        return self.sim.controller.total_duration
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)

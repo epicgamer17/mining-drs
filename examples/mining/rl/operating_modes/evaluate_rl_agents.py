@@ -85,20 +85,9 @@ def evaluate_rl_throughput(model, env, seed, device):
     sim = env.sim
     config = env.config
 
-    active_time = (
-        sim.controller.cumulative_time_mode_a.value
-        + sim.controller.cumulative_time_mode_a_contingency.value
-        + sim.controller.cumulative_time_mode_a_surging.value
-        + sim.controller.cumulative_time_mode_b.value
-        + sim.controller.cumulative_time_mode_b_contingency.value
-        + sim.controller.cumulative_time_mode_b_surging.value
-    )
+    active_time = sim.controller.active_duration()
     if active_time > 0:
-        throughput = (
-            sim.mine.cumulative_extracted_mass.value
-            - config.ore_to_be_extracted_during_warming_period
-        ) / active_time
-        return throughput
+        return sim.mine.net_extracted_mass / active_time
     return 0.0
 
 

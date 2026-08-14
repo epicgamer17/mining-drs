@@ -87,6 +87,25 @@ class BaseBlendingController(drs.Module):
             "target_stock2_outflow_rate", 0.0
         )
 
+    @property
+    def total_duration(self) -> float:
+        """Returns total accumulated duration across all modes and shutdown."""
+        return (
+            self.cumulative_time_mode_a.value
+            + self.cumulative_time_mode_a_contingency.value
+            + self.cumulative_time_mode_a_surging.value
+            + self.cumulative_time_mode_b.value
+            + self.cumulative_time_mode_b_contingency.value
+            + self.cumulative_time_mode_b_surging.value
+            + self.cumulative_time_shutdown.value
+        )
+
+    def active_duration(self, current_time: float = None) -> float:
+        """Encapsulate state calculations for active operational duration."""
+        if current_time is None:
+            current_time = self.total_duration
+        return max(0.0, current_time - self.cumulative_time_shutdown.value)
+
     def is_campaign_complete(self) -> bool:
         m = self.active_operating_mode.value.name
         threshold = (
@@ -115,13 +134,7 @@ class BaseBlendingController(drs.Module):
     def forward(self) -> Flow:
         mine = self.mine
 
-        if mine is not None and (
-            abs(
-                mine.cumulative_extracted_mass.value
-                - self.ore_to_be_extracted_during_warming_period
-            )
-            < 1e-6
-        ):
+        if mine is not None and abs(mine.net_extracted_mass) < 1e-6:
             self.cumulative_time_mode_a.reset()
             self.cumulative_time_mode_a_contingency.reset()
             self.cumulative_time_mode_a_surging.reset()
@@ -552,8 +565,8 @@ class MultiFaceConcentratorController(BaseBlendingController):
     def forward(self):
         self.total_extra_trucks.value = 0.0
 
-        total_extracted = sum(f.cumulative_extracted_mass.value for f in self.faces)
-        if abs(total_extracted - self.ore_to_be_extracted_during_warming_period) < 1e-6:
+        total_net_extracted = sum(f.net_extracted_mass for f in self.faces)
+        if abs(total_net_extracted) < 1e-6:
             self.cumulative_time_mode_a.reset()
             self.cumulative_time_mode_a_contingency.reset()
             self.cumulative_time_mode_a_surging.reset()

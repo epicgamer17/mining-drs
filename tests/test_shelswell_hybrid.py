@@ -32,7 +32,7 @@ def test_road_availability_timer():
 
     assert road.is_available()
     truck = Truck(truck_id="T01")
-    
+
     travel_time_s = road.occupy_segment(truck)
     assert travel_time_s > 0.0
     assert not road.is_available()
@@ -76,7 +76,7 @@ def test_dispatch_controller():
     bay2 = DRSLoadingBay(None, "L2_ORE", "ORE", 2, initial_muck=2000.0)
 
     controller = ShelswellDispatchController([truck], [bay1, bay2])
-    
+
     # Normal dispatch: should select bay2 with highest unclaimed muck
     controller.assign_next_destination(truck)
     assert truck.target_bay_id == "L2_ORE"
@@ -91,9 +91,8 @@ def test_dispatch_controller():
 
 def test_hybrid_simulation_step():
     sim = ShelswellHybridSimulation(num_trucks=4, num_operators=4, mechanical_availability=1.0)
-    sim.step(dt=10.0)
     assert len(sim.trucks) == 4
-    
+
     # Run short 1-day simulation
     prod = sim.run_simulation(total_days=1.0)
     assert prod >= 0.0

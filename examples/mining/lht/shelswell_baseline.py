@@ -25,22 +25,18 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
 
 from drs_mining.simulation import ShelswellHybridSimulation
-from drs_mining.components.fleet import Truck, TruckState, LHD
-from drs_mining.components.topology import DRSRoadSegment
-from drs_mining.components.bays import DRSLoadingBay, DRSDumpingBay
-from drs_mining.controllers.dispatch import ShelswellDispatchController
 
 
-def run_simulation(trucks: int, operators: int, availability: float, dt: float = 60.0) -> float:
+def run_simulation(trucks: int, operators: int, availability: float) -> float:
     """Executes a single Hybrid DRS simulation run for a given fleet configuration.
 
     Args:
         trucks: Number of haul trucks in fleet (3 to 10).
         operators: Number of truck operators available per shift (1 to 10).
         availability: Mechanical availability fraction (0.5 to 1.0).
-        dt: Integration time step in seconds (default 60.0s).
 
     Returns:
         float: Average daily haulage productivity (tonnes/day).
@@ -53,7 +49,13 @@ def run_simulation(trucks: int, operators: int, availability: float, dt: float =
         num_operators=operators,
         mechanical_availability=availability,
     )
-    return sim.run_simulation(total_days=365.0, dt=dt, show_progress=False)
+    return sim.run_simulation(total_days=365.0, dt=300.0, show_progress=False)
+
+
+def _run_task(args):
+    """Top-level helper function for multiprocessing worker execution."""
+    trucks, operators, avail = args
+    return (trucks, operators, avail, run_simulation(trucks, operators, avail))
 
 
 def generate_figure_2():
@@ -62,9 +64,15 @@ def generate_figure_2():
     availabilities = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     truck_sizes = list(range(3, 11))
 
-    # Baseline reference productivity (10 trucks, 10 ops, 100% availability)
     base_prod = run_simulation(10, 10, 1.0)
     print(f"Base Hybrid DRS productivity (10 trucks, 10 ops, 100% avail): {base_prod:.2f} t/d")
+
+    tasks = [(t, t, a) for a in availabilities for t in truck_sizes]
+
+    results_map = {}
+    with ProcessPoolExecutor() as executor:
+        for t, o, a, prod in tqdm(executor.map(_run_task, tasks), total=len(tasks), desc="Figure 2 Parallel Sweep"):
+            results_map[(t, o, a)] = prod
 
     plt.figure(figsize=(10, 6))
     colors = {
@@ -76,16 +84,8 @@ def generate_figure_2():
         1.0: "black",
     }
 
-    total_runs = len(availabilities) * len(truck_sizes)
-    pbar = tqdm(total=total_runs, desc="Figure 2 Sweep Progress")
-
     for avail in availabilities:
-        prod_list = []
-        for trucks in truck_sizes:
-            prod = run_simulation(trucks, trucks, avail)
-            prod_list.append(prod / base_prod)
-            pbar.update(1)
-
+        prod_list = [results_map[(t, t, avail)] / base_prod for t in truck_sizes]
         plt.plot(
             truck_sizes,
             prod_list,
@@ -94,7 +94,6 @@ def generate_figure_2():
             color=colors[avail],
         )
 
-    pbar.close()
     plt.title(
         "Haulage productivity analysis without haulage operator constraints (Hybrid DRS)",
         fontsize=14,
@@ -117,6 +116,13 @@ def generate_figures_3_to_8():
     operator_counts = list(range(1, 11))
     truck_counts = list(range(3, 11))
 
+    tasks = [(t, min(o, t), a) for a in availabilities for t in truck_counts for o in operator_counts]
+
+    results_map = {}
+    with ProcessPoolExecutor() as executor:
+        for t, o, a, prod in tqdm(executor.map(_run_task, tasks), total=len(tasks), desc="Figures 3-8 Parallel Sweep"):
+            results_map[(t, o, a)] = prod
+
     colors = {
         3: "green",
         4: "brown",
@@ -127,27 +133,32 @@ def generate_figures_3_to_8():
         9: "yellow",
         10: "black",
     }
-
-    total_runs = len(availabilities) * len(truck_counts) * len(operator_counts)
-    pbar = tqdm(total=total_runs, desc="Figures 3-8 Sweep Progress")
+    markers = {
+        3: "o",
+        4: "s",
+        5: "^",
+        6: "v",
+        7: "D",
+        8: "P",
+        9: "X",
+        10: "*",
+    }
 
     for avail in availabilities:
-        base_prod = run_simulation(10, 10, avail)
+        base_prod = results_map[(10, 10, avail)]
 
         plt.figure(figsize=(10, 6))
-        for trucks in truck_counts:
-            prod_list = []
-            for ops in operator_counts:
-                prod = run_simulation(trucks, min(ops, trucks), avail)
-                prod_list.append(prod / base_prod)
-                pbar.update(1)
-
+        # Plot in reverse order (10 trucks down to 3 trucks) so smaller fleet curves remain visible on top when overlapping
+        for trucks in reversed(truck_counts):
+            prod_list = [results_map[(trucks, min(ops, trucks), avail)] / base_prod for ops in operator_counts]
             plt.plot(
                 operator_counts,
                 prod_list,
-                marker="o",
+                marker=markers[trucks],
+                markersize=6,
                 label=f"{trucks} trucks",
                 color=colors[trucks],
+                zorder=10 - trucks,  # higher zorder for smaller fleets to prevent hiding under 10 trucks
             )
 
         plt.title(
@@ -164,11 +175,10 @@ def generate_figures_3_to_8():
         plt.savefig(f"plots/shelswell_fig{fig_num}.png", dpi=300, bbox_inches="tight")
         plt.close()
 
-    pbar.close()
     print("Saved plots/shelswell_fig3.png through plots/shelswell_fig8.png")
 
 
 if __name__ == "__main__":
     generate_figure_2()
     generate_figures_3_to_8()
-    print("Replication of all figures complete with Hybrid DRS Architecture!")
+    print("Replication of all figures complete with High-Performance Hybrid DRS Architecture!")
