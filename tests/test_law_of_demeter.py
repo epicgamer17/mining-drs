@@ -25,3 +25,18 @@ def test_controller_durations():
     assert controller.active_duration(controller.total_duration) == 15.0
     assert controller.active_duration() == 15.0
     assert controller.active_duration(10.0) == 8.0
+
+
+def test_model_delegation_properties():
+    sim = ConcentratorModel()
+    sim.ore1_stock.current_mass.value = 1000.0
+    sim.ore2_stock.current_mass.value = 2000.0
+    sim.fleet.stockpile2_routing_fraction.value = 0.35
+    sim.controller.target_mine_mass_rate.value = 5000.0
+
+    assert sim.ore1_mass == 1000.0
+    assert sim.ore2_mass == 2000.0
+    assert sim.total_stockpile_mass == 3000.0
+    assert sim.stockpile2_routing_fraction == 0.35
+    assert sim.target_mine_mass_rate == 5000.0
+

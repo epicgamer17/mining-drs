@@ -135,10 +135,7 @@ class MiningRLEnv(gym.Env):
     def _calculate_sparse_reward(self, dt: float) -> float:
         reward_time_penalty = -(dt / self.sparse_reward_time_penalty_scale)
         stock_penalty_weight = self.sparse_reward_stock_penalty_weight
-        total_stock = (
-            self.sim.ore1_stock.current_mass.value
-            + self.sim.ore2_stock.current_mass.value
-        )
+        total_stock = self.sim.total_stockpile_mass
         overstock = max(0.0, total_stock - self.target_ore_stock_level)
         overstock_scaled = overstock / self.stockpile_scaling_factor
         return reward_time_penalty - (stock_penalty_weight * overstock_scaled)
@@ -192,10 +189,10 @@ class MiningRLEnv(gym.Env):
 
         return np.array(
             [
-                self.sim.ore1_stock.current_mass.value / target,
-                self.sim.ore2_stock.current_mass.value / target,
-                self.sim.controller.total_system_ore_mass.value / target,
-                self.sim.fleet.stockpile2_routing_fraction.value,
+                self.sim.ore1_mass / target,
+                self.sim.ore2_mass / target,
+                self.sim.total_stockpile_mass / target,
+                self.sim.stockpile2_routing_fraction,
                 self._get_current_time() / self.time_scaling_factor,
             ],
             dtype=np.float32,

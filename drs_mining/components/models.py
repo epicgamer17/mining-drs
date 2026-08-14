@@ -46,6 +46,26 @@ class BaseBlendingModel(drs.Module):
 
         self.global_time = drs.Timer("GlobalTime", initial_value=0.0)
 
+    @property
+    def ore1_mass(self) -> float:
+        return self.ore1_stock.current_mass.value if hasattr(self, "ore1_stock") and self.ore1_stock else 0.0
+
+    @property
+    def ore2_mass(self) -> float:
+        return self.ore2_stock.current_mass.value if hasattr(self, "ore2_stock") and self.ore2_stock else 0.0
+
+    @property
+    def total_stockpile_mass(self) -> float:
+        return self.ore1_mass + self.ore2_mass
+
+    @property
+    def stockpile2_routing_fraction(self) -> float:
+        return self.fleet.stockpile2_routing_fraction.value if hasattr(self, "fleet") and self.fleet else 0.0
+
+    @property
+    def target_mine_mass_rate(self) -> float:
+        return self.controller.target_mine_mass_rate.value if hasattr(self, "controller") and self.controller else 0.0
+
     def setup_telemetry(self):
         if self.enable_telemetry:
             self.telemetry = Telemetry(self)

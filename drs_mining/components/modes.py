@@ -86,7 +86,7 @@ class OperatingMode:
         if "_MINE_SURGING" in self._name:
             target_stock = getattr(ctrl, "target_ore_stock_level", 60000.0)
             model.controller.total_system_ore_mass.lower_threshold = target_stock
-            p = model.fleet.stockpile2_routing_fraction.value
+            p = model.stockpile2_routing_fraction
             if self._name in ("MODE_A_MINE_SURGING"):
                 effective_fraction = max(1.0 - p, 1e-6)
                 raw_extraction = ore1 / effective_fraction
@@ -120,8 +120,8 @@ class OperatingMode:
         stockout_epsilon = getattr(ctrl, "stockout_epsilon", 1e-9)
         target_stock = getattr(ctrl, "target_ore_stock_level", 60000.0)
 
-        ore1 = model.ore1_stock.current_mass.value
-        ore2 = model.ore2_stock.current_mass.value
+        ore1 = model.ore1_mass
+        ore2 = model.ore2_mass
 
         if "_CONTINGENCY" in n:
             if ctrl.is_contingency_complete():

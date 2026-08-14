@@ -42,8 +42,15 @@ class BaseMineFace(drs.Module):
     def _get_current_attr_value(self) -> float:
         raise NotImplementedError("Subclasses must define current ore attribute value.")
 
-    def forward(self):
-        target_extraction_rate = self.parent.controller.target_mine_mass_rate.value
+    def forward(self, target_rate=None):
+        if target_rate is not None:
+            target_extraction_rate = (
+                target_rate.value if hasattr(target_rate, "value") else target_rate
+            )
+        elif self.parent is not None and hasattr(self.parent, "target_mine_mass_rate"):
+            target_extraction_rate = self.parent.target_mine_mass_rate
+        else:
+            target_extraction_rate = 0.0
 
         if (
             self.parcel_extracted_mass.value

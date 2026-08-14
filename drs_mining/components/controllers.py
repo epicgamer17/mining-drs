@@ -143,10 +143,7 @@ class BaseBlendingController(drs.Module):
             self.cumulative_time_mode_b_surging.reset()
             self.cumulative_time_shutdown.reset()
 
-        self.total_system_ore_mass.value = (
-            self.parent.ore1_stock.current_mass.value
-            + self.parent.ore2_stock.current_mass.value
-        )
+        self.total_system_ore_mass.value = self.parent.total_stockpile_mass
 
         next_mode = self.active_operating_mode.value.check_end_conditions(self.parent)
 
@@ -182,7 +179,7 @@ class BaseBlendingController(drs.Module):
             )
 
     def _choose_next_campaign_mode(self):
-        ore2 = self.parent.ore2_stock.current_mass.value
+        ore2 = self.parent.ore2_mass
         total_stock = self.total_system_ore_mass.value
         EPS = 1e-6
         if ore2 > self.critical_ore2_level:
@@ -575,10 +572,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
             self.cumulative_time_mode_b_surging.reset()
             self.cumulative_time_shutdown.reset()
 
-        self.total_system_ore_mass.value = (
-            self.parent.ore1_stock.current_mass.value
-            + self.parent.ore2_stock.current_mass.value
-        )
+        self.total_system_ore_mass.value = self.parent.total_stockpile_mass
 
         next_mode = self.active_operating_mode.value.check_end_conditions(self.parent)
 
