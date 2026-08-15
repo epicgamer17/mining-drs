@@ -18,7 +18,6 @@ sys.path.append(
 )
 
 import random
-import types
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -28,7 +27,7 @@ from drs_mining.components import (
     ConcentratorModel,
     ActiveFleetConcentratorModel,
 )
-from drs_mining.components.controllers import MultiFaceConcentratorController
+from drs_mining.control import step_policy
 from drs import DRSEngine
 
 
@@ -45,7 +44,10 @@ def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, 
 
         engine = DRSEngine()
         engine.register(sim)
-        engine.on_step(lambda t: sim.step_update())
+
+        @engine.on_step
+        def _policy(time):
+            step_policy(sim, time)
 
         np.random.seed(idx)
         random.seed(idx)
@@ -123,16 +125,18 @@ def _apply_equal_allocation_to_sim(sim):
     for k in sim.controller._mode_allocations.keys():
         sim.controller._mode_allocations[k] = fracs
 
-    orig_step_update = MultiFaceConcentratorController.step_update
+    # Reproduce the "equal allocation" control strategy: the fleet is treated as
+    # unconstrained, so each face is driven at its equal share of the requested
+    # rate regardless of physical fleet capacity. The fleet-limited real rate is
+    # still recorded for telemetry.
+    ctrl = sim.controller
+    orig_real = ctrl._face_real_extraction_rate
 
-    def _equal_step_update(self):
-        orig_step_update(self)
-        rate = self.target_mine_mass_rate.value / n
-        for i in range(n):
-            self.face_target_rates[i].value = rate
-            self.face_shift_allocation_fractions[i].value = fracs[i]
+    def _unconstrained_real(face_index, target_extraction_rate):
+        orig_real(face_index, target_extraction_rate)
+        return target_extraction_rate
 
-    sim.controller.step_update = types.MethodType(_equal_step_update, sim.controller)
+    ctrl._face_real_extraction_rate = _unconstrained_real
 
 
 def _run_capacity_case(
@@ -157,7 +161,11 @@ def _run_capacity_case(
 
     engine = DRSEngine()
     engine.register(sim)
-    engine.on_step(lambda t: sim.step_update())
+
+    @engine.on_step
+    def _policy(time):
+        step_policy(sim, time)
+
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
     engine.run(until=max_time)
@@ -501,7 +509,11 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
 
     engine = DRSEngine()
     engine.register(sim)
-    engine.on_step(lambda t: sim.step_update())
+
+    @engine.on_step
+    def _policy(time):
+        step_policy(sim, time)
+
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
     result = engine.run(until=config.get("replication_length", 99999.0))

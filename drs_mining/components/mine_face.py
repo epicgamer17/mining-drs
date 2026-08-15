@@ -44,15 +44,8 @@ class BaseMineFace(Processor):
     def _get_current_attr_value(self) -> float:
         raise NotImplementedError("Subclasses must define current ore attribute value.")
 
-    def update_extraction_rate(self, target_rate: float = 0.0) -> tuple[float, float]:
-        """Explicitly updates target extraction rate, checks parcel boundaries, and sets accumulator rates."""
-        target_extraction_rate = (
-            target_rate.value if hasattr(target_rate, "value") else float(target_rate)
-        )
-
-        self.target_rate = target_extraction_rate
-        actual_rate = self.actual_rate
-
+    def advance_parcel_state(self):
+        """Advance parcel mechanics: cross parcel boundaries and set level thresholds."""
         if (
             self.parcel_extracted_mass.value
             >= self.active_parcel_initial_mass.value - 1e-6
@@ -78,10 +71,6 @@ class BaseMineFace(Processor):
         self.parcel_extracted_mass.upper_threshold = (
             self.active_parcel_initial_mass.value
         )
-
-        self.cumulative_extracted_mass.rate = actual_rate
-        self.parcel_extracted_mass.rate = actual_rate
-        return actual_rate, self._get_current_attr_value()
 
 
 class ConcentratorMineFace(BaseMineFace):

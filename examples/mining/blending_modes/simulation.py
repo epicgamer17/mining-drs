@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import types
 
 from drs_mining.components import ConcentratorModel
+from drs_mining.control import step_policy
 from drs import DRSEngine
 
 
@@ -33,7 +34,10 @@ def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
 
         engine = DRSEngine()
         engine.register(sim)
-        engine.on_step(lambda t: sim.step_update())
+
+        @engine.on_step
+        def _policy(time):
+            step_policy(sim, time)
 
         engine.run(until=config_kwargs.get("replication_length", float("inf")))
 
@@ -124,7 +128,11 @@ if __name__ == "__main__":
 
     engine = DRSEngine()
     engine.register(sim)
-    engine.on_step(lambda t: sim.step_update())
+
+    @engine.on_step
+    def _policy(time):
+        step_policy(sim, time)
+
     if sim.enable_telemetry and hasattr(sim, "telemetry"):
         engine.attach_telemetry(sim.telemetry)
     result = engine.run(until=99999.0)

@@ -1,22 +1,16 @@
 import drs
-from .modes import OperatingMode, RequireDecision
+from .modes import MODES
 from .mine_face import BaseMineFace, ConcentratorMineFace
 from .fleet import ContinuousFleetLogistics
 from .plant import BaseMetallurgicalPlant, ConcentratorPlant
-from .modes import MODES
 
 
 class BaseBlendingController(drs.Module):
-    _TIMER_MAP = {
-        "MODE_A": "cumulative_time_mode_a",
-        "MODE_A_CONTINGENCY": "cumulative_time_mode_a_contingency",
-        "MODE_A_MINE_SURGING": "cumulative_time_mode_a_surging",
-        "MODE_B": "cumulative_time_mode_b",
-        "MODE_B_CONTINGENCY": "cumulative_time_mode_b_contingency",
-        "MODE_B_MINE_SURGING": "cumulative_time_mode_b_surging",
-        "SHUTDOWN": "cumulative_time_shutdown",
-    }
-    _CONTINGENCY_MODES = {"MODE_A_CONTINGENCY", "MODE_B_CONTINGENCY"}
+    """State container for the blending controller.
+
+    All operational decision-making lives in the top-level control policy
+    (drs_mining.control). This module only owns configuration and state.
+    """
 
     def __init__(
         self,
@@ -104,115 +98,6 @@ class BaseBlendingController(drs.Module):
         if current_time is None:
             current_time = self.total_duration
         return max(0.0, current_time - self.cumulative_time_shutdown.value)
-
-    def is_campaign_complete(self) -> bool:
-        m = self.active_operating_mode.value.name
-        threshold = (
-            self.duration_of_shutdowns
-            if m == "SHUTDOWN"
-            else self.duration_of_production_campaigns
-        )
-
-        self.current_campaign_duration.upper_threshold = threshold
-
-        return self.current_campaign_duration.value >= (threshold - 1e-6)
-
-    def is_contingency_complete(self) -> bool:
-        threshold = self.duration_of_contingency_segments
-
-        self.current_contingency_duration.upper_threshold = threshold
-
-        return self.current_contingency_duration.value >= (threshold - 1e-6)
-
-    def reset_campaign_timer(self):
-        self.current_campaign_duration.reset()
-
-    def reset_contingency_timer(self):
-        self.current_contingency_duration.reset()
-
-    def step_update(self):
-        mine = self.mine
-
-        if mine is not None and abs(mine.net_extracted_mass) < 1e-6:
-            self.cumulative_time_mode_a.reset()
-            self.cumulative_time_mode_a_contingency.reset()
-            self.cumulative_time_mode_a_surging.reset()
-            self.cumulative_time_mode_b.reset()
-            self.cumulative_time_mode_b_contingency.reset()
-            self.cumulative_time_mode_b_surging.reset()
-            self.cumulative_time_shutdown.reset()
-
-        parent_obj = getattr(self, "parent", None)
-        if parent_obj is not None:
-            self.total_system_ore_mass.value = parent_obj.total_stockpile_mass
-
-        next_mode = self.active_operating_mode.value.check_end_conditions(parent_obj)
-
-        if isinstance(next_mode, RequireDecision):
-            decision = self.controller_decision()
-            if decision:
-                next_mode = decision
-
-        if next_mode and not isinstance(next_mode, RequireDecision):
-            self.active_operating_mode.value = next_mode
-
-        self._update_timers(self.active_operating_mode.value.name)
-
-        targets = self.active_operating_mode.value.get_target_rates(parent_obj)
-        self.target_mine_mass_rate.value = targets.extraction_rate
-        self.target_stock1_outflow_rate.value = targets.ore1_milling_rate
-        self.target_stock2_outflow_rate.value = targets.ore2_milling_rate
-
-    def _update_timers(self, m: str):
-        for timer_name in self._TIMER_MAP.values():
-            getattr(self, timer_name).rate = 0.0
-        timer_attr = self._TIMER_MAP.get(m)
-        if timer_attr:
-            getattr(self, timer_attr).rate = 1.0
-        self.current_campaign_duration.rate = 1.0
-        self.current_campaign_duration.upper_threshold = (
-            self.duration_of_shutdowns
-            if m == "SHUTDOWN"
-            else self.duration_of_production_campaigns
-        )
-        if m in self._CONTINGENCY_MODES:
-            self.current_contingency_duration.rate = 1.0
-            self.current_contingency_duration.upper_threshold = (
-                self.duration_of_contingency_segments
-            )
-        else:
-            self.current_contingency_duration.rate = 0.0
-
-    def _choose_next_campaign_mode(self):
-        ore2 = self.parent.ore2_mass
-        total_stock = self.total_system_ore_mass.value
-        EPS = 1e-6
-        if ore2 > self.critical_ore2_level:
-            return (
-                MODES["MODE_A"]
-                if total_stock <= self.target_ore_stock_level + EPS
-                else MODES["MODE_A_MINE_SURGING"]
-            )
-        else:
-            return (
-                MODES["MODE_B"]
-                if total_stock <= self.target_ore_stock_level + EPS
-                else MODES["MODE_B_MINE_SURGING"]
-            )
-
-    def controller_decision(self):
-        m = self.active_operating_mode.value.name
-
-        if self.is_campaign_complete():
-            self.reset_campaign_timer()
-            if m == "SHUTDOWN":
-                return self._choose_next_campaign_mode()
-            return MODES["SHUTDOWN"]
-
-        if m.endswith("_CONTINGENCY"):
-            self.reset_contingency_timer()
-        base = m.replace("_CONTINGENCY", "").replace("_MINE_SURGING", "")
-        return MODES[base]
 
 
 class ConcentratorController(BaseBlendingController):
@@ -563,71 +448,4 @@ class MultiFaceConcentratorController(BaseBlendingController):
         self.current_shift_mode_name = mode_name
         self._refresh_shift_allocation_fractions()
         self.fleet_shift_count.value += 1
-
-    def step_update(self):
-        self.total_extra_trucks.value = 0.0
-
-        total_net_extracted = sum(f.net_extracted_mass for f in self.faces)
-        if abs(total_net_extracted) < 1e-6:
-            self.cumulative_time_mode_a.reset()
-            self.cumulative_time_mode_a_contingency.reset()
-            self.cumulative_time_mode_a_surging.reset()
-            self.cumulative_time_mode_b.reset()
-            self.cumulative_time_mode_b_contingency.reset()
-            self.cumulative_time_mode_b_surging.reset()
-            self.cumulative_time_shutdown.reset()
-
-        parent_obj = getattr(self, "parent", None)
-        if parent_obj is not None:
-            self.total_system_ore_mass.value = parent_obj.total_stockpile_mass
-
-        next_mode = self.active_operating_mode.value.check_end_conditions(parent_obj)
-
-        if isinstance(next_mode, RequireDecision):
-            decision = self.controller_decision()
-            if decision:
-                next_mode = decision
-
-        if next_mode:
-            self.active_operating_mode.value = next_mode
-
-        mode_name = self.active_operating_mode.value.name
-        self._update_timers(mode_name)
-
-        self.fleet_shift_timer.rate = 1.0
-        self.fleet_shift_timer.upper_threshold = self.fleet_shift_duration
-
-        shift_due = self.fleet_shift_timer.value >= self.fleet_shift_duration - 1e-6
-        mode_changed = mode_name != self.current_shift_mode_name
-        if self.current_shift_allocations is None or shift_due or mode_changed:
-            self.fleet_shift_timer.reset()
-            self._reallocate_fleet_for_shift()
-
-        targets = self.active_operating_mode.value.get_target_rates(parent_obj)
-        self.target_mine_mass_rate.value = targets.extraction_rate
-        self.target_stock1_outflow_rate.value = targets.ore1_milling_rate
-        self.target_stock2_outflow_rate.value = targets.ore2_milling_rate
-
-        fracs = self.current_shift_allocations
-        if fracs:
-            for i, _face in enumerate(self.faces):
-                target_extraction_rate = targets.extraction_rate * fracs[i]
-                real_extraction_rate = self._face_real_extraction_rate(
-                    i, target_extraction_rate
-                )
-                self.face_target_extraction_rates[i].value = target_extraction_rate
-                self.face_real_extraction_rates[i].value = real_extraction_rate
-                self.face_achieved_extraction_rates[i].value = min(
-                    target_extraction_rate, real_extraction_rate
-                )
-        else:
-            for i, _face in enumerate(self.faces):
-                self.face_target_extraction_rates[i].value = 0.0
-                self.face_real_extraction_rates[i].value = 0.0
-                self.face_achieved_extraction_rates[i].value = 0.0
-                self.face_operational_downtime_fractions[i].value = 0.0
-
-        self.cumulative_mine_development.rate = (
-            self.total_extra_trucks.value * self.development_rate_per_extra_truck
-        )
 

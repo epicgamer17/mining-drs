@@ -40,24 +40,4 @@ class Stockpile(Storage):
             return 0.0
         return level.value / max(1e-6, self.level)
 
-    def update_rates(self, inflow_rate: float, inflow_attr: float, requested_outflow_rate: float) -> float:
-        """Explicitly set rates on Stockpile mass level and attribute levels."""
-        actual_outflow = requested_outflow_rate
-        current_inflow = inflow_rate
-        if self.level <= 1e-6:
-            actual_outflow = min(actual_outflow, current_inflow)
-
-        self.current_mass.rate = current_inflow - actual_outflow
-        for attr in self.expected_attributes:
-            level = getattr(self, attr)
-            level.rate = current_inflow * inflow_attr - actual_outflow * self.current_concentration(attr)
-
-        if self.current_mass.rate < 0:
-            self.current_mass.lower_threshold = 0.0
-            for attr in self.expected_attributes:
-                getattr(self, attr).lower_threshold = 0.0
-
-        self.actual_outflow_rate.value = actual_outflow
-        return actual_outflow
-
 

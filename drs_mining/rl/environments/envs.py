@@ -5,6 +5,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from drs_mining.components.modes import RequireDecision
+from drs_mining.control import step_policy
 from drs import DRSEngine
 from .models import RL_ConcentratorModel
 
@@ -111,7 +112,11 @@ class MiningRLEnv(gym.Env):
         )
         self.engine = DRSEngine()
         self.engine.register(self.sim)
-        self.engine.on_step(lambda t: self.sim.step_update())
+
+        @self.engine.on_step
+        def _policy(time):
+            step_policy(self.sim, time)
+
         if self.enable_telemetry and hasattr(self.sim, "telemetry"):
             self.engine.attach_telemetry(self.sim.telemetry)
         self.last_extraction = 0.0

@@ -22,17 +22,6 @@ class BaseMetallurgicalPlant(Processor):
             "cumulative_milled_mass", initial_value=0.0
         )
 
-    def update_milling_rate(self, ore1_outflow: float, ore2_outflow: float) -> float:
-        """Sets target milling rate and updates cumulative milled mass accumulation rate."""
-        o1 = ore1_outflow.value if hasattr(ore1_outflow, "value") else float(ore1_outflow)
-        o2 = ore2_outflow.value if hasattr(ore2_outflow, "value") else float(ore2_outflow)
-
-        total_inflow = o1 + o2
-        self.target_rate = total_inflow
-        self.cumulative_milled_mass.rate = self.actual_rate
-        return self.actual_rate
-
-
 class ConcentratorPlant(BaseMetallurgicalPlant):
     def __init__(
         self,

@@ -4,7 +4,6 @@ from typing import Optional, Tuple
 import math
 
 import drs
-from drs.flow import Flow
 
 
 class TruckState(Enum):
@@ -82,35 +81,4 @@ class ContinuousFleetLogistics(drs.Module):
         self.stockpile2_routing_fraction = drs.Variable(
             "stockpile2_routing_fraction", 0.0
         )
-
-    def update_routing(self, *mine_outputs) -> tuple[tuple[float, float], tuple[float, float]]:
-        """Calculates stockpile routing rates from mine extraction rates and ore fractions.
-        
-        Returns:
-            ((ore1_rate, 1.0), (ore2_rate, 0.0))
-        """
-        total_ore1_rate = 0.0
-        total_ore2_rate = 0.0
-        total_rate = 0.0
-
-        for out in mine_outputs:
-            if out is not None:
-                if isinstance(out, Flow):
-                    out = out.value
-                if hasattr(out, "extraction_rate"):
-                    rate = out.extraction_rate
-                    ore2_frac = out.attr_value
-                elif isinstance(out, (tuple, list)):
-                    rate, ore2_frac = out[0], out[1]
-                else:
-                    continue
-
-                total_ore2_rate += rate * ore2_frac
-                total_ore1_rate += rate * (1.0 - ore2_frac)
-                total_rate += rate
-
-        if total_rate > 1e-6:
-            self.stockpile2_routing_fraction.value = total_ore2_rate / total_rate
-
-        return (total_ore1_rate, 1.0), (total_ore2_rate, 0.0)
 
