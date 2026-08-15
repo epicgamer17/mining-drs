@@ -14,9 +14,213 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import types
 
-from drs_mining.components import ConcentratorModel
+import drs
+from drs import DRSEngine, Telemetry
+from drs_mining.components import (
+    ConcentratorMineFace,
+    ConcentratorPlant,
+    ConcentratorController,
+    ContinuousFleetLogistics,
+    Stockpile,
+)
 from drs_mining.control import step_policy
-from drs import DRSEngine
+
+
+class Scenario(drs.Module):
+    """Flat scenario container for the blending example.
+
+    Holds the physical entities constructed below and exposes:
+      * the policy surface consumed by ``step_policy``,
+      * ``state_components`` (the registered leaves the engine advances),
+      * termination + observation via ``drs.Telemetry(scenario)``.
+
+    The container itself is a no-op stepper so only the registered leaves move.
+    """
+
+    def __init__(
+        self,
+        mine,
+        fleet,
+        plant,
+        controller,
+        ore1_stock,
+        ore2_stock,
+        total_ore_to_extract: float = 6600000.0,
+    ):
+        super().__init__()
+        self.mine = mine
+        self.fleet = fleet
+        self.plant = plant
+        self.controller = controller
+        self.ore1_stock = ore1_stock
+        self.ore2_stock = ore2_stock
+        self.total_ore_to_extract = total_ore_to_extract
+        self.global_time = drs.Timer("GlobalTime", initial_value=0.0)
+
+    @property
+    def faces(self):
+        return getattr(self.controller, "faces", None)
+
+    @property
+    def ore1_mass(self) -> float:
+        return self.ore1_stock.current_mass.value if self.ore1_stock else 0.0
+
+    @property
+    def ore2_mass(self) -> float:
+        return self.ore2_stock.current_mass.value if self.ore2_stock else 0.0
+
+    @property
+    def total_stockpile_mass(self) -> float:
+        return self.ore1_mass + self.ore2_mass
+
+    @property
+    def stockpile2_routing_fraction(self) -> float:
+        return self.fleet.stockpile2_routing_fraction.value if self.fleet else 0.0
+
+    @property
+    def state_components(self) -> list:
+        comps = []
+        if self.controller is not None:
+            comps.extend(self.controller.state_components)
+        if self.plant is not None:
+            comps.append(self.plant)
+        if self.ore1_stock is not None:
+            comps.append(self.ore1_stock)
+        if self.ore2_stock is not None:
+            comps.append(self.ore2_stock)
+        comps.append(self.global_time)
+        return comps
+
+    def is_terminating_condition_met(self) -> bool:
+        sources = self.faces or ([self.mine] if self.mine is not None else [])
+        total = sum(s.cumulative_extracted_mass.value for s in sources)
+        return total >= self.total_ore_to_extract
+
+    def time_to_event(self) -> float:
+        return float("inf")
+
+    def step(self, dt: float) -> None:
+        pass
+
+
+def build_blending_scenario(
+    mean_ore_fraction: float = 0.30,
+    std_dev_ore_fraction: float = 0.05,
+    prob_new_facies: float = 0.3,
+    variation_same_facies: float = 0.01,
+    min_ore_mass: float = 30000.0,
+    max_ore_mass: float = 50000.0,
+    total_ore_to_extract: float = 6600000.0,
+    ore_to_be_extracted_during_warming_period: float = 600000.0,
+    target_ore_stock_level: float = 60000.0,
+    critical_ore2_level: float = 20400.0,
+    duration_of_production_campaigns: float = 34.0,
+    duration_of_shutdowns: float = 1.0,
+    duration_of_contingency_segments: float = 1.0,
+    ore1_capacity: float = float("inf"),
+    ore2_capacity: float = float("inf"),
+    plant_max_rate: float = float("inf"),
+    **kwargs,
+) -> Scenario:
+    """Construct the blending scenario flat: every physical entity is built here.
+
+    The mine face parcel limits, the two initial stockpiles (Ore1/Ore2), the
+    concentrator plant cap, the continuous fleet, and the blending controller
+    are all instantiated at the top level with explicit keyword arguments.
+    """
+    mine = ConcentratorMineFace(
+        mean_ore_fraction=mean_ore_fraction,
+        std_dev_ore_fraction=std_dev_ore_fraction,
+        prob_new_facies=prob_new_facies,
+        variation_same_facies=variation_same_facies,
+        min_ore_mass=min_ore_mass,
+        max_ore_mass=max_ore_mass,
+        total_ore_to_extract=total_ore_to_extract,
+        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+    )
+    fleet = ContinuousFleetLogistics()
+
+    initial_mass1 = (1 - mean_ore_fraction) * target_ore_stock_level
+    ore1_stock = Stockpile(
+        name="Ore1Stock",
+        expected_attributes=["contained_ore_fraction_mass"],
+        initial_mass=initial_mass1,
+        initial_attributes={
+            "contained_ore_fraction_mass": initial_mass1 * mean_ore_fraction
+        },
+        capacity=ore1_capacity,
+    )
+    initial_mass2 = mean_ore_fraction * target_ore_stock_level
+    ore2_stock = Stockpile(
+        name="Ore2Stock",
+        expected_attributes=["contained_ore_fraction_mass"],
+        initial_mass=initial_mass2,
+        initial_attributes={
+            "contained_ore_fraction_mass": initial_mass2 * mean_ore_fraction
+        },
+        capacity=ore2_capacity,
+    )
+
+    plant = ConcentratorPlant(
+        mine, fleet, ore1_stock, ore2_stock, max_rate=plant_max_rate
+    )
+    controller = ConcentratorController(
+        mine=mine,
+        fleet=fleet,
+        plant=plant,
+        target_ore_stock_level=target_ore_stock_level,
+        critical_ore2_level=critical_ore2_level,
+        duration_of_production_campaigns=duration_of_production_campaigns,
+        duration_of_shutdowns=duration_of_shutdowns,
+        duration_of_contingency_segments=duration_of_contingency_segments,
+        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+    )
+
+    scenario = Scenario(
+        mine=mine,
+        fleet=fleet,
+        plant=plant,
+        controller=controller,
+        ore1_stock=ore1_stock,
+        ore2_stock=ore2_stock,
+        total_ore_to_extract=total_ore_to_extract,
+    )
+    scenario.replication_length = kwargs.get("replication_length", float("inf"))
+    scenario.enable_telemetry = kwargs.get("enable_telemetry", False)
+    return scenario
+
+
+def print_statistics(sim):
+    """Print operating-mode time-shares and throughput for a blending scenario."""
+    print("\n--- Output Statistics ---")
+    total_time = sim.controller.total_duration
+
+    if total_time > 0:
+        for attr, label in [
+            ("cumulative_time_mode_a", "PortionOfTimeInModeA"),
+            ("cumulative_time_mode_a_contingency", "PortionOfTimeInModeAContingency"),
+            ("cumulative_time_mode_a_surging", "PortionOfTimeInModeAMineSurging"),
+            ("cumulative_time_mode_b", "PortionOfTimeInModeB"),
+            ("cumulative_time_mode_b_contingency", "PortionOfTimeInModeBContingency"),
+            ("cumulative_time_mode_b_surging", "PortionOfTimeInModeBMineSurging"),
+            ("cumulative_time_shutdown", "PortionOfTimeInShutdown"),
+        ]:
+            print(
+                f"{label}: {getattr(sim.controller, attr).value / total_time:.4f}"
+            )
+    else:
+        print("Total time is 0. Cannot calculate mode portions.")
+
+    active_time = sim.controller.active_duration(total_time)
+    if active_time > 0:
+        if hasattr(sim.plant, "cumulative_milled_mass"):
+            total_ore_processed = sim.plant.cumulative_milled_mass.value
+        else:
+            total_ore_processed = sim.mine.net_extracted_mass
+        throughput = total_ore_processed / active_time
+        print(f"Throughput: {throughput:.4f} tons/day")
+    else:
+        print("Active time is 0. Cannot calculate throughput.")
 
 
 def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
@@ -30,7 +234,7 @@ def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
         np.random.seed(idx)
         random.seed(idx)
 
-        sim = ConcentratorModel(**config_kwargs)
+        sim = build_blending_scenario(**config_kwargs)
 
         engine = DRSEngine()
         engine.register(sim, *sim.state_components)
@@ -114,12 +318,11 @@ if __name__ == "__main__":
 
     np.random.seed(11)
     random.seed(11)
-    sim = ConcentratorModel(
+    sim = build_blending_scenario(
         replication_length=99999.0,
         target_ore_stock_level=args.total_stockpile_level,
         std_dev_ore_fraction=args.std_dev_ore_fraction,
         prob_new_facies=0.3,
-        enable_telemetry=True,
     )
 
     from drs_mining.components.modes import MODES
@@ -133,13 +336,29 @@ if __name__ == "__main__":
     def _policy(time):
         step_policy(sim, time)
 
-    if sim.enable_telemetry and hasattr(sim, "telemetry"):
-        engine.attach_telemetry(sim.telemetry)
+    telemetry = Telemetry(sim)
+    telemetry.register_metric(
+        "MassOfCurrentParcel",
+        lambda t, m, s, _: m.mine.active_parcel_initial_mass.value,
+    )
+    telemetry.register_metric(
+        "CurrentParcelRoutingFraction",
+        lambda t, m, s, _: m.fleet.stockpile2_routing_fraction.value,
+    )
+    telemetry.register_metric(
+        "Campaign_Shutdown",
+        lambda t, m, s, _: m.controller.current_campaign_duration.value,
+    )
+    telemetry.register_metric(
+        "Contingency",
+        lambda t, m, s, _: m.controller.current_contingency_duration.value,
+    )
+    engine.attach_telemetry(telemetry)
     result = engine.run(until=99999.0)
 
     print(result.summary())
 
-    sim.print_statistics()
+    print_statistics(sim)
 
     df = result.history
 

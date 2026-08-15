@@ -23,12 +23,322 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+import drs
+from drs import DRSEngine, Telemetry
 from drs_mining.components import (
-    ConcentratorModel,
-    ActiveFleetConcentratorModel,
+    ConcentratorPlant,
+    ContinuousFleetLogistics,
+    ContinuousMineFace,
+    MultiFaceConcentratorController,
+    StochasticFaciesGenerator,
+    Stockpile,
 )
 from drs_mining.control import step_policy
-from drs import DRSEngine
+
+
+class Scenario(drs.Module):
+    """Flat scenario container for the two-face fleet example.
+
+    Holds the physical entities constructed by ``build_multi_face_scenario``
+    below, exposes the policy surface consumed by ``step_policy``
+    (``controller``, ``faces``, ``plant``, ``stockpiles``, ``fleet``) and the
+    registered ``state_components`` the engine advances each step. The
+    container itself is a no-op stepper; only the registered leaves move.
+    """
+
+    def __init__(
+        self,
+        mine,
+        fleet,
+        plant,
+        controller,
+        ore1_stock,
+        ore2_stock,
+        face1,
+        face2,
+        total_ore_to_extract: float = 6600000.0,
+    ):
+        super().__init__()
+        self.mine = mine
+        self.fleet = fleet
+        self.plant = plant
+        self.controller = controller
+        self.ore1_stock = ore1_stock
+        self.ore2_stock = ore2_stock
+        self.face1 = face1
+        self.face2 = face2
+        self.faces = [face1, face2]
+        self.total_ore_to_extract = total_ore_to_extract
+        self.global_time = drs.Timer("GlobalTime", initial_value=0.0)
+
+    @property
+    def total_stockpile_mass(self) -> float:
+        return self.ore1_mass + self.ore2_mass
+
+    @property
+    def ore1_mass(self) -> float:
+        return self.ore1_stock.current_mass.value
+
+    @property
+    def ore2_mass(self) -> float:
+        return self.ore2_stock.current_mass.value
+
+    @property
+    def state_components(self) -> list:
+        comps = []
+        comps.extend(self.controller.state_components)
+        comps.append(self.plant)
+        comps.append(self.ore1_stock)
+        comps.append(self.ore2_stock)
+        comps.append(self.global_time)
+        return comps
+
+    def is_terminating_condition_met(self) -> bool:
+        total_extracted = (
+            self.face1.cumulative_extracted_mass.value
+            + self.face2.cumulative_extracted_mass.value
+        )
+        return total_extracted >= self.total_ore_to_extract
+
+    def time_to_event(self) -> float:
+        return float("inf")
+
+    def step(self, dt: float) -> None:
+        pass
+
+
+def build_multi_face_scenario(
+    mean_ore_fraction: float = 0.30,
+    std_dev_ore_fraction: float = 0.05,
+    target_ore_stock_level: float = 60000.0,
+    total_ore_to_extract: float = 6600000.0,
+    ore_to_be_extracted_during_warming_period: float = 600000.0,
+    critical_ore2_level: float = 20400.0,
+    duration_of_production_campaigns: float = 34.0,
+    duration_of_shutdowns: float = 1.0,
+    duration_of_contingency_segments: float = 1.0,
+    prob_new_facies: float = 0.3,
+    variation_same_facies: float = 0.01,
+    replication_length: float = float("inf"),
+    ore1_capacity: float = float("inf"),
+    ore2_capacity: float = float("inf"),
+    plant_max_rate: float = float("inf"),
+    mode_a_ore1_milling_rate: float = 3600.0,
+    mode_a_ore2_milling_rate: float = 2400.0,
+    mode_a_contingency_ore1_milling_rate: float = 3900.0,
+    mode_b_ore1_milling_rate: float = 4600.0,
+    mode_b_ore2_milling_rate: float = 800.0,
+    mode_b_contingency_ore2_milling_rate: float = 2500.0,
+    fleet_shift_duration: float = 0.5,
+    total_lhd_count: float = 3.0,
+    total_truck_count: float = 10.0,
+    max_lhds_per_face: float = 2.0,
+    max_trucks_per_face: float = 6.0,
+    face_haul_distance=(1.5, 2.2),
+    face_accessibility_fraction=(0.93, 0.91),
+    truck_velocity: float = 15.0,
+    loader_cycle_time_hours: float = 0.0833,
+    truck_dump_time_hours: float = 0.033,
+    traffic_delay_per_truck_hours: float = 0.015,
+    fleet_mechanical_availability: float = 0.85,
+    loader_payload_tonnes: float = 15.0,
+    truck_payload_tonnes: float = 30.0,
+    development_rate_per_extra_truck: float = 50.0,
+    enable_telemetry: bool = False,
+) -> Scenario:
+    """Construct the two-face fleet scenario flat: every entity is built here.
+
+    Two geologically distinct mine faces (face1 low-grade ~15%, face2
+    high-grade ~45%), the shared continuous truck/LHD fleet, the two initial
+    stockpiles (Ore1/Ore2), the concentrator plant cap, and the multi-face
+    controller with its explicit fleet-fit/development parameters.
+    """
+    gen1 = StochasticFaciesGenerator(
+        mean_fraction=0.15,
+        std_dev=0.075,
+        prob_new_facies=prob_new_facies,
+        variation_same_facies=variation_same_facies,
+    )
+    gen2 = StochasticFaciesGenerator(
+        mean_fraction=0.45,
+        std_dev=0.025,
+        prob_new_facies=prob_new_facies,
+        variation_same_facies=variation_same_facies,
+    )
+    face1 = ContinuousMineFace(
+        face_id=1,
+        generator=gen1,
+        total_ore_to_extract=total_ore_to_extract,
+        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+    )
+    face2 = ContinuousMineFace(
+        face_id=2,
+        generator=gen2,
+        total_ore_to_extract=total_ore_to_extract,
+        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+    )
+    fleet = ContinuousFleetLogistics()
+
+    initial_mass1 = (1 - mean_ore_fraction) * target_ore_stock_level
+    ore1_stock = Stockpile(
+        name="Ore1Stock",
+        expected_attributes=["contained_ore_fraction_mass"],
+        initial_mass=initial_mass1,
+        initial_attributes={
+            "contained_ore_fraction_mass": initial_mass1 * mean_ore_fraction
+        },
+        capacity=ore1_capacity,
+    )
+    initial_mass2 = mean_ore_fraction * target_ore_stock_level
+    ore2_stock = Stockpile(
+        name="Ore2Stock",
+        expected_attributes=["contained_ore_fraction_mass"],
+        initial_mass=initial_mass2,
+        initial_attributes={
+            "contained_ore_fraction_mass": initial_mass2 * mean_ore_fraction
+        },
+        capacity=ore2_capacity,
+    )
+
+    plant = ConcentratorPlant(
+        None, fleet, ore1_stock, ore2_stock, max_rate=plant_max_rate
+    )
+    controller = MultiFaceConcentratorController(
+        faces=[face1, face2],
+        fleet=fleet,
+        plant=plant,
+        target_ore_stock_level=target_ore_stock_level,
+        critical_ore2_level=critical_ore2_level,
+        duration_of_production_campaigns=duration_of_production_campaigns,
+        duration_of_shutdowns=duration_of_shutdowns,
+        duration_of_contingency_segments=duration_of_contingency_segments,
+        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        mode_a_ore1_milling_rate=mode_a_ore1_milling_rate,
+        mode_a_ore2_milling_rate=mode_a_ore2_milling_rate,
+        mode_a_contingency_ore1_milling_rate=mode_a_contingency_ore1_milling_rate,
+        mode_b_ore1_milling_rate=mode_b_ore1_milling_rate,
+        mode_b_ore2_milling_rate=mode_b_ore2_milling_rate,
+        mode_b_contingency_ore2_milling_rate=mode_b_contingency_ore2_milling_rate,
+        fleet_shift_duration=fleet_shift_duration,
+        total_lhd_count=total_lhd_count,
+        total_truck_count=total_truck_count,
+        max_lhds_per_face=max_lhds_per_face,
+        max_trucks_per_face=max_trucks_per_face,
+        face_haul_distance=face_haul_distance,
+        face_accessibility_fraction=face_accessibility_fraction,
+        truck_velocity=truck_velocity,
+        loader_cycle_time_hours=loader_cycle_time_hours,
+        truck_dump_time_hours=truck_dump_time_hours,
+        traffic_delay_per_truck_hours=traffic_delay_per_truck_hours,
+        fleet_mechanical_availability=fleet_mechanical_availability,
+        loader_payload_tonnes=loader_payload_tonnes,
+        truck_payload_tonnes=truck_payload_tonnes,
+        development_rate_per_extra_truck=development_rate_per_extra_truck,
+    )
+
+    scenario = Scenario(
+        mine=None,
+        fleet=fleet,
+        plant=plant,
+        controller=controller,
+        ore1_stock=ore1_stock,
+        ore2_stock=ore2_stock,
+        face1=face1,
+        face2=face2,
+        total_ore_to_extract=total_ore_to_extract,
+    )
+    scenario.replication_length = replication_length
+    scenario.enable_telemetry = enable_telemetry
+    return scenario
+
+
+def _build_telemetry(sim):
+    """Explicit telemetry channels for the capacity-policy analysis.
+
+    The drs telemetry battery already records every state variable of the
+    scenario tree (``Ore1Stock_mass``, ``active_operating_mode``,
+    ``total_system_ore_mass``, ...). These are the derived per-face rates and
+    productivities the analysis joins into its dataframe.
+    """
+    telemetry = Telemetry(sim)
+    telemetry.register_metric(
+        "face1_target_extraction_rate",
+        lambda t, m, s, _: m.controller.face_target_extraction_rates[0].value,
+    )
+    telemetry.register_metric(
+        "face1_real_extraction_rate",
+        lambda t, m, s, _: m.controller.face_real_extraction_rates[0].value,
+    )
+    telemetry.register_metric(
+        "face1_achieved_extraction_rate",
+        lambda t, m, s, _: m.controller.face_achieved_extraction_rates[0].value,
+    )
+    telemetry.register_metric(
+        "face1_operational_downtime_fraction",
+        lambda t, m, s, _: m.controller.face_operational_downtime_fractions[0].value,
+    )
+    telemetry.register_metric(
+        "face2_target_extraction_rate",
+        lambda t, m, s, _: m.controller.face_target_extraction_rates[1].value,
+    )
+    telemetry.register_metric(
+        "face2_real_extraction_rate",
+        lambda t, m, s, _: m.controller.face_real_extraction_rates[1].value,
+    )
+    telemetry.register_metric(
+        "face2_achieved_extraction_rate",
+        lambda t, m, s, _: m.controller.face_achieved_extraction_rates[1].value,
+    )
+    telemetry.register_metric(
+        "face2_operational_downtime_fraction",
+        lambda t, m, s, _: m.controller.face_operational_downtime_fractions[1].value,
+    )
+    telemetry.register_metric(
+        "fleet_shift_count",
+        lambda t, m, s, _: m.controller.fleet_shift_count.value,
+    )
+    telemetry.register_metric(
+        "face1_extracted_mass",
+        lambda t, m, s, _: m.face1.cumulative_extracted_mass.value,
+    )
+    telemetry.register_metric(
+        "face2_extracted_mass",
+        lambda t, m, s, _: m.face2.cumulative_extracted_mass.value,
+    )
+    return telemetry
+
+
+def print_statistics(sim):
+    """Print operating-mode time-shares and throughput for a multi-face scenario."""
+    print("\n--- Output Statistics ---")
+    total_time = sim.controller.total_duration
+
+    if total_time > 0:
+        for attr, label in [
+            ("cumulative_time_mode_a", "PortionOfTimeInModeA"),
+            ("cumulative_time_mode_a_contingency", "PortionOfTimeInModeAContingency"),
+            ("cumulative_time_mode_a_surging", "PortionOfTimeInModeAMineSurging"),
+            ("cumulative_time_mode_b", "PortionOfTimeInModeB"),
+            ("cumulative_time_mode_b_contingency", "PortionOfTimeInModeBContingency"),
+            ("cumulative_time_mode_b_surging", "PortionOfTimeInModeBMineSurging"),
+            ("cumulative_time_shutdown", "PortionOfTimeInShutdown"),
+        ]:
+            print(
+                f"{label}: {getattr(sim.controller, attr).value / total_time:.4f}"
+            )
+    else:
+        print("Total time is 0. Cannot calculate mode portions.")
+
+    active_time = sim.controller.active_duration(total_time)
+    if active_time > 0:
+        if hasattr(sim.plant, "cumulative_milled_mass"):
+            total_ore_processed = sim.plant.cumulative_milled_mass.value
+        else:
+            total_ore_processed = sim.mine.net_extracted_mass
+        throughput = total_ore_processed / active_time
+        print(f"Throughput: {throughput:.4f} tons/day")
+    else:
+        print("Active time is 0. Cannot calculate throughput.")
 
 
 def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, float]:
@@ -40,7 +350,7 @@ def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, 
     throughputs = []
 
     for idx in range(N):
-        sim = ActiveFleetConcentratorModel(**kwargs)
+        sim = build_multi_face_scenario(**kwargs)
 
         engine = DRSEngine()
         engine.register(sim, *sim.state_components)
@@ -153,7 +463,7 @@ def _run_capacity_case(
     random.seed(random_seed)
 
     kwargs = config_kwargs or {}
-    sim = ActiveFleetConcentratorModel(enable_telemetry=True, **kwargs)
+    sim = build_multi_face_scenario(**kwargs)
     if equal_allocation:
         _apply_equal_allocation_to_sim(sim)
 
@@ -166,11 +476,11 @@ def _run_capacity_case(
     def _policy(time):
         step_policy(sim, time)
 
-    if sim.enable_telemetry and hasattr(sim, "telemetry"):
-        engine.attach_telemetry(sim.telemetry)
+    telemetry = _build_telemetry(sim)
+    engine.attach_telemetry(telemetry)
     engine.run(until=max_time)
 
-    df = sim.telemetry.to_dataframe()
+    df = telemetry.to_dataframe()
     df["scenario"] = label
     df["active_operating_mode_name"] = df["active_operating_mode"].apply(
         lambda x: x.name if x else "None"
@@ -498,7 +808,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     """Run the multi-face simulation and produce full diagnostics dashboard."""
     np.random.seed(42)
     random.seed(11)
-    sim = ActiveFleetConcentratorModel(enable_telemetry=True, **config)
+    sim = build_multi_face_scenario(**config)
 
     if equal_allocation:
         _apply_equal_allocation_to_sim(sim)
@@ -514,10 +824,10 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     def _policy(time):
         step_policy(sim, time)
 
-    if sim.enable_telemetry and hasattr(sim, "telemetry"):
-        engine.attach_telemetry(sim.telemetry)
+    telemetry = _build_telemetry(sim)
+    engine.attach_telemetry(telemetry)
     result = engine.run(until=config.get("replication_length", 99999.0))
-    sim.print_statistics()
+    print_statistics(sim)
 
     df = result.history
 
