@@ -99,6 +99,37 @@ class BaseBlendingController(drs.Module):
             current_time = self.total_duration
         return max(0.0, current_time - self.cumulative_time_shutdown.value)
 
+    @property
+    def state_components(self) -> list:
+        """Stateful leaf components owned by this controller (mine, faces, levels, timers).
+
+        These are registered with the engine so it can compute time-to-event
+        boundaries and advance state without recursively inspecting the model.
+        """
+        comps = []
+        if self.mine is not None:
+            comps.append(self.mine)
+        for face in getattr(self, "faces", []) or []:
+            comps.append(face)
+        comps.append(self.total_system_ore_mass)
+        comps.extend(
+            [
+                self.current_campaign_duration,
+                self.current_contingency_duration,
+                self.cumulative_time_mode_a,
+                self.cumulative_time_mode_a_contingency,
+                self.cumulative_time_mode_a_surging,
+                self.cumulative_time_mode_b,
+                self.cumulative_time_mode_b_contingency,
+                self.cumulative_time_mode_b_surging,
+                self.cumulative_time_shutdown,
+            ]
+        )
+        fleet_shift_timer = getattr(self, "fleet_shift_timer", None)
+        if fleet_shift_timer is not None:
+            comps.append(fleet_shift_timer)
+        return comps
+
 
 class ConcentratorController(BaseBlendingController):
     def __init__(

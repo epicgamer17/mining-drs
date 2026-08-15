@@ -66,6 +66,34 @@ class BaseBlendingModel(drs.Module):
     def target_mine_mass_rate(self) -> float:
         return self.controller.target_mine_mass_rate.value if hasattr(self, "controller") and self.controller else 0.0
 
+    @property
+    def state_components(self) -> list:
+        """All stateful leaf components that must be registered with the engine.
+
+        The engine iterates exactly these components each step to compute state
+        boundary leaps (``time_to_event``) and advance state (``step``), so the
+        model itself is a passive container and its own ``time_to_event``/``step``
+        are overridden to no-ops.
+        """
+        comps = []
+        if self.controller is not None:
+            comps.extend(self.controller.state_components)
+        if self.plant is not None:
+            comps.append(self.plant)
+        if hasattr(self, "ore1_stock") and self.ore1_stock is not None:
+            comps.append(self.ore1_stock)
+        if hasattr(self, "ore2_stock") and self.ore2_stock is not None:
+            comps.append(self.ore2_stock)
+        comps.append(self.global_time)
+        return comps
+
+    def time_to_event(self) -> float:
+        """Container model: leaf components are registered individually, so no boundaries here."""
+        return math.inf
+
+    def step(self, dt: float) -> None:
+        """Container model: leaf components are registered individually, so nothing to step here."""
+
     def setup_telemetry(self):
         if self.enable_telemetry:
             self.telemetry = Telemetry(self)

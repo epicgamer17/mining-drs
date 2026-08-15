@@ -43,7 +43,7 @@ def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, 
         sim = ActiveFleetConcentratorModel(**kwargs)
 
         engine = DRSEngine()
-        engine.register(sim)
+        engine.register(sim, *sim.state_components)
 
         @engine.on_step
         def _policy(time):
@@ -160,7 +160,7 @@ def _run_capacity_case(
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine()
-    engine.register(sim)
+    engine.register(sim, *sim.state_components)
 
     @engine.on_step
     def _policy(time):
@@ -508,7 +508,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine()
-    engine.register(sim)
+    engine.register(sim, *sim.state_components)
 
     @engine.on_step
     def _policy(time):

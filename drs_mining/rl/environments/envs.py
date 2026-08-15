@@ -111,7 +111,7 @@ class MiningRLEnv(gym.Env):
             enable_telemetry=self.enable_telemetry,
         )
         self.engine = DRSEngine()
-        self.engine.register(self.sim)
+        self.engine.register(self.sim, *self.sim.state_components)
 
         @self.engine.on_step
         def _policy(time):

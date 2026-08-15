@@ -33,7 +33,7 @@ def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
         sim = ConcentratorModel(**config_kwargs)
 
         engine = DRSEngine()
-        engine.register(sim)
+        engine.register(sim, *sim.state_components)
 
         @engine.on_step
         def _policy(time):
@@ -127,7 +127,7 @@ if __name__ == "__main__":
     sim.controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine()
-    engine.register(sim)
+    engine.register(sim, *sim.state_components)
 
     @engine.on_step
     def _policy(time):
