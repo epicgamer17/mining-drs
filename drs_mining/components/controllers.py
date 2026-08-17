@@ -1,16 +1,37 @@
 import drs
-from .modes import MODES
+from .modes import MODES, RequireDecision
 from .mine_face import BaseMineFace, ConcentratorMineFace
 from .fleet import ContinuousFleetLogistics
 from .plant import BaseMetallurgicalPlant, ConcentratorPlant
 
 
 class BaseBlendingController(drs.Module):
-    """State container for the blending controller.
+    """State container and mode bookkeeping for the blending controller.
 
-    All operational decision-making lives in the top-level control policy
-    (drs_mining.control). This module only owns configuration and state.
+    The controller owns configuration, state, and the operating-mode /
+    duration-timer bookkeeping exposed through ``step_mode``. Policy-level
+    decisions (target extraction rates, fleet shift allocation, recovery of
+    the RL action) live in the top-level control policy (drs_mining.control).
     """
+
+    _MODE_TIMER_ATTRS = {
+        "MODE_A": "cumulative_time_mode_a",
+        "MODE_A_CONTINGENCY": "cumulative_time_mode_a_contingency",
+        "MODE_A_MINE_SURGING": "cumulative_time_mode_a_surging",
+        "MODE_B": "cumulative_time_mode_b",
+        "MODE_B_CONTINGENCY": "cumulative_time_mode_b_contingency",
+        "MODE_B_MINE_SURGING": "cumulative_time_mode_b_surging",
+        "SHUTDOWN": "cumulative_time_shutdown",
+    }
+
+    _CONTINGENCY_MODES = {"MODE_A_CONTINGENCY", "MODE_B_CONTINGENCY"}
+
+    _RL_ACTION_MODES = [
+        MODES["MODE_A"],
+        MODES["MODE_B"],
+        MODES["MODE_A_MINE_SURGING"],
+        MODES["MODE_B_MINE_SURGING"],
+    ]
 
     def __init__(
         self,
@@ -23,6 +44,7 @@ class BaseBlendingController(drs.Module):
         duration_of_shutdowns: float = 1.0,
         duration_of_contingency_segments: float = 1.0,
         ore_to_be_extracted_during_warming_period: float = 600000.0,
+        total_ore_to_extract: float = 6600000.0,
     ):
         super().__init__()
         self.mine = mine
@@ -36,6 +58,7 @@ class BaseBlendingController(drs.Module):
         self.ore_to_be_extracted_during_warming_period = (
             ore_to_be_extracted_during_warming_period
         )
+        self.total_ore_to_extract = total_ore_to_extract
 
         self.active_operating_mode = drs.Variable(
             "active_operating_mode", MODES["MODE_A"]
@@ -99,6 +122,161 @@ class BaseBlendingController(drs.Module):
             current_time = self.total_duration
         return max(0.0, current_time - self.cumulative_time_shutdown.value)
 
+    def step_mode(self, ore1_stock, ore2_stock) -> str:
+        """High-level mode bookkeeping for one engine step.
+
+        * Resets cumulative per-mode timers on a fresh simulation start,
+        * refreshes ``total_system_ore_mass`` from the two stockpiles,
+        * evaluates and applies the next operating mode, and
+        * updates the campaign / contingency duration timers.
+
+        ``ore1_stock`` and ``ore2_stock`` are the two stockpile components
+        feeding the concentrator; their current masses drive the mode
+        transitions. Returns the name of the active mode after the
+        transition so callers can detect mode changes.
+        """
+        self._reset_mode_timers_if_fresh()
+        self.total_system_ore_mass.value = (
+            ore1_stock.current_mass.value + ore2_stock.current_mass.value
+        )
+
+        next_mode = self._next_mode(ore1_stock, ore2_stock)
+        if next_mode is not None:
+            self.active_operating_mode.value = next_mode
+
+        name = self.active_operating_mode.value.name
+        self._update_mode_timers(name)
+        return name
+
+    def _reset_mode_timers_if_fresh(self):
+        sources = getattr(self, "faces", None) or (
+            [self.mine] if self.mine is not None else []
+        )
+        if sources and abs(sum(s.net_extracted_mass for s in sources)) < 1e-6:
+            for timer_name in self._MODE_TIMER_ATTRS.values():
+                getattr(self, timer_name).reset()
+
+    def _next_mode(self, ore1_stock, ore2_stock):
+        name = self.active_operating_mode.value.name
+        eps = getattr(self, "stockout_epsilon", 1e-9)
+        target_stock = getattr(self, "target_ore_stock_level", 60000.0)
+
+        if self._campaign_complete():
+            if name == "SHUTDOWN":
+                rl_action = getattr(self, "pending_rl_action", None)
+                if rl_action is not None:
+                    self.current_campaign_duration.reset()
+                    self.pending_rl_action = None
+                    return self._RL_ACTION_MODES[rl_action]
+                if hasattr(self, "pending_rl_action"):
+                    raise RequireDecision()
+            self.current_campaign_duration.reset()
+            return (
+                self._choose_next_campaign_mode(ore2_stock)
+                if name == "SHUTDOWN"
+                else MODES["SHUTDOWN"]
+            )
+
+        if name == "SHUTDOWN":
+            return None
+
+        ore1 = ore1_stock.current_mass.value
+        ore2 = ore2_stock.current_mass.value
+
+        if "_CONTINGENCY" in name:
+            if self._contingency_complete():
+                self.current_contingency_duration.reset()
+                return MODES[name.replace("_CONTINGENCY", "")]
+            base = name.replace("_CONTINGENCY", "")
+            if base == "MODE_A" and ore1 <= eps:
+                return MODES[base + "_MINE_SURGING"]
+            if base == "MODE_B" and ore2 <= eps:
+                return MODES[base + "_MINE_SURGING"]
+            return None
+
+        if "_MINE_SURGING" in name:
+            if self.total_system_ore_mass.value <= target_stock + 1e-6:
+                return MODES[name.replace("_MINE_SURGING", "")]
+            return None
+
+        if name == "MODE_A":
+            if ore1 <= eps:
+                return MODES[name + "_MINE_SURGING"]
+            if ore2 <= eps:
+                self.current_contingency_duration.reset()
+                return MODES[name + "_CONTINGENCY"]
+            return None
+
+        if name == "MODE_B":
+            if ore1 <= eps:
+                self.current_contingency_duration.reset()
+                return MODES[name + "_CONTINGENCY"]
+            if ore2 <= eps:
+                return MODES[name + "_MINE_SURGING"]
+            return None
+
+        return None
+
+    def _campaign_complete(self) -> bool:
+        threshold = (
+            self.duration_of_shutdowns
+            if self.active_operating_mode.value.name == "SHUTDOWN"
+            else self.duration_of_production_campaigns
+        )
+        self.current_campaign_duration.upper_threshold = threshold
+        return self.current_campaign_duration.value >= (threshold - 1e-6)
+
+    def _contingency_complete(self) -> bool:
+        threshold = self.duration_of_contingency_segments
+        self.current_contingency_duration.upper_threshold = threshold
+        return self.current_contingency_duration.value >= (threshold - 1e-6)
+
+    def _choose_next_campaign_mode(self, ore2_stock):
+        ore2 = ore2_stock.current_mass.value
+        total_stock = self.total_system_ore_mass.value
+        EPS = 1e-6
+        if ore2 > self.critical_ore2_level:
+            return (
+                MODES["MODE_A"]
+                if total_stock <= self.target_ore_stock_level + EPS
+                else MODES["MODE_A_MINE_SURGING"]
+            )
+        return (
+            MODES["MODE_B"]
+            if total_stock <= self.target_ore_stock_level + EPS
+            else MODES["MODE_B_MINE_SURGING"]
+        )
+
+    def _update_mode_timers(self, name):
+        for timer_name in self._MODE_TIMER_ATTRS.values():
+            getattr(self, timer_name).rate = 0.0
+        timer_attr = self._MODE_TIMER_ATTRS.get(name)
+        if timer_attr:
+            getattr(self, timer_attr).rate = 1.0
+        self.current_campaign_duration.rate = 1.0
+        self.current_campaign_duration.upper_threshold = (
+            self.duration_of_shutdowns
+            if name == "SHUTDOWN"
+            else self.duration_of_production_campaigns
+        )
+        if name in self._CONTINGENCY_MODES:
+            self.current_contingency_duration.rate = 1.0
+            self.current_contingency_duration.upper_threshold = (
+                self.duration_of_contingency_segments
+            )
+        else:
+            self.current_contingency_duration.rate = 0.0
+
+    def is_terminating_condition_met(self) -> bool:
+        """True once the combined extraction of every mine source reaches the target."""
+        sources = getattr(self, "faces", None) or []
+        if not sources and self.mine is not None:
+            sources = [self.mine]
+        return (
+            sum(s.cumulative_extracted_mass.value for s in sources)
+            >= self.total_ore_to_extract
+        )
+
     @property
     def state_components(self) -> list:
         """Stateful leaf components owned by this controller (mine, faces, levels, timers).
@@ -143,6 +321,7 @@ class ConcentratorController(BaseBlendingController):
         duration_of_shutdowns: float = 1.0,
         duration_of_contingency_segments: float = 1.0,
         ore_to_be_extracted_during_warming_period: float = 600000.0,
+        total_ore_to_extract: float = 6600000.0,
     ):
         super().__init__(
             mine=mine,
@@ -154,6 +333,7 @@ class ConcentratorController(BaseBlendingController):
             duration_of_shutdowns=duration_of_shutdowns,
             duration_of_contingency_segments=duration_of_contingency_segments,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+            total_ore_to_extract=total_ore_to_extract,
         )
 
 
@@ -171,6 +351,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
         duration_of_shutdowns: float = 1.0,
         duration_of_contingency_segments: float = 1.0,
         ore_to_be_extracted_during_warming_period: float = 600000.0,
+        total_ore_to_extract: float = 6600000.0,
         mode_a_ore1_milling_rate: float = 3600.0,
         mode_a_ore2_milling_rate: float = 2400.0,
         mode_a_contingency_ore1_milling_rate: float = 3900.0,
@@ -203,6 +384,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
             duration_of_shutdowns=duration_of_shutdowns,
             duration_of_contingency_segments=duration_of_contingency_segments,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+            total_ore_to_extract=total_ore_to_extract,
         )
         self.faces = list(faces)
         self.mode_a_ore1_milling_rate = mode_a_ore1_milling_rate

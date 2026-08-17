@@ -38,6 +38,11 @@ class BaseMineFace(Processor):
             - self.ore_to_be_extracted_during_warming_period
         )
 
+    def is_terminating_condition_met(self) -> bool:
+        return (
+            self.cumulative_extracted_mass.value >= self.total_ore_to_extract
+        )
+
     def _load_next_batch(self):
         raise NotImplementedError("Subclasses must define how to parse the generator output.")
 
@@ -71,6 +76,22 @@ class BaseMineFace(Processor):
         self.parcel_extracted_mass.upper_threshold = (
             self.active_parcel_initial_mass.value
         )
+
+    def set_extraction_rate(self, rate) -> float:
+        """Drive this face at the given extraction rate for one engine step.
+
+        Applies the target to the underlying processor, advances parcel
+        state, and stamps the cumulative and parcel extraction rates from
+        the realised rate. ``rate`` may be a plain float or a
+        ``drs.Variable``. Returns the realised extraction rate.
+        """
+        target = rate.value if hasattr(rate, "value") else float(rate)
+        self.target_rate = target
+        self.advance_parcel_state()
+        actual = self.actual_rate
+        self.cumulative_extracted_mass.rate = actual
+        self.parcel_extracted_mass.rate = actual
+        return actual
 
 
 class ConcentratorMineFace(BaseMineFace):
