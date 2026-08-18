@@ -22,9 +22,9 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-import drs
 from drs import DRSEngine, Telemetry
 from drs_mining.components import (
+    BlendingNetwork,
     ConcentratorPlant,
     ContinuousFleetLogistics,
     ContinuousMineFace,
@@ -38,159 +38,15 @@ from drs_mining.components.modes import MODES
 # ============================================================
 # Inline control policy
 # ------------------------------------------------------------
-# A verbatim copy of the multi-face path of ``drs_mining.control``
-# adapted to the plain local entities built below. Operating-mode
-# bookkeeping lives on the controller (``step_mode``), extraction
-# mechanics on the mine faces (``set_extraction_rate``), and
-# stockpile balancing on the stockpiles (``set_inout``); this
-# policy owns the fleet shift allocation, target rates, routing,
-# and calling order.
+# The ``on_step`` handler is a thin orchestrator of the component
+# APIs: the controller updates the operating mode, computes the
+# target flow rates (``update_mode`` / ``get_target_rates``),
+# schedules fleet shifts and drives each face
+# (``schedule_fleet_shifts`` / ``drive_faces``), the fleet routes
+# the mined material (``fleet.route``), the stockpiles feed-and-draw
+# (``feed_and_draw``), and the plant processes the combined draw
+# (``process``). Parcel mechanics run inside each face's ``step``.
 # ============================================================
-
-_RATE_MAP = {
-    "MODE_A": ("mode_a_ore1_milling_rate", "mode_a_ore2_milling_rate"),
-    "MODE_A_CONTINGENCY": ("mode_a_contingency_ore1_milling_rate", None),
-    "MODE_A_MINE_SURGING": ("mode_a_ore1_milling_rate", "mode_a_ore2_milling_rate"),
-    "MODE_B": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
-    "MODE_B_CONTINGENCY": (None, "mode_b_contingency_ore2_milling_rate"),
-    "MODE_B_MINE_SURGING": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
-    "SHUTDOWN": (None, None),
-}
-
-DEFAULT_RATES = {
-    "mode_a_ore1_milling_rate": 3600.0,
-    "mode_a_ore2_milling_rate": 2400.0,
-    "mode_a_contingency_ore1_milling_rate": 3900.0,
-    "mode_b_ore1_milling_rate": 4600.0,
-    "mode_b_ore2_milling_rate": 800.0,
-    "mode_b_contingency_ore2_milling_rate": 2500.0,
-}
-
-
-def multi_face_step_policy(
-    time,
-    fleet,
-    plant,
-    controller,
-    ore1_stock,
-    ore2_stock,
-    global_time,
-):
-    """Top-level multi-face fleet policy invoked by the engine once per step."""
-    global_time.rate = 1.0
-    ctrl = controller
-    ctrl.total_extra_trucks.value = 0.0
-
-    mode_name = ctrl.step_mode(ore1_stock, ore2_stock)
-
-    ctrl.fleet_shift_timer.rate = 1.0
-    ctrl.fleet_shift_timer.upper_threshold = ctrl.fleet_shift_duration
-
-    shift_due = ctrl.fleet_shift_timer.value >= ctrl.fleet_shift_duration - 1e-6
-    mode_changed = mode_name != ctrl.current_shift_mode_name
-    if ctrl.current_shift_allocations is None or shift_due or mode_changed:
-        ctrl.fleet_shift_timer.reset()
-        ctrl._reallocate_fleet_for_shift()
-
-    _target_rates(controller, ore1_stock, ore2_stock, fleet, None)
-
-    fracs = ctrl.current_shift_allocations
-    for i, face in enumerate(ctrl.faces):
-        if fracs is not None and i < len(fracs):
-            target = ctrl.target_mine_mass_rate.value * fracs[i]
-            real = ctrl._face_real_extraction_rate(i, target)
-            ctrl.face_target_extraction_rates[i].value = target
-            ctrl.face_real_extraction_rates[i].value = real
-            ctrl.face_achieved_extraction_rates[i].value = min(target, real)
-            face.set_extraction_rate(ctrl.face_achieved_extraction_rates[i].value)
-        else:
-            ctrl.face_target_extraction_rates[i].value = 0.0
-            ctrl.face_real_extraction_rates[i].value = 0.0
-            ctrl.face_achieved_extraction_rates[i].value = 0.0
-            ctrl.face_operational_downtime_fractions[i].value = 0.0
-            face.set_extraction_rate(0.0)
-
-    ctrl.cumulative_mine_development.rate = (
-        ctrl.total_extra_trucks.value * ctrl.development_rate_per_extra_truck
-    )
-
-    ore1_rate, ore2_rate = _route(ctrl.faces, fleet)
-    _balance_stockpiles(
-        controller, plant, ore1_stock, ore2_stock, ore1_rate, ore2_rate
-    )
-
-    ctrl.total_system_ore_mass.rate = (
-        ore1_stock.current_mass.rate + ore2_stock.current_mass.rate
-    )
-
-
-def _route(mining_sources, fleet):
-    ore1 = ore2 = total = 0.0
-    for src in mining_sources:
-        rate = src.actual_rate
-        ore2_frac = src._get_current_attr_value()
-        ore2 += rate * ore2_frac
-        ore1 += rate * (1.0 - ore2_frac)
-        total += rate
-    if total > 1e-6 and fleet is not None:
-        fleet.stockpile2_routing_fraction.value = ore2 / total
-    return ore1, ore2
-
-
-def _balance_stockpiles(
-    controller, plant, ore1_stock, ore2_stock, ore1_rate, ore2_rate
-):
-    ctrl = controller
-    out1 = ore1_stock.set_inout(
-        ore1_rate, ctrl.target_stock1_outflow_rate.value, attr_inflow=1.0
-    )
-    out2 = ore2_stock.set_inout(
-        ore2_rate, ctrl.target_stock2_outflow_rate.value, attr_inflow=0.0
-    )
-    if plant is not None:
-        plant.target_rate = out1 + out2
-        plant.cumulative_milled_mass.rate = plant.actual_rate
-
-
-def _target_rates(controller, ore1_stock, ore2_stock, fleet, mine):
-    ctrl = controller
-    name = ctrl.active_operating_mode.value.name
-
-    ore1, ore2 = _read_rates(name, ctrl)
-
-    if "_MINE_SURGING" in name:
-        target_stock = getattr(ctrl, "target_ore_stock_level", 60000.0)
-        ctrl.total_system_ore_mass.lower_threshold = target_stock
-        p = fleet.stockpile2_routing_fraction.value if fleet is not None else 0.0
-        if p <= 1e-4 and mine is not None and hasattr(mine, "_get_current_attr_value"):
-            p = mine._get_current_attr_value()
-        if name == "MODE_A_MINE_SURGING":
-            effective_fraction = max(1.0 - p, 0.01)
-            extraction = ore1 / effective_fraction
-        else:
-            effective_fraction = max(p, 0.01)
-            extraction = ore2 / effective_fraction
-    else:
-        extraction = ore1 + ore2
-
-    ctrl.target_mine_mass_rate.value = extraction
-    ctrl.target_stock1_outflow_rate.value = ore1
-    ctrl.target_stock2_outflow_rate.value = ore2
-
-
-def _read_rates(name, obj):
-    ore1_attr, ore2_attr = _RATE_MAP.get(name, (None, None))
-    ore1 = (
-        getattr(obj, ore1_attr, DEFAULT_RATES.get(ore1_attr, 0.0))
-        if ore1_attr
-        else 0.0
-    )
-    ore2 = (
-        getattr(obj, ore2_attr, DEFAULT_RATES.get(ore2_attr, 0.0))
-        if ore2_attr
-        else 0.0
-    )
-    return ore1, ore2
 
 
 def build_multi_face_network(
@@ -231,12 +87,12 @@ def build_multi_face_network(
     truck_payload_tonnes: float = 30.0,
     development_rate_per_extra_truck: float = 50.0,
     enable_telemetry: bool = False,
-) -> tuple:
+) -> "BlendingNetwork":
     """Construct the two-face fleet network flat: every entity is built here.
 
-    Returns ``(face1, face2, fleet, plant, controller, ore1_stock, ore2_stock,
-    global_time)``. There is no scenario container; the engine registers the
-    controller's state components plus the residual leaves below.
+    Returns a ``BlendingNetwork`` holding ``(faces, fleet, plant, controller,
+    ore1_stock, ore2_stock)``. There is no scenario container; call
+    ``network.register(engine)`` to register every stateful leaf.
 
     Two geologically distinct mine faces (face1 low-grade ~15%, face2
     high-grade ~45%), the shared continuous truck/LHD fleet, the two initial
@@ -278,6 +134,7 @@ def build_multi_face_network(
             "contained_ore_fraction_mass": initial_mass1 * mean_ore_fraction
         },
         capacity=ore1_capacity,
+        attr_inflow=1.0,
     )
     initial_mass2 = mean_ore_fraction * target_ore_stock_level
     ore2_stock = Stockpile(
@@ -288,6 +145,7 @@ def build_multi_face_network(
             "contained_ore_fraction_mass": initial_mass2 * mean_ore_fraction
         },
         capacity=ore2_capacity,
+        attr_inflow=0.0,
     )
 
     plant = ConcentratorPlant(
@@ -326,38 +184,50 @@ def build_multi_face_network(
         truck_payload_tonnes=truck_payload_tonnes,
         development_rate_per_extra_truck=development_rate_per_extra_truck,
     )
-    global_time = drs.Timer("GlobalTime", initial_value=0.0)
 
-    return (
-        face1,
-        face2,
-        fleet,
-        plant,
-        controller,
-        ore1_stock,
-        ore2_stock,
-        global_time,
+    return BlendingNetwork(
+        faces=[face1, face2],
+        fleet=fleet,
+        plant=plant,
+        controller=controller,
+        ore1_stock=ore1_stock,
+        ore2_stock=ore2_stock,
     )
 
 
-def _register_and_policy(engine, fleet, plant, controller, ore1_stock, ore2_stock, global_time):
+def _register_and_policy(engine, network):
     """Register the stateful leaves and wire the inline policy onto the engine."""
-    engine.register(
-        *controller.state_components,
-        plant,
-        ore1_stock,
-        ore2_stock,
-        global_time,
-    )
+    network.register(engine)
+
+    ctrl = network.controller
+    fleet = network.fleet
+    plant = network.plant
+    ore1_stock = network.ore1_stock
+    ore2_stock = network.ore2_stock
 
     @engine.on_step
-    def _policy(time):
-        multi_face_step_policy(
-            time, fleet, plant, controller, ore1_stock, ore2_stock, global_time
+    def manage_blending(t: float):
+        # 1. Update operating mode based on campaign timers & stockpile levels
+        mode = ctrl.update_mode(ore1_stock, ore2_stock)
+
+        # 2. Compute the aggregate target flow rates, then schedule fleet
+        #    shifts and split the target across the faces.
+        mine_target, stock1_target, stock2_target = ctrl.get_target_rates(
+            mode, fleet
         )
+        ctrl.schedule_fleet_shifts(mode)
+        ctrl.drive_faces(mine_target)
+
+        # 3. Route mined parcels into the stockpiles
+        ore1_in, ore2_in = fleet.route(sources=ctrl.faces)
+
+        # 4. Feed stockpiles and draw into plant
+        out1 = ore1_stock.feed_and_draw(ore1_in, stock1_target)
+        out2 = ore2_stock.feed_and_draw(ore2_in, stock2_target)
+        plant.process(out1 + out2)
 
 
-def build_telemetry(engine, controller, face1, face2, fleet, ore1_stock, ore2_stock):
+def build_telemetry(engine, network):
     """Explicit telemetry channels for the capacity-policy analysis.
 
     Attaching ``Telemetry(model=engine)`` records every state variable of the
@@ -366,6 +236,11 @@ def build_telemetry(engine, controller, face1, face2, fleet, ore1_stock, ore2_st
     productivities the analysis joins into its dataframe.
     """
     telemetry = Telemetry(model=engine)
+    controller = network.controller
+    face1, face2 = network.faces
+    fleet = network.fleet
+    ore1_stock = network.ore1_stock
+    ore2_stock = network.ore2_stock
 
     def _face1_alloc(t, m, s, _):
         return controller.face_target_rates[0].value / max(
@@ -475,24 +350,21 @@ def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, 
     throughputs = []
 
     for idx in range(N):
-        face1, face2, fleet, plant, controller, ore1_stock, ore2_stock, global_time = (
-            build_multi_face_network(**kwargs)
-        )
+        network = build_multi_face_network(**kwargs)
 
         engine = DRSEngine()
-        _register_and_policy(
-            engine, fleet, plant, controller, ore1_stock, ore2_stock, global_time
-        )
+        _register_and_policy(engine, network)
 
         np.random.seed(idx)
         random.seed(idx)
 
         engine.run(until=kwargs.get("replication_length", float("inf")))
 
-        active_time = controller.active_duration(engine.current_time)
+        active_time = network.controller.active_duration(engine.current_time)
         if active_time > 0:
             throughput = (
-                face1.net_extracted_mass + face2.net_extracted_mass
+                network.faces[0].net_extracted_mass
+                + network.faces[1].net_extracted_mass
             ) / active_time
             throughputs.append(throughput)
 
@@ -588,20 +460,17 @@ def _run_capacity_case(
     random.seed(random_seed)
 
     kwargs = config_kwargs or {}
-    face1, face2, fleet, plant, controller, ore1_stock, ore2_stock, global_time = (
-        build_multi_face_network(**kwargs)
-    )
+    network = build_multi_face_network(**kwargs)
+    controller = network.controller
     if equal_allocation:
         _apply_equal_allocation(controller)
 
     controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine()
-    _register_and_policy(
-        engine, fleet, plant, controller, ore1_stock, ore2_stock, global_time
-    )
+    _register_and_policy(engine, network)
 
-    telemetry = build_telemetry(engine, controller, face1, face2, fleet, ore1_stock, ore2_stock)
+    telemetry = build_telemetry(engine, network)
     engine.attach_telemetry(telemetry)
     engine.run(until=max_time)
 
@@ -933,24 +802,20 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     """Run the multi-face simulation and produce full diagnostics dashboard."""
     np.random.seed(42)
     random.seed(11)
-    face1, face2, fleet, plant, controller, ore1_stock, ore2_stock, global_time = (
-        build_multi_face_network(**config)
-    )
-
+    network = build_multi_face_network(**config)
+    controller = network.controller
     if equal_allocation:
         _apply_equal_allocation(controller)
 
     controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine()
-    _register_and_policy(
-        engine, fleet, plant, controller, ore1_stock, ore2_stock, global_time
-    )
+    _register_and_policy(engine, network)
 
-    telemetry = build_telemetry(engine, controller, face1, face2, fleet, ore1_stock, ore2_stock)
+    telemetry = build_telemetry(engine, network)
     engine.attach_telemetry(telemetry)
     result = engine.run(until=config.get("replication_length", 99999.0))
-    print_statistics(controller, plant, [face1, face2])
+    print_statistics(controller, network.plant, network.faces)
 
     df = result.history
 

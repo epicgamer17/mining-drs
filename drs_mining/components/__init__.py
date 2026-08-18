@@ -6,7 +6,12 @@ from .topology import DRSRoadSegment, load_topology_dict, build_simulation_from_
 from .bays import DRSLoadingBay, DRSDumpingBay
 from .mine_face import BaseMineFace, ConcentratorMineFace, ContinuousMineFace
 from .plant import BaseMetallurgicalPlant, ConcentratorPlant
-from .controllers import ConcentratorController, MultiFaceConcentratorController
+from .controllers import (
+    BlendingNetwork,
+    BaseBlendingController,
+    ConcentratorController,
+    MultiFaceConcentratorController,
+)
 from .models import (
     ActiveFleetConcentratorModel,
     BaseBlendingModel,
@@ -18,6 +23,8 @@ __all__ = [
     "Storage",
     "Processor",
     "BaseBlendingModel",
+    "BlendingNetwork",
+    "BaseBlendingController",
     "ConcentratorModel",
     "ActiveFleetConcentratorModel",
     "MultiFaceConcentratorController",

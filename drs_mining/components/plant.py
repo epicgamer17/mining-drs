@@ -22,6 +22,16 @@ class BaseMetallurgicalPlant(Processor):
             "cumulative_milled_mass", initial_value=0.0
         )
 
+    def process(self, mass_rate: float) -> None:
+        """Draw ``mass_rate`` into the plant for one engine step.
+
+        Sets the target rate and stamps the milled-mass rate from the
+        realised rate; the milled-mass level is advanced in ``step``.
+        """
+        self.target_rate = mass_rate
+        self.cumulative_milled_mass.rate = self.actual_rate
+
+
 class ConcentratorPlant(BaseMetallurgicalPlant):
     def __init__(
         self,

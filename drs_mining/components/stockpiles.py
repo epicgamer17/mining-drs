@@ -15,10 +15,12 @@ class Stockpile(Storage):
         initial_mass: float = 0.0,
         initial_attributes: Optional[Dict[str, float]] = None,
         capacity: float = math.inf,
+        attr_inflow: float = 1.0,
     ):
         super().__init__(name=f"{name}_mass", capacity=capacity, initial_level=initial_mass)
         self.name = name
         self.expected_attributes = expected_attributes
+        self.attr_inflow = float(attr_inflow)
 
         # Bind current_mass to Storage's underlying Level for compatibility
         self.current_mass = self._level
@@ -39,6 +41,16 @@ class Stockpile(Storage):
         if level is None:
             return 0.0
         return level.value / max(1e-6, self.level)
+
+    def feed_and_draw(self, inflow_rate: float, outflow_rate: float) -> float:
+        """Feed the stockpile from a routing inflow and draw into the plant.
+
+        High-level alias for :meth:`set_inout` using this stockpile's stored
+        ``attr_inflow`` (Ore1 = 1.0, Ore2 = 0.0). Returns the realised outflow.
+        """
+        return self.set_inout(
+            inflow_rate, outflow_rate, attr_inflow=self.attr_inflow
+        )
 
     def set_inout(
         self,

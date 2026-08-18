@@ -1,17 +1,76 @@
+import math
+from dataclasses import dataclass
+from typing import List, Optional
+
 import drs
 from .modes import MODES, RequireDecision
 from .mine_face import BaseMineFace, ConcentratorMineFace
 from .fleet import ContinuousFleetLogistics
 from .plant import BaseMetallurgicalPlant, ConcentratorPlant
+from .stockpiles import Stockpile
+
+
+@dataclass
+class BlendingNetwork:
+    """Lightweight container for a flat blending-network build.
+
+    Eliminates long multi-tuple unpacking: callers receive one object holding
+    the physical and control entities and register everything with a single
+    ``register`` call. The controller may be registered alongside its children
+    because ``BaseBlendingController`` steps only its own owned levels (it does
+    not recursively advance nested components).
+    """
+
+    mine: Optional[BaseMineFace] = None
+    fleet: Optional[ContinuousFleetLogistics] = None
+    plant: Optional[BaseMetallurgicalPlant] = None
+    controller: Optional["BaseBlendingController"] = None
+    ore1_stock: Optional[Stockpile] = None
+    ore2_stock: Optional[Stockpile] = None
+    faces: Optional[List[BaseMineFace]] = None
+
+    @property
+    def sources(self) -> List[BaseMineFace]:
+        """All extraction sources (faces for multi-face, else the single mine)."""
+        if self.faces:
+            return self.faces
+        return [self.mine] if self.mine is not None else []
+
+    def components(self) -> tuple:
+        """Stateful leaves to register with a DRS engine."""
+        comps = []
+        if self.mine is not None:
+            comps.append(self.mine)
+        for face in self.faces or []:
+            comps.append(face)
+        if self.fleet is not None:
+            comps.append(self.fleet)
+        if self.plant is not None:
+            comps.append(self.plant)
+        if self.controller is not None:
+            comps.append(self.controller)
+        if self.ore1_stock is not None:
+            comps.append(self.ore1_stock)
+        if self.ore2_stock is not None:
+            comps.append(self.ore2_stock)
+        return tuple(comps)
+
+    def register(self, engine) -> "BlendingNetwork":
+        """Register every stateful leaf onto ``engine``. Returns ``self``."""
+        engine.register(*self.components())
+        return self
 
 
 class BaseBlendingController(drs.Module):
     """State container and mode bookkeeping for the blending controller.
 
     The controller owns configuration, state, and the operating-mode /
-    duration-timer bookkeeping exposed through ``step_mode``. Policy-level
-    decisions (target extraction rates, fleet shift allocation, recovery of
-    the RL action) live in the top-level control policy (drs_mining.control).
+    duration-timer bookkeeping exposed through ``update_mode``, the target
+    rate computation exposed through ``get_target_rates``, and (for the
+    multi-face variant) fleet-shift scheduling and face drive allocation.
+    Policy-level decisions (target extraction rates, fleet shift allocation,
+    recovery of the RL action) live in the top-level control policy
+    (drs_mining.control).
     """
 
     _MODE_TIMER_ATTRS = {
@@ -22,6 +81,25 @@ class BaseBlendingController(drs.Module):
         "MODE_B_CONTINGENCY": "cumulative_time_mode_b_contingency",
         "MODE_B_MINE_SURGING": "cumulative_time_mode_b_surging",
         "SHUTDOWN": "cumulative_time_shutdown",
+    }
+
+    _RATE_MAP = {
+        "MODE_A": ("mode_a_ore1_milling_rate", "mode_a_ore2_milling_rate"),
+        "MODE_A_CONTINGENCY": ("mode_a_contingency_ore1_milling_rate", None),
+        "MODE_A_MINE_SURGING": ("mode_a_ore1_milling_rate", "mode_a_ore2_milling_rate"),
+        "MODE_B": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
+        "MODE_B_CONTINGENCY": (None, "mode_b_contingency_ore2_milling_rate"),
+        "MODE_B_MINE_SURGING": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
+        "SHUTDOWN": (None, None),
+    }
+
+    _DEFAULT_RATES = {
+        "mode_a_ore1_milling_rate": 3600.0,
+        "mode_a_ore2_milling_rate": 2400.0,
+        "mode_a_contingency_ore1_milling_rate": 3900.0,
+        "mode_b_ore1_milling_rate": 4600.0,
+        "mode_b_ore2_milling_rate": 800.0,
+        "mode_b_contingency_ore2_milling_rate": 2500.0,
     }
 
     _CONTINGENCY_MODES = {"MODE_A_CONTINGENCY", "MODE_B_CONTINGENCY"}
@@ -122,13 +200,14 @@ class BaseBlendingController(drs.Module):
             current_time = self.total_duration
         return max(0.0, current_time - self.cumulative_time_shutdown.value)
 
-    def step_mode(self, ore1_stock, ore2_stock) -> str:
+    def update_mode(self, ore1_stock, ore2_stock) -> str:
         """High-level mode bookkeeping for one engine step.
 
         * Resets cumulative per-mode timers on a fresh simulation start,
         * refreshes ``total_system_ore_mass`` from the two stockpiles,
-        * evaluates and applies the next operating mode, and
-        * updates the campaign / contingency duration timers.
+        * evaluates and applies the next operating mode,
+        * updates the campaign / contingency duration timers, and
+        * wires the system ore mass ``rate`` to the stockpile mass rates.
 
         ``ore1_stock`` and ``ore2_stock`` are the two stockpile components
         feeding the concentrator; their current masses drive the mode
@@ -146,7 +225,65 @@ class BaseBlendingController(drs.Module):
 
         name = self.active_operating_mode.value.name
         self._update_mode_timers(name)
+
+        self.total_system_ore_mass.rate = (
+            ore1_stock.current_mass.rate + ore2_stock.current_mass.rate
+        )
         return name
+
+    # Backwards-compatible alias for the pre-Step-3 name.
+    step_mode = update_mode
+
+    def get_target_rates(self, mode, fleet=None):
+        """Compute the target extraction and stockpile outflow rates for a mode.
+
+        ``mode`` is the active operating-mode name returned by
+        :meth:`update_mode`. ``fleet`` supplies the current routing fraction so
+        that surging can back out the extraction rate required to fill the
+        depleted stockpile. Returns ``(mine_target, stock1_target,
+        stock2_target)`` and also stores them on the controller (used as
+        telemetry channels).
+        """
+        name = mode.name if hasattr(mode, "name") else str(mode)
+        ore1, ore2 = self._read_rates(name)
+
+        if "_MINE_SURGING" in name:
+            self.total_system_ore_mass.lower_threshold = self.target_ore_stock_level
+            p = (
+                fleet.stockpile2_routing_fraction.value
+                if fleet is not None
+                else 0.0
+            )
+            if p <= 1e-4 and getattr(self, "mine", None) is not None:
+                p = self.mine._get_current_attr_value()
+            if name == "MODE_A_MINE_SURGING":
+                effective_fraction = max(1.0 - p, 0.01)
+                extraction = ore1 / effective_fraction
+            else:
+                effective_fraction = max(p, 0.01)
+                extraction = ore2 / effective_fraction
+        else:
+            extraction = ore1 + ore2
+
+        self.target_mine_mass_rate.value = extraction
+        self.target_stock1_outflow_rate.value = ore1
+        self.target_stock2_outflow_rate.value = ore2
+        return extraction, ore1, ore2
+
+    def _read_rates(self, name):
+        """Read the per-mode milling-rate pair (ore1, ore2) for ``name``."""
+        ore1_attr, ore2_attr = self._RATE_MAP.get(name, (None, None))
+        ore1 = (
+            getattr(self, ore1_attr, self._DEFAULT_RATES.get(ore1_attr, 0.0))
+            if ore1_attr
+            else 0.0
+        )
+        ore2 = (
+            getattr(self, ore2_attr, self._DEFAULT_RATES.get(ore2_attr, 0.0))
+            if ore2_attr
+            else 0.0
+        )
+        return ore1, ore2
 
     def _reset_mode_timers_if_fresh(self):
         sources = getattr(self, "faces", None) or (
@@ -307,6 +444,26 @@ class BaseBlendingController(drs.Module):
         if fleet_shift_timer is not None:
             comps.append(fleet_shift_timer)
         return comps
+
+    def time_to_event(self) -> float:
+        """Time until this controller's owned levels hit a state boundary.
+
+        Only the controller's own levels (mode timers, durations, system ore
+        mass, fleet-shift timer) are considered, so the controller can be
+        registered on the engine alongside its mine/faces/fleet/plant without
+        double-counting their boundaries.
+        """
+        min_dt = math.inf
+        for level in self._owned_levels():
+            dt = level.time_to_event()
+            if 0.0 <= dt < min_dt:
+                min_dt = dt
+        return min_dt
+
+    def step(self, dt: float) -> None:
+        """Advance this controller's owned levels forward by ``dt``."""
+        for level in self._owned_levels():
+            level.step(dt)
 
 
 class ConcentratorController(BaseBlendingController):
@@ -661,4 +818,50 @@ class MultiFaceConcentratorController(BaseBlendingController):
         self.current_shift_mode_name = mode_name
         self._refresh_shift_allocation_fractions()
         self.fleet_shift_count.value += 1
+
+    def schedule_fleet_shifts(self, mode_name):
+        """Drive the fleet-shift timer and reallocate the fleet when due.
+
+        ``mode_name`` is the active mode returned by ``update_mode``. The
+        fleet is reallocated on the first step, when the shift timer elapses,
+        or when the operating mode changes.
+        """
+        self.fleet_shift_timer.rate = 1.0
+        self.fleet_shift_timer.upper_threshold = self.fleet_shift_duration
+
+        shift_due = self.fleet_shift_timer.value >= self.fleet_shift_duration - 1e-6
+        mode_changed = mode_name != self.current_shift_mode_name
+        if self.current_shift_allocations is None or shift_due or mode_changed:
+            self.fleet_shift_timer.reset()
+            self._reallocate_fleet_for_shift()
+
+    def drive_faces(self, mine_target):
+        """Split ``mine_target`` across the faces and drive each face's rate.
+
+        Resets the spare-truck tally, computes each face's target/real/achieved
+        extraction rates (using the precomputed per-mode allocations and the
+        physical fleet model), stamps the per-face telemetry variables, and
+        applies the achieved rate to each face. Parcel mechanics run inside
+        each face's ``step``.
+        """
+        self.total_extra_trucks.value = 0.0
+        fracs = self.current_shift_allocations
+        for i, face in enumerate(self.faces):
+            if fracs is not None and i < len(fracs):
+                target = mine_target * fracs[i]
+                real = self._face_real_extraction_rate(i, target)
+                self.face_target_extraction_rates[i].value = target
+                self.face_real_extraction_rates[i].value = real
+                self.face_achieved_extraction_rates[i].value = min(target, real)
+                face.target_rate = self.face_achieved_extraction_rates[i].value
+            else:
+                self.face_target_extraction_rates[i].value = 0.0
+                self.face_real_extraction_rates[i].value = 0.0
+                self.face_achieved_extraction_rates[i].value = 0.0
+                self.face_operational_downtime_fractions[i].value = 0.0
+                face.target_rate = 0.0
+
+        self.cumulative_mine_development.rate = (
+            self.total_extra_trucks.value * self.development_rate_per_extra_truck
+        )
 

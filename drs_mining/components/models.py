@@ -221,6 +221,7 @@ class ConcentratorModel(BaseBlendingModel):
             initial_attributes={
                 "contained_ore_fraction_mass": initial_mass1 * mean_ore_fraction
             },
+            attr_inflow=1.0,
         )
         initial_mass2 = initial_fraction * target_ore_stock_level
         self.ore2_stock = Stockpile(
@@ -230,6 +231,7 @@ class ConcentratorModel(BaseBlendingModel):
             initial_attributes={
                 "contained_ore_fraction_mass": initial_mass2 * mean_ore_fraction
             },
+            attr_inflow=0.0,
         )
 
         self.plant = ConcentratorPlant(
@@ -334,6 +336,7 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
             initial_attributes={
                 "contained_ore_fraction_mass": initial_mass1 * initial_fraction
             },
+            attr_inflow=1.0,
         )
         initial_mass2 = initial_fraction * target_ore_stock_level
         self.ore2_stock = Stockpile(
@@ -343,6 +346,7 @@ class ActiveFleetConcentratorModel(BaseBlendingModel):
             initial_attributes={
                 "contained_ore_fraction_mass": initial_mass2 * initial_fraction
             },
+            attr_inflow=0.0,
         )
 
         self.plant = ConcentratorPlant(

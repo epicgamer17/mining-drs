@@ -14,9 +14,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import types
 
-import drs
 from drs import DRSEngine, Telemetry
 from drs_mining.components import (
+    BlendingNetwork,
     ConcentratorMineFace,
     ConcentratorPlant,
     ConcentratorController,
@@ -29,131 +29,14 @@ from drs_mining.components.modes import MODES
 # ============================================================
 # Inline control policy
 # ------------------------------------------------------------
-# A verbatim copy of the single-face path of ``drs_mining.control``
-# adapted to the plain local entities built below. Operating-mode
-# bookkeeping lives on the controller (``step_mode``), extraction
-# mechanics on the mine (``set_extraction_rate``), and stockpile
-# balancing on the stockpiles (``set_inout``); this policy owns the
-# target-rate calculations, routing, and calling order.
+# The ``on_step`` handler is a thin orchestrator of the component
+# APIs: the controller updates the operating mode and computes the
+# target flow rates (``update_mode`` / ``get_target_rates``), the
+# mine is driven by setting ``target_rate`` (parcel mechanics run
+# inside the mine's ``step``), the fleet routes the mined material
+# (``fleet.route``), the stockpiles feed-and-draw (``feed_and_draw``),
+# and the plant processes the combined draw (``process``).
 # ============================================================
-
-_RATE_MAP = {
-    "MODE_A": ("mode_a_ore1_milling_rate", "mode_a_ore2_milling_rate"),
-    "MODE_A_CONTINGENCY": ("mode_a_contingency_ore1_milling_rate", None),
-    "MODE_A_MINE_SURGING": ("mode_a_ore1_milling_rate", "mode_a_ore2_milling_rate"),
-    "MODE_B": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
-    "MODE_B_CONTINGENCY": (None, "mode_b_contingency_ore2_milling_rate"),
-    "MODE_B_MINE_SURGING": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
-    "SHUTDOWN": (None, None),
-}
-
-DEFAULT_RATES = {
-    "mode_a_ore1_milling_rate": 3600.0,
-    "mode_a_ore2_milling_rate": 2400.0,
-    "mode_a_contingency_ore1_milling_rate": 3900.0,
-    "mode_b_ore1_milling_rate": 4600.0,
-    "mode_b_ore2_milling_rate": 800.0,
-    "mode_b_contingency_ore2_milling_rate": 2500.0,
-}
-
-
-def blending_step_policy(
-    time,
-    mine,
-    fleet,
-    controller,
-    ore1_stock,
-    ore2_stock,
-    plant,
-    global_time,
-):
-    """Top-level blending policy invoked by the engine once per step."""
-    global_time.rate = 1.0
-    ctrl = controller
-
-    ctrl.step_mode(ore1_stock, ore2_stock)
-    _target_rates(controller, ore1_stock, ore2_stock, fleet, mine)
-
-    if mine is not None:
-        mine.set_extraction_rate(ctrl.target_mine_mass_rate.value)
-
-    ore1_rate, ore2_rate = _route([mine], fleet)
-    _balance_stockpiles(
-        controller, plant, ore1_stock, ore2_stock, ore1_rate, ore2_rate
-    )
-
-    ctrl.total_system_ore_mass.rate = (
-        ore1_stock.current_mass.rate + ore2_stock.current_mass.rate
-    )
-
-
-def _route(mining_sources, fleet):
-    ore1 = ore2 = total = 0.0
-    for src in mining_sources:
-        rate = src.actual_rate
-        ore2_frac = src._get_current_attr_value()
-        ore2 += rate * ore2_frac
-        ore1 += rate * (1.0 - ore2_frac)
-        total += rate
-    if total > 1e-6 and fleet is not None:
-        fleet.stockpile2_routing_fraction.value = ore2 / total
-    return ore1, ore2
-
-
-def _balance_stockpiles(
-    controller, plant, ore1_stock, ore2_stock, ore1_rate, ore2_rate
-):
-    ctrl = controller
-    out1 = ore1_stock.set_inout(
-        ore1_rate, ctrl.target_stock1_outflow_rate.value, attr_inflow=1.0
-    )
-    out2 = ore2_stock.set_inout(
-        ore2_rate, ctrl.target_stock2_outflow_rate.value, attr_inflow=0.0
-    )
-    if plant is not None:
-        plant.target_rate = out1 + out2
-        plant.cumulative_milled_mass.rate = plant.actual_rate
-
-
-def _target_rates(controller, ore1_stock, ore2_stock, fleet, mine):
-    ctrl = controller
-    name = ctrl.active_operating_mode.value.name
-
-    ore1, ore2 = _read_rates(name, ctrl)
-
-    if "_MINE_SURGING" in name:
-        target_stock = getattr(ctrl, "target_ore_stock_level", 60000.0)
-        ctrl.total_system_ore_mass.lower_threshold = target_stock
-        p = fleet.stockpile2_routing_fraction.value if fleet is not None else 0.0
-        if p <= 1e-4 and mine is not None and hasattr(mine, "_get_current_attr_value"):
-            p = mine._get_current_attr_value()
-        if name == "MODE_A_MINE_SURGING":
-            effective_fraction = max(1.0 - p, 0.01)
-            extraction = ore1 / effective_fraction
-        else:
-            effective_fraction = max(p, 0.01)
-            extraction = ore2 / effective_fraction
-    else:
-        extraction = ore1 + ore2
-
-    ctrl.target_mine_mass_rate.value = extraction
-    ctrl.target_stock1_outflow_rate.value = ore1
-    ctrl.target_stock2_outflow_rate.value = ore2
-
-
-def _read_rates(name, obj):
-    ore1_attr, ore2_attr = _RATE_MAP.get(name, (None, None))
-    ore1 = (
-        getattr(obj, ore1_attr, DEFAULT_RATES.get(ore1_attr, 0.0))
-        if ore1_attr
-        else 0.0
-    )
-    ore2 = (
-        getattr(obj, ore2_attr, DEFAULT_RATES.get(ore2_attr, 0.0))
-        if ore2_attr
-        else 0.0
-    )
-    return ore1, ore2
 
 
 # ============================================================
@@ -179,12 +62,12 @@ def build_blending_network(
     ore2_capacity: float = float("inf"),
     plant_max_rate: float = float("inf"),
     **kwargs,
-) -> tuple:
+) -> "BlendingNetwork":
     """Build the blending network flat: every entity is constructed here.
 
-    Returns ``(mine, fleet, plant, controller, ore1_stock, ore2_stock, global_time)``.
-    There is no scenario container; the engine registers the controller's
-    state components plus the residual leaves below.
+    Returns a ``BlendingNetwork`` holding ``(mine, fleet, plant, controller,
+    ore1_stock, ore2_stock)``. There is no scenario container; call
+    ``network.register(engine)`` to register every stateful leaf.
     """
     mine = ConcentratorMineFace(
         mean_ore_fraction=mean_ore_fraction,
@@ -207,6 +90,7 @@ def build_blending_network(
             "contained_ore_fraction_mass": initial_mass1 * mean_ore_fraction
         },
         capacity=ore1_capacity,
+        attr_inflow=1.0,
     )
     initial_mass2 = mean_ore_fraction * target_ore_stock_level
     ore2_stock = Stockpile(
@@ -217,6 +101,7 @@ def build_blending_network(
             "contained_ore_fraction_mass": initial_mass2 * mean_ore_fraction
         },
         capacity=ore2_capacity,
+        attr_inflow=0.0,
     )
 
     plant = ConcentratorPlant(
@@ -234,26 +119,46 @@ def build_blending_network(
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
         total_ore_to_extract=total_ore_to_extract,
     )
-    global_time = drs.Timer("GlobalTime", initial_value=0.0)
 
-    return mine, fleet, plant, controller, ore1_stock, ore2_stock, global_time
-
-
-def _register(engine, mine, fleet, plant, controller, ore1_stock, ore2_stock, global_time):
-    """Register the stateful leaves and wire the inline policy onto the engine."""
-    engine.register(
-        *controller.state_components,
-        plant,
-        ore1_stock,
-        ore2_stock,
-        global_time,
+    return BlendingNetwork(
+        mine=mine,
+        fleet=fleet,
+        plant=plant,
+        controller=controller,
+        ore1_stock=ore1_stock,
+        ore2_stock=ore2_stock,
     )
 
+
+def _register_and_policy(engine, network):
+    """Register the stateful leaves and wire the inline policy onto the engine."""
+    network.register(engine)
+
+    mine = network.mine
+    fleet = network.fleet
+    ctrl = network.controller
+    plant = network.plant
+    ore1_stock = network.ore1_stock
+    ore2_stock = network.ore2_stock
+
     @engine.on_step
-    def _policy(time):
-        blending_step_policy(
-            time, mine, fleet, controller, ore1_stock, ore2_stock, plant, global_time
+    def manage_blending(t: float):
+        # 1. Update operating mode based on campaign timers & stockpile levels
+        mode = ctrl.update_mode(ore1_stock, ore2_stock)
+
+        # 2. Compute target flow rates for this mode
+        mine_target, stock1_target, stock2_target = ctrl.get_target_rates(
+            mode, fleet
         )
+
+        # 3. Mine & route parcels
+        mine.target_rate = mine_target
+        ore1_in, ore2_in = fleet.route(mine.actual_rate, mine.current_ore_grade)
+
+        # 4. Feed stockpiles and draw into plant
+        out1 = ore1_stock.feed_and_draw(ore1_in, stock1_target)
+        out2 = ore2_stock.feed_and_draw(ore2_in, stock2_target)
+        plant.process(out1 + out2)
 
 
 def print_statistics(controller, plant, mine):
@@ -299,17 +204,15 @@ def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
         np.random.seed(idx)
         random.seed(idx)
 
-        mine, fleet, plant, controller, ore1_stock, ore2_stock, global_time = (
-            build_blending_network(**config_kwargs)
-        )
+        network = build_blending_network(**config_kwargs)
 
         engine = DRSEngine()
-        _register(engine, mine, fleet, plant, controller, ore1_stock, ore2_stock, global_time)
+        _register_and_policy(engine, network)
         engine.run(until=config_kwargs.get("replication_length", float("inf")))
 
-        active_time = controller.active_duration(engine.current_time)
+        active_time = network.controller.active_duration(engine.current_time)
         if active_time > 0:
-            throughput = mine.net_extracted_mass / active_time
+            throughput = network.mine.net_extracted_mass / active_time
             throughputs.append(throughput)
 
     if not throughputs:
@@ -380,19 +283,20 @@ if __name__ == "__main__":
 
     np.random.seed(11)
     random.seed(11)
-    mine, fleet, plant, controller, ore1_stock, ore2_stock, global_time = (
-        build_blending_network(
-            replication_length=99999.0,
-            target_ore_stock_level=args.total_stockpile_level,
-            std_dev_ore_fraction=args.std_dev_ore_fraction,
-            prob_new_facies=0.3,
-        )
+    network = build_blending_network(
+        replication_length=99999.0,
+        target_ore_stock_level=args.total_stockpile_level,
+        std_dev_ore_fraction=args.std_dev_ore_fraction,
+        prob_new_facies=0.3,
     )
+    mine = network.mine
+    fleet = network.fleet
+    controller = network.controller
 
     controller.active_operating_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine()
-    _register(engine, mine, fleet, plant, controller, ore1_stock, ore2_stock, global_time)
+    _register_and_policy(engine, network)
 
     telemetry = Telemetry(model=engine)
     telemetry.register_metric(
@@ -416,7 +320,7 @@ if __name__ == "__main__":
 
     print(result.summary())
 
-    print_statistics(controller, plant, mine)
+    print_statistics(controller, network.plant, mine)
 
     df = result.history
 

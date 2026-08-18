@@ -82,3 +82,27 @@ class ContinuousFleetLogistics(drs.Module):
             "stockpile2_routing_fraction", 0.0
         )
 
+    def route(self, rate=None, ore_grade=None, *, sources=None) -> Tuple[float, float]:
+        """Split mined material into the two stockpile inflows.
+
+        Either pass a single source's ``(rate, ore_grade)`` or pass
+        ``sources=`` a sequence of mine faces to aggregate. Returns the
+        ``(ore1_in, ore2_in)`` flow rates arriving at the Ore1 / Ore2
+        stockpiles and stamps ``stockpile2_routing_fraction`` for telemetry.
+        """
+        ore1 = ore2 = total = 0.0
+        if sources is not None:
+            for src in sources:
+                rate = src.actual_rate
+                grade = src.current_ore_grade
+                ore2 += rate * grade
+                ore1 += rate * (1.0 - grade)
+                total += rate
+        else:
+            ore2 = rate * ore_grade
+            ore1 = rate - ore2
+            total = rate
+        if total > 1e-6:
+            self.stockpile2_routing_fraction.value = ore2 / total
+        return ore1, ore2
+

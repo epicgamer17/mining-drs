@@ -77,21 +77,24 @@ class BaseMineFace(Processor):
             self.active_parcel_initial_mass.value
         )
 
-    def set_extraction_rate(self, rate) -> float:
-        """Drive this face at the given extraction rate for one engine step.
+    @property
+    def current_ore_grade(self) -> float:
+        """Attribute value (ore fraction) of the currently active parcel."""
+        return self._get_current_attr_value()
 
-        Applies the target to the underlying processor, advances parcel
-        state, and stamps the cumulative and parcel extraction rates from
-        the realised rate. ``rate`` may be a plain float or a
-        ``drs.Variable``. Returns the realised extraction rate.
+    def step(self, dt: float) -> None:
+        """Apply the face's local mechanics for one engine step.
+
+        Policies drive ``target_rate``; this step advances parcel state (cross
+        boundaries and load the next batch), stamps the cumulative and parcel
+        extraction rates with the realised rate, then advances the owned levels
+        by ``dt``.
         """
-        target = rate.value if hasattr(rate, "value") else float(rate)
-        self.target_rate = target
         self.advance_parcel_state()
         actual = self.actual_rate
         self.cumulative_extracted_mass.rate = actual
         self.parcel_extracted_mass.rate = actual
-        return actual
+        super().step(dt)
 
 
 class ConcentratorMineFace(BaseMineFace):
