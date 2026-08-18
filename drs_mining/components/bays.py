@@ -14,12 +14,18 @@ class DRSLoadingBay:
         level_index: int,
         initial_muck: float = 0.0,
         lhd: Optional[LHD] = None,
+        truck_spot_min: float = 0.82,
+        acquisition_delay_min: float = 1.5,
+        bucket_passes: float = 2.0,
     ):
         self.engine = engine
         self.bay_id = bay_id
         self.bay_type = bay_type  # "ORE" or "WASTE"
         self.level_index = level_index
         self.lhd = lhd or LHD(f"LHD_L{level_index}", level_index)
+        self.truck_spot_min = truck_spot_min
+        self.acquisition_delay_min = acquisition_delay_min
+        self.bucket_passes = bucket_passes
 
         # Continuous Muck Bay Level (Tonnes available)
         if hasattr(engine, "create_variable"):
@@ -45,6 +51,11 @@ class DRSLoadingBay:
         self.load_time_remaining: float = 0.0
         self.total_load_duration_sec: float = 0.0
 
+    def calculate_load_duration_sec(self, truck: Truck) -> float:
+        """Calculates exact load duration in seconds for an active truck."""
+        lhd_cycle_sec = self.lhd.get_bucket_cycle_sec()
+        return (self.truck_spot_min + self.acquisition_delay_min) * 60.0 + self.bucket_passes * lhd_cycle_sec
+
     def start_loading(self, truck: Truck) -> bool:
         """Starts loading an active truck at this muck bay gateway."""
         if self.muck_level.value <= 0 or self.active_truck is not None:
@@ -54,10 +65,7 @@ class DRSLoadingBay:
             truck.ore_payload_cap if self.bay_type == "ORE" else truck.waste_payload_cap
         )
 
-        # Calculate exact load duration from Shelswell parameters:
-        # Truck Spot (0.82m) + Acquisition Delay (~1.5m) + 2 LHD bucket passes
-        lhd_cycle_sec = self.lhd.get_bucket_cycle_sec()
-        total_load_time_sec = (0.82 + 1.5) * 60.0 + 2.0 * lhd_cycle_sec  # ~540.6s
+        total_load_time_sec = self.calculate_load_duration_sec(truck)
 
         self.active_truck = truck
         self.active_truck.state = TruckState.LOADING
@@ -87,11 +95,21 @@ class DRSLoadingBay:
 class DRSDumpingBay:
     """Bridges surface truck dumping to DRS Continuous Accumulators."""
 
-    def __init__(self, engine, bay_id: str, bay_type: str, location_name: str):
+    def __init__(
+        self,
+        engine,
+        bay_id: str,
+        bay_type: str,
+        location_name: str,
+        dump_spot_min: float = 0.57,
+        bed_raise_dump_min: float = 0.88,
+    ):
         self.engine = engine
         self.bay_id = bay_id
         self.bay_type = bay_type  # "ORE" or "WASTE"
         self.location_name = location_name
+        self.dump_spot_min = dump_spot_min
+        self.bed_raise_dump_min = bed_raise_dump_min
 
         if hasattr(engine, "create_variable"):
             self.dumped_total = engine.create_variable(
@@ -111,13 +129,16 @@ class DRSDumpingBay:
         self.active_truck: Optional[Truck] = None
         self.dump_time_remaining: float = 0.0
 
+    def calculate_dump_duration_sec(self, truck: Truck) -> float:
+        """Calculates dump duration in seconds."""
+        return (self.dump_spot_min + self.bed_raise_dump_min) * 60.0
+
     def start_dumping(self, truck: Truck) -> bool:
         """Starts surface dumping for a loaded truck."""
         if self.active_truck is not None or truck.current_payload <= 0.0:
             return False
 
-        # Shelswell dumping timings: Dump spot (0.57 min) + Bed raise/dump (0.88 min) = 1.45 min (87s)
-        total_dump_time_sec = (0.57 + 0.88) * 60.0
+        total_dump_time_sec = self.calculate_dump_duration_sec(truck)
 
         self.active_truck = truck
         self.active_truck.state = TruckState.DUMPING
@@ -142,3 +163,4 @@ class DRSDumpingBay:
                 self.active_truck.state = TruckState.PARKED
                 self.active_truck = None
                 self.dump_rate.value = 0.0
+

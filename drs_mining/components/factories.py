@@ -91,6 +91,10 @@ def build_concentrator_simulation(
 
 def build_multi_face_simulation(
     *,
+    num_faces: int = 2,
+    faces: list = None,
+    face_generators: list = None,
+    face_mean_fractions: list = None,
     controller_cls=MultiFaceConcentratorController,
     mean_ore_fraction: float = 0.30,
     std_dev_ore_fraction: float = 0.05,
@@ -114,8 +118,8 @@ def build_multi_face_simulation(
     total_truck_count: float = 10.0,
     max_lhds_per_face: float = 2.0,
     max_trucks_per_face: float = 6.0,
-    face_haul_distance: tuple = (1.5, 2.2),
-    face_accessibility_fraction: tuple = (0.93, 0.91),
+    face_haul_distance=(1.5, 2.2),
+    face_accessibility_fraction=(0.93, 0.91),
     truck_velocity: float = 15.0,
     loader_cycle_time_hours: float = 0.0833,
     truck_dump_time_hours: float = 0.033,
@@ -124,37 +128,58 @@ def build_multi_face_simulation(
     loader_payload_tonnes: float = 15.0,
     truck_payload_tonnes: float = 30.0,
     development_rate_per_extra_truck: float = 50.0,
+    mode_allocations: dict = None,
 ):
-    """Builds a two-face (active fleet) concentrator simulation.
+    """Builds a multi-face (N >= 1) concentrator simulation.
 
     Returns:
-        tuple: ``([face1, face2], fleet, plant, controller, ore1_stock, ore2_stock)``
+        tuple: ``(faces, fleet, plant, controller, ore1_stock, ore2_stock)``
     """
-    gen1 = StochasticFaciesGenerator(
-        mean_fraction=0.15,
-        std_dev=0.075,
-        prob_new_facies=prob_new_facies,
-        variation_same_facies=variation_same_facies,
-    )
-    gen2 = StochasticFaciesGenerator(
-        mean_fraction=0.45,
-        std_dev=0.025,
-        prob_new_facies=prob_new_facies,
-        variation_same_facies=variation_same_facies,
-    )
+    if faces is None:
+        if face_generators is not None:
+            created_faces = []
+            for i, gen in enumerate(face_generators, 1):
+                created_faces.append(
+                    ContinuousMineFace(
+                        face_id=i,
+                        generator=gen,
+                        total_ore_to_extract=total_ore_to_extract,
+                        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+                    )
+                )
+            faces = created_faces
+        else:
+            if face_mean_fractions is not None:
+                means = list(face_mean_fractions)
+                num_faces = len(means)
+            elif num_faces == 1:
+                means = [mean_ore_fraction]
+            elif num_faces == 2:
+                means = [0.15, 0.45]
+            else:
+                # Distribute evenly between 0.15 and 0.45 for N faces
+                step = (0.45 - 0.15) / (num_faces - 1)
+                means = [0.15 + i * step for i in range(num_faces)]
 
-    face1 = ContinuousMineFace(
-        face_id=1,
-        generator=gen1,
-        total_ore_to_extract=total_ore_to_extract,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-    )
-    face2 = ContinuousMineFace(
-        face_id=2,
-        generator=gen2,
-        total_ore_to_extract=total_ore_to_extract,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-    )
+            created_faces = []
+            for i, mean_frac in enumerate(means, 1):
+                std_dev = 0.075 if mean_frac <= 0.25 else 0.025
+                gen = StochasticFaciesGenerator(
+                    mean_fraction=mean_frac,
+                    std_dev=std_dev,
+                    prob_new_facies=prob_new_facies,
+                    variation_same_facies=variation_same_facies,
+                )
+                created_faces.append(
+                    ContinuousMineFace(
+                        face_id=i,
+                        generator=gen,
+                        total_ore_to_extract=total_ore_to_extract,
+                        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+                    )
+                )
+            faces = created_faces
+
     fleet = ContinuousFleetLogistics()
 
     initial_fraction = mean_ore_fraction
@@ -182,7 +207,7 @@ def build_multi_face_simulation(
     plant = ConcentratorPlant(None, fleet, ore1_stock, ore2_stock)
 
     controller = controller_cls(
-        faces=[face1, face2],
+        faces=faces,
         fleet=fleet,
         plant=plant,
         target_ore_stock_level=target_ore_stock_level,
@@ -191,6 +216,7 @@ def build_multi_face_simulation(
         duration_of_shutdowns=duration_of_shutdowns,
         duration_of_contingency_segments=duration_of_contingency_segments,
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        total_ore_to_extract=total_ore_to_extract,
         mode_a_ore1_milling_rate=mode_a_ore1_milling_rate,
         mode_a_ore2_milling_rate=mode_a_ore2_milling_rate,
         mode_a_contingency_ore1_milling_rate=mode_a_contingency_ore1_milling_rate,
@@ -212,6 +238,8 @@ def build_multi_face_simulation(
         loader_payload_tonnes=loader_payload_tonnes,
         truck_payload_tonnes=truck_payload_tonnes,
         development_rate_per_extra_truck=development_rate_per_extra_truck,
+        mode_allocations=mode_allocations,
     )
 
-    return [face1, face2], fleet, plant, controller, ore1_stock, ore2_stock
+    return faces, fleet, plant, controller, ore1_stock, ore2_stock
+

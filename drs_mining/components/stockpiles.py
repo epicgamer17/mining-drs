@@ -1,5 +1,5 @@
 import math
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Sequence
 
 import drs
 from drs import Storage
@@ -87,5 +87,23 @@ class Stockpile(Storage):
 
         self.actual_outflow_rate.value = actual_outflow
         return actual_outflow
+
+
+def create_stockpiles(configs: Sequence[Dict]) -> List[Stockpile]:
+    """Factory creating multiple stockpiles from a list of configuration dictionaries."""
+    stockpiles = []
+    for cfg in configs:
+        stockpiles.append(
+            Stockpile(
+                name=cfg["name"],
+                expected_attributes=cfg.get("expected_attributes", ["contained_ore_fraction_mass"]),
+                initial_mass=cfg.get("initial_mass", 0.0),
+                initial_attributes=cfg.get("initial_attributes"),
+                capacity=cfg.get("capacity", math.inf),
+                attr_inflow=cfg.get("attr_inflow", 1.0),
+            )
+        )
+    return stockpiles
+
 
 

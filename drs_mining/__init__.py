@@ -13,9 +13,12 @@ from drs_mining.components import (
     ConcentratorPlant,
     ConcentratorController,
     Stockpile,
+    create_stockpiles,
     TruckState,
     Truck,
     LHD,
+    create_truck_fleet,
+    create_lhd_fleet,
     DRSRoadSegment,
     DRSLoadingBay,
     DRSDumpingBay,
@@ -36,9 +39,12 @@ __all__ = [
     "ConcentratorPlant",
     "ConcentratorController",
     "Stockpile",
+    "create_stockpiles",
     "TruckState",
     "Truck",
     "LHD",
+    "create_truck_fleet",
+    "create_lhd_fleet",
     "DRSRoadSegment",
     "DRSLoadingBay",
     "DRSDumpingBay",
@@ -47,4 +53,5 @@ __all__ = [
     "build_multi_face_simulation",
     "ShelswellDispatchController",
 ]
+
 

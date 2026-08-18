@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Union, Sequence, Callable
 import math
 
 import drs
@@ -75,12 +75,75 @@ class LHD:
         return total_min * 60.0
 
 
+def create_truck_fleet(
+    count: int,
+    prefix: str = "T",
+    truck_type: str = "CAT AD30",
+    ore_payload_cap: float = 26.1,
+    waste_payload_cap: float = 24.6,
+    speeds: Optional[dict] = None,
+    **kwargs,
+) -> List[Truck]:
+    """Creates a homogeneous or custom fleet of N trucks."""
+    trucks = []
+    for i in range(1, count + 1):
+        t_id = f"{prefix}{i:02d}"
+        truck_args = {
+            "truck_id": t_id,
+            "truck_type": truck_type,
+            "ore_payload_cap": ore_payload_cap,
+            "waste_payload_cap": waste_payload_cap,
+            **kwargs,
+        }
+        if speeds is not None:
+            truck_args["speeds"] = speeds
+        trucks.append(Truck(**truck_args))
+    return trucks
+
+
+def create_lhd_fleet(
+    levels: Union[int, Sequence[int]],
+    count_per_level: int = 1,
+    prefix: str = "LHD",
+    bucket_ore_cap: float = 14.0,
+    bucket_waste_cap: float = 12.5,
+    **kwargs,
+) -> List[LHD]:
+    """Creates a fleet of LHD loaders assigned to specific mine levels."""
+    if isinstance(levels, int):
+        level_list = list(range(1, levels + 1))
+    else:
+        level_list = list(levels)
+
+    lhds = []
+    for lvl in level_list:
+        for idx in range(1, count_per_level + 1):
+            suffix = f"_{idx}" if count_per_level > 1 else ""
+            lhd_id = f"{prefix}_L{lvl}{suffix}"
+            lhds.append(
+                LHD(
+                    lhd_id=lhd_id,
+                    level_index=lvl,
+                    bucket_ore_cap=bucket_ore_cap,
+                    bucket_waste_cap=bucket_waste_cap,
+                    **kwargs,
+                )
+            )
+    return lhds
+
+
 class ContinuousFleetLogistics(drs.Module):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, num_stockpiles: int = 2, *args, **kwargs):
         super().__init__()
+        self.num_stockpiles = num_stockpiles
         self.stockpile2_routing_fraction = drs.Variable(
             "stockpile2_routing_fraction", 0.0
         )
+        self.routing_fractions = []
+        for i in range(num_stockpiles):
+            var = drs.Variable(f"stockpile_{i+1}_routing_fraction", 0.0)
+            self.routing_fractions.append(var)
+            setattr(self, f"stockpile_{i+1}_routing_fraction", var)
 
     def route(self, rate=None, ore_grade=None, *, sources=None) -> Tuple[float, float]:
         """Split mined material into the two stockpile inflows.
@@ -104,5 +167,40 @@ class ContinuousFleetLogistics(drs.Module):
             total = rate
         if total > 1e-6:
             self.stockpile2_routing_fraction.value = ore2 / total
+            if len(self.routing_fractions) >= 2:
+                self.routing_fractions[0].value = ore1 / total
+                self.routing_fractions[1].value = ore2 / total
         return ore1, ore2
+
+    def route_multi(
+        self,
+        sources=None,
+        split_fn: Optional[Callable[[float, float], Sequence[float]]] = None,
+    ) -> List[float]:
+        """Split mined material from arbitrary sources into N stockpile inflows.
+
+        ``split_fn(rate, grade)`` returns a sequence of N flow rates for each source.
+        If ``split_fn`` is None, defaults to 2-stockpile binary split (ore1=(1-grade)*rate, ore2=grade*rate).
+        """
+        inflows = [0.0] * self.num_stockpiles
+        total = 0.0
+        if sources is not None:
+            for src in sources:
+                rate = src.actual_rate
+                grade = src.current_ore_grade
+                total += rate
+                if split_fn is not None:
+                    src_splits = split_fn(rate, grade)
+                else:
+                    src_splits = [rate * (1.0 - grade), rate * grade]
+                for idx, flow in enumerate(src_splits[: self.num_stockpiles]):
+                    inflows[idx] += flow
+        if total > 1e-6:
+            for idx, flow in enumerate(inflows):
+                if idx < len(self.routing_fractions):
+                    self.routing_fractions[idx].value = flow / total
+            if self.num_stockpiles >= 2:
+                self.stockpile2_routing_fraction.value = inflows[1] / total
+        return inflows
+
 

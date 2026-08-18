@@ -1,5 +1,6 @@
 import math
 import random
+from typing import Optional
 import drs
 from drs import Processor
 from .generators import StochasticFaciesGenerator
@@ -172,9 +173,13 @@ class ContinuousMineFace(BaseMineFace):
         total_ore_to_extract: float = 6600000.0,
         ore_to_be_extracted_during_warming_period: float = 600000.0,
         max_rate: float = math.inf,
+        name: Optional[str] = None,
+        var_name: Optional[str] = None,
+        initial_parcel_mass: Optional[float] = None,
     ):
+        face_name = name or f"mine_face_{face_id}"
         super().__init__(
-            name=f"mine_face_{face_id}",
+            name=face_name,
             total_ore_to_extract=total_ore_to_extract,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
             max_rate=max_rate,
@@ -184,8 +189,10 @@ class ContinuousMineFace(BaseMineFace):
         self.min_ore_mass = min_ore_mass
         self.max_ore_mass = max_ore_mass
         self.active_parcel_ore_fraction = drs.Variable(
-            f"face{face_id}_ore_fraction", 0.0
+            var_name or f"face{face_id}_ore_fraction", 0.0
         )
+        if initial_parcel_mass is not None:
+            self.active_parcel_initial_mass.value = initial_parcel_mass
         self._load_next_batch()
 
     def _load_next_batch(self):
@@ -213,5 +220,6 @@ class ContinuousMineFace(BaseMineFace):
 
     def _get_current_attr_value(self) -> float:
         return self.active_parcel_ore_fraction.value
+
 
 

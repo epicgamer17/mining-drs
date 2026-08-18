@@ -359,7 +359,7 @@ class BaseBlendingController(drs.Module):
 
     @property
     def state_components(self) -> list:
-        """Stateful leaf components owned by this controller (mine, faces, levels, timers).
+        """Stateful leaf components owned by this controller (mine, faces, controller module).
 
         These are registered with the engine so it can compute time-to-event
         boundaries and advance state without recursively inspecting the model.
@@ -369,23 +369,7 @@ class BaseBlendingController(drs.Module):
             comps.append(self.mine)
         for face in getattr(self, "faces", []) or []:
             comps.append(face)
-        comps.append(self.total_system_ore_mass)
-        comps.extend(
-            [
-                self.current_campaign_duration,
-                self.current_contingency_duration,
-                self.cumulative_time_mode_a,
-                self.cumulative_time_mode_a_contingency,
-                self.cumulative_time_mode_a_surging,
-                self.cumulative_time_mode_b,
-                self.cumulative_time_mode_b_contingency,
-                self.cumulative_time_mode_b_surging,
-                self.cumulative_time_shutdown,
-            ]
-        )
-        fleet_shift_timer = getattr(self, "fleet_shift_timer", None)
-        if fleet_shift_timer is not None:
-            comps.append(fleet_shift_timer)
+        comps.append(self)
         return comps
 
     def time_to_event(self) -> float:
@@ -463,8 +447,8 @@ class MultiFaceConcentratorController(BaseBlendingController):
         total_truck_count: float = 10.0,
         max_lhds_per_face: float = 2.0,
         max_trucks_per_face: float = 6.0,
-        face_haul_distance: tuple = (1.5, 2.2),
-        face_accessibility_fraction: tuple = (0.93, 0.91),
+        face_haul_distance=(1.5, 2.2),
+        face_accessibility_fraction=(0.93, 0.91),
         truck_velocity: float = 15.0,
         loader_cycle_time_hours: float = 0.0833,
         truck_dump_time_hours: float = 0.033,
@@ -473,6 +457,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
         loader_payload_tonnes: float = 15.0,
         truck_payload_tonnes: float = 30.0,
         development_rate_per_extra_truck: float = 50.0,
+        mode_allocations: dict = None,
     ):
         super().__init__(
             mine=None,
@@ -560,16 +545,27 @@ class MultiFaceConcentratorController(BaseBlendingController):
             self.face_truck_allocations.append(truck_alloc)
             self.face_match_factors.append(match_factor)
             self.face_truck_cycle_times.append(truck_cycle)
-        self._mode_allocations = self._precompute_allocations()
+
+        self._mode_allocations = mode_allocations or self._precompute_allocations()
         self.current_shift_allocations = None
         self.current_shift_mode_name = None
         self.fleet_shift_timer = drs.Timer("fleet_shift_timer", initial_value=0.0)
         self.fleet_shift_count = drs.Variable("fleet_shift_count", 0)
 
     def _precompute_allocations(self):
-        """Pre-compute fixed face extraction fractions per mode using face mean ore fractions."""
-        face_ore1_fracs = [1.0 - f.generator.mean_fraction for f in self.faces]
-        f1, f2 = face_ore1_fracs[0], face_ore1_fracs[1]
+        """Pre-compute face extraction fractions per mode using face mean ore fractions."""
+        num_faces = len(self.faces)
+        if num_faces == 0:
+            return {}
+
+        face_ore1_fracs = []
+        for f in self.faces:
+            if hasattr(f, "generator") and hasattr(f.generator, "mean_fraction"):
+                face_ore1_fracs.append(1.0 - f.generator.mean_fraction)
+            elif hasattr(f, "mean_ore_fraction"):
+                face_ore1_fracs.append(1.0 - f.mean_ore_fraction)
+            else:
+                face_ore1_fracs.append(0.5)
 
         modes_to_compute = {
             "MODE_A": (
@@ -590,26 +586,87 @@ class MultiFaceConcentratorController(BaseBlendingController):
             ),
         }
         result = {}
+
+        if num_faces == 1:
+            for mode_name in modes_to_compute:
+                result[mode_name] = [1.0]
+            result["MODE_A_MINE_SURGING"] = [1.0]
+            result["MODE_B_MINE_SURGING"] = [1.0]
+            return result
+
+        if num_faces == 2:
+            f1, f2 = face_ore1_fracs[0], face_ore1_fracs[1]
+            for mode_name, (ore1, ore2) in modes_to_compute.items():
+                total = ore1 + ore2
+                if total <= 0 or abs(f1 - f2) < 1e-12:
+                    fracs = [0.5, 0.5] if total > 0 else [0.0, 0.0]
+                else:
+                    r1 = (ore1 - total * f2) / (f1 - f2)
+                    r1 = max(0.0, min(total, r1))
+                    r2 = total - r1
+                    fracs = [r1 / total, r2 / total]
+                result[mode_name] = fracs
+
+            # Surging modes: allocate to face with highest Ore1 or highest Ore2
+            if f1 >= f2:
+                result["MODE_A_MINE_SURGING"] = [1.0, 0.0]
+                result["MODE_B_MINE_SURGING"] = [0.0, 1.0]
+            else:
+                result["MODE_A_MINE_SURGING"] = [0.0, 1.0]
+                result["MODE_B_MINE_SURGING"] = [1.0, 0.0]
+            return result
+
+        # General N-face case (N >= 3)
+        # Find face with max Ore1 fraction and face with min Ore1 fraction (max Ore2)
+        idx_max_ore1 = max(range(num_faces), key=lambda i: face_ore1_fracs[i])
+        idx_min_ore1 = min(range(num_faces), key=lambda i: face_ore1_fracs[i])
+
         for mode_name, (ore1, ore2) in modes_to_compute.items():
             total = ore1 + ore2
-            if total <= 0 or abs(f1 - f2) < 1e-12:
-                fracs = [0.5, 0.5] if total > 0 else [0.0, 0.0]
+            if total <= 0:
+                result[mode_name] = [1.0 / num_faces] * num_faces
+                continue
+            target_ore1_ratio = ore1 / total
+
+            # Split faces into those above and below target ratio
+            below = [i for i in range(num_faces) if face_ore1_fracs[i] <= target_ore1_ratio]
+            above = [i for i in range(num_faces) if face_ore1_fracs[i] > target_ore1_ratio]
+
+            if not below:
+                # All faces are above target: allocate 100% to lowest available
+                fracs = [0.0] * num_faces
+                fracs[idx_min_ore1] = 1.0
+            elif not above:
+                # All faces are below target: allocate 100% to highest available
+                fracs = [0.0] * num_faces
+                fracs[idx_max_ore1] = 1.0
             else:
-                r1 = (ore1 - total * f2) / (f1 - f2)
-                r1 = max(0.0, min(total, r1))
-                r2 = total - r1
-                fracs = [r1 / total, r2 / total]
+                # Convex blend between below-mean and above-mean groups
+                mean_below = sum(face_ore1_fracs[i] for i in below) / len(below)
+                mean_above = sum(face_ore1_fracs[i] for i in above) / len(above)
+
+                if abs(mean_above - mean_below) < 1e-12:
+                    alpha = 0.5
+                else:
+                    alpha = (target_ore1_ratio - mean_below) / (mean_above - mean_below)
+                    alpha = max(0.0, min(1.0, alpha))
+
+                fracs = [0.0] * num_faces
+                for i in above:
+                    fracs[i] = alpha / len(above)
+                for i in below:
+                    fracs[i] = (1.0 - alpha) / len(below)
+
             result[mode_name] = fracs
 
-        # Surging modes use extreme allocations to correct the imbalance.
-        # MODE_A_MINE_SURGING (ore1 stockout): maximize ore1 → all to face1 (85% ore1)
-        # MODE_B_MINE_SURGING (ore2 stockout): maximize ore2 → all to face2 (45% ore2)
-        # This ensures surging produces a blend different from the base mode target,
-        # letting the stockpile drain and surging exit quickly. Without this, surging
-        # would produce the same blend as the base mode (e.g. 60/40 for Mode A),
-        # making extraction = milling and the system stuck in surging forever.
-        result["MODE_A_MINE_SURGING"] = [1.0, 0.0]
-        result["MODE_B_MINE_SURGING"] = [0.0, 1.0]
+        # Surging modes allocate 100% to extreme face
+        surging_a = [0.0] * num_faces
+        surging_a[idx_max_ore1] = 1.0
+        result["MODE_A_MINE_SURGING"] = surging_a
+
+        surging_b = [0.0] * num_faces
+        surging_b[idx_min_ore1] = 1.0
+        result["MODE_B_MINE_SURGING"] = surging_b
 
         return result
 
@@ -624,8 +681,13 @@ class MultiFaceConcentratorController(BaseBlendingController):
         values = getattr(self, name, None)
         if values is None:
             return default
-        if face_index < len(values):
-            return values[face_index]
+        if isinstance(values, (int, float)):
+            return float(values)
+        if isinstance(values, (list, tuple)):
+            if face_index < len(values):
+                return values[face_index]
+            if len(values) > 0:
+                return values[-1]
         return default
 
     def _clamp(self, value, lower, upper):
@@ -638,6 +700,7 @@ class MultiFaceConcentratorController(BaseBlendingController):
             factor.value = self.current_shift_allocations[i]
 
         self._distribute_discrete_fleet(self.current_shift_allocations)
+
 
     def _distribute_discrete_fleet(self, fracs):
         import math
