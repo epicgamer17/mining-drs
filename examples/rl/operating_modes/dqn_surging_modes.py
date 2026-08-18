@@ -6,7 +6,7 @@ Adapted from rl-stuff/examples/dqn/dqn_cartpole.py.
 import sys
 import os
 
-# Ensure the root directory is on the path so we can import 'examples.mining'
+# Ensure the root directory is on the path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from functional.initialization import layer_init, set_seed

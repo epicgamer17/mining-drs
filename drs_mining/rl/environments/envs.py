@@ -120,11 +120,12 @@ class MiningRLEnv(gym.Env):
 
         self.engine = DRSEngine()
         self.engine.register(
-            *self.controller.state_components,
+            self.mine,
+            self.fleet,
             self.plant,
+            self.controller,
             self.ore1_stock,
             self.ore2_stock,
-            self.global_time,
         )
 
         @self.engine.on_step

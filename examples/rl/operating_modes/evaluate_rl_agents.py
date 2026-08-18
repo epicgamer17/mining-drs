@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 
-# Ensure the root directory is on the path so we can import 'examples.mining'
+# Ensure the root directory is on the path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from drs_mining.rl.environments import MiningRLEnv
@@ -18,6 +18,7 @@ from rainbow_dqn_surging_modes import (
     SUPPORT,
 )
 from functional.action_selection import expected_value
+from drs_mining.components.plot import print_transition_log, prepare_history
 
 
 def evaluate_rl_throughput(model, env, seed, device):
@@ -531,31 +532,8 @@ def generate_rl_dashboard(
 
     result = env.engine.run(until=env.replication_length)
 
-    df = result.history
-
-    # --- Mode Transition Log ---
-    # --- Mode Transition Log ---
-    state_change_events = [
-        e
-        for e in result.events
-        if e.event_type == "STATE_CHANGE"
-        and e.details.get("variable") == "active_operating_mode"
-    ]
-    if state_change_events:
-        print("\n--- Mode Transition Log ---")
-        for e in state_change_events:
-            old = (
-                e.details["old_value"].name
-                if hasattr(e.details["old_value"], "name")
-                else str(e.details["old_value"])
-            )
-            new = (
-                e.details["new_value"].name
-                if hasattr(e.details["new_value"], "name")
-                else str(e.details["new_value"])
-            )
-            print(f"Time: {e.time:.2f} | Transition: {old} -> {new}")
-        print("---------------------------\n")
+    df = prepare_history(result.history)
+    print_transition_log(df)
 
     # --- Cumulative Deficit by Mode Log ---
     import pandas as pd

@@ -1,11 +1,9 @@
 import sys
 import os
 
-# Ensure the root directory is on the path so we can import 'examples.mining'
+# Ensure the root directory is on the path
 sys.path.append(
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    )
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
 import random
@@ -25,7 +23,7 @@ from drs_mining.components.plot import (
     plot_single_face_dashboard,
     prepare_history,
     print_deficit_by_mode,
-    print_state_change_transitions,
+    print_transition_log,
 )
 
 
@@ -313,7 +311,11 @@ if __name__ == "__main__":
     print_statistics(controller, plant, mine)
 
     df = prepare_history(result.history)
-    print_state_change_transitions(result.events)
+    print_transition_log(
+        df,
+        critical_ore2_level=20400.0,
+        target_ore_stock_level=args.total_stockpile_level,
+    )
 
     print_deficit_by_mode(
         df,

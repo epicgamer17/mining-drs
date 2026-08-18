@@ -16,6 +16,7 @@ from .factories import (
     build_multi_face_simulation,
 )
 from .stockpiles import Stockpile
+from .dispatch import ShelswellDispatchController
 
 __all__ = [
     "Storage",
@@ -29,6 +30,7 @@ __all__ = [
     "ConcentratorPlant",
     "ConcentratorController",
     "Stockpile",
+    "ShelswellDispatchController",
     "TruckState",
     "Truck",
     "LHD",

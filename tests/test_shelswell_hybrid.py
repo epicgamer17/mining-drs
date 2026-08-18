@@ -5,7 +5,7 @@ import drs
 from drs_mining.components.fleet import Truck, TruckState, LHD
 from drs_mining.components.topology import DRSRoadSegment
 from drs_mining.components.bays import DRSLoadingBay, DRSDumpingBay
-from drs_mining.controllers.dispatch import ShelswellDispatchController
+from drs_mining.components.dispatch import ShelswellDispatchController
 
 
 def test_truck_discrete_state():

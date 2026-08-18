@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from dataclasses import replace
 
 # Add project root to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from .simulation import _run_capacity_case
 

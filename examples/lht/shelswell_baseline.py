@@ -31,7 +31,7 @@ import drs
 from drs_mining.components.fleet import Truck, TruckState
 from drs_mining.components.topology import DRSRoadSegment, load_topology_dict
 from drs_mining.components.bays import DRSLoadingBay, DRSDumpingBay
-from drs_mining.controllers.dispatch import ShelswellDispatchController
+from drs_mining.components.dispatch import ShelswellDispatchController
 
 
 def build_shelswell_simulation(

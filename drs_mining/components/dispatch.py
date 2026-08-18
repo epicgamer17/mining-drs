@@ -1,6 +1,6 @@
 from typing import List, Dict, Optional
-from ..components.fleet import Truck, TruckState
-from ..components.bays import DRSLoadingBay
+from .fleet import Truck, TruckState
+from .bays import DRSLoadingBay
 
 
 class ShelswellDispatchController:

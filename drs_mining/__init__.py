@@ -22,8 +22,8 @@ from drs_mining.components import (
     load_topology_dict,
     build_concentrator_simulation,
     build_multi_face_simulation,
+    ShelswellDispatchController,
 )
-from drs_mining.controllers.dispatch import ShelswellDispatchController
 
 __all__ = [
     "Storage",

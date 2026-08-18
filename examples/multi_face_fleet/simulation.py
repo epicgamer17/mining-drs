@@ -9,11 +9,9 @@ Surging = extreme allocation	Surging must produce an OFF-target blend to drain t
 import sys
 import os
 
-# Ensure the root directory is on the path so we can import 'examples.mining'
+# Ensure the root directory is on the path
 sys.path.append(
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    )
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
 import random
