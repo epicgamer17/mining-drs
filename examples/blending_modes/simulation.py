@@ -14,7 +14,8 @@ from drs import DRSEngine, Telemetry
 from drs_mining.components import (
     MineFace,
     MetallurgicalPlant,
-    BlendingController,
+    OperatingModeController,
+    FleetController,
     ContinuousFleetLogistics,
     Stockpile,
     StochasticFaciesGenerator,
@@ -26,24 +27,6 @@ from drs_mining.components.plot import (
     print_deficit_by_mode,
     print_transition_log,
 )
-
-
-# ============================================================
-# Inline control policy
-# ------------------------------------------------------------
-# The ``on_step`` handler is a thin orchestrator of the component
-# APIs: the controller updates the operating mode and computes the
-# target flow rates (``update_mode`` / ``get_target_rates``), the
-# mine is driven by setting ``target_rate`` (parcel mechanics run
-# inside the mine's ``step``), the fleet routes the mined material
-# (``fleet.route``), the stockpiles feed-and-draw (``feed_and_draw``),
-# and the plant processes the combined draw (``process``).
-# ============================================================
-
-
-# ============================================================
-# Entity construction
-# ============================================================
 
 
 def build_blending_network(
@@ -67,9 +50,7 @@ def build_blending_network(
 ) -> tuple:
     """Build the blending network flat: every entity is constructed here.
 
-    Returns ``(mine, fleet, plant, controller, ore1_stock, ore2_stock)``.
-    There is no scenario container; register every stateful leaf with the
-    engine in that order.
+    Returns ``(mine, fleet, plant, mode_controller, fleet_controller, ore1_stock, ore2_stock)``.
     """
     gen = StochasticFaciesGenerator(
         mean_fraction=mean_ore_fraction,
@@ -117,17 +98,9 @@ def build_blending_network(
     )
 
     plant = MetallurgicalPlant(
-        stockpiles=[ore1_stock, ore2_stock], max_rate=plant_max_rate
-    )
-    controller = BlendingController(
-        faces=[mine],
-        fleet=fleet,
-        plant=plant,
+        stockpiles=[ore1_stock, ore2_stock],
+        max_rate=plant_max_rate,
         target_ore_stock_level=target_ore_stock_level,
-        critical_ore2_level=critical_ore2_level,
-        total_ore_to_extract=total_ore_to_extract,
-        duration_of_production_campaigns=duration_of_production_campaigns,
-        duration_of_shutdowns=duration_of_shutdowns,
         duration_of_contingency_segments=duration_of_contingency_segments,
         mode_a_ore1_milling_rate=3600.0,
         mode_a_ore2_milling_rate=2400.0,
@@ -135,7 +108,18 @@ def build_blending_network(
         mode_b_ore1_milling_rate=4600.0,
         mode_b_ore2_milling_rate=800.0,
         mode_b_contingency_ore2_milling_rate=2500.0,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+    )
+
+    mode_controller = OperatingModeController(
+        duration_of_production_campaigns=duration_of_production_campaigns,
+        duration_of_shutdowns=duration_of_shutdowns,
+        critical_ore2_level=critical_ore2_level,
+        target_ore_stock_level=target_ore_stock_level,
+        total_ore_to_extract=total_ore_to_extract,
+    )
+
+    fleet_controller = FleetController(
+        faces=[mine],
         fleet_shift_duration=0.5,
         total_lhd_count=3.0,
         total_truck_count=10.0,
@@ -154,41 +138,41 @@ def build_blending_network(
         mode_allocations={},
     )
 
-    return mine, fleet, plant, controller, ore1_stock, ore2_stock
-
-
+    return mine, fleet, plant, mode_controller, fleet_controller, ore1_stock, ore2_stock
 
 
 def _register_and_policy(engine, network):
     """Register the stateful leaves and wire the inline policy onto the engine."""
-    mine, fleet, plant, controller, ore1_stock, ore2_stock = network
-    engine.register(mine, fleet, plant, controller, ore1_stock, ore2_stock)
-    ctrl = controller
+    mine, fleet, plant, mode_ctrl, fleet_ctrl, ore1_stock, ore2_stock = network
+    engine.register(mine, fleet, plant, mode_ctrl, ore1_stock, ore2_stock)
 
     @engine.on_step
     def manage_blending(t: float):
-        # 1. Update operating mode based on campaign timers & stockpile levels
-        mode = ctrl.update_mode(ore1_stock, ore2_stock)
+        # 1. Supervisory Decision: campaign mode selection (MODE_A, MODE_B, SHUTDOWN)
+        mode = mode_ctrl.update(ore2_stock.level)
 
-        # 2. Compute target flow rates for this mode
-        mine_target, stock1_target, stock2_target = ctrl.get_target_rates(
-            mode, fleet
+        # 2. Plant Operational Behavior: resolves contingency/surging & calculates draw rates and mine feed target
+        plant_draw, mine_target = plant.get_target_rates(
+            mode,
+            ore1_level=ore1_stock.level,
+            ore2_level=ore2_stock.level,
+            stockpile2_routing_fraction=fleet.stockpile2_routing_fraction.value,
         )
 
-        # 3. Mine & route parcels
+        # 3. Mine extraction & continuous fleet routing
         mine.target_rate = mine_target
-        ore1_in, ore2_in = fleet.route(mine.actual_rate, mine.current_ore_grade)
+        ore1_in, ore2_in = fleet.route(sources=[mine])
 
         # 4. Feed stockpiles and draw into plant
-        out1 = ore1_stock.feed_and_draw(ore1_in, stock1_target)
-        out2 = ore2_stock.feed_and_draw(ore2_in, stock2_target)
+        out1 = ore1_stock.feed_and_draw(ore1_in, plant_draw.ore1)
+        out2 = ore2_stock.feed_and_draw(ore2_in, plant_draw.ore2)
         plant.process(out1 + out2)
 
 
-def print_statistics(controller, plant, mine):
+def print_statistics(plant, mine):
     """Print operating-mode time-shares and throughput for a blending network."""
     print("\n--- Output Statistics ---")
-    total_time = controller.total_duration
+    total_time = plant.total_duration
 
     if total_time > 0:
         for attr, label in [
@@ -201,12 +185,12 @@ def print_statistics(controller, plant, mine):
             ("cumulative_time_shutdown", "PortionOfTimeInShutdown"),
         ]:
             print(
-                f"{label}: {getattr(controller, attr).value / total_time:.4f}"
+                f"{label}: {getattr(plant, attr).value / total_time:.4f}"
             )
     else:
         print("Total time is 0. Cannot calculate mode portions.")
 
-    active_time = controller.active_duration(total_time)
+    active_time = plant.active_duration(total_time)
     if active_time > 0:
         if hasattr(plant, "cumulative_milled_mass"):
             total_ore_processed = plant.cumulative_milled_mass.value
@@ -229,13 +213,28 @@ def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
         random.seed(idx)
 
         network = build_blending_network(**config_kwargs)
-        mine, fleet, plant, controller, ore1_stock, ore2_stock = network
+        mine, fleet, plant, mode_ctrl, fleet_ctrl, ore1_stock, ore2_stock = network
 
         engine = DRSEngine()
         _register_and_policy(engine, network)
+
+        # Phase 1: Warmup
+        warmup_target = config_kwargs.get(
+            "ore_to_be_extracted_during_warming_period", 600000.0
+        )
+        mine.total_ore_to_extract = warmup_target
         engine.run(until=config_kwargs.get("replication_length", float("inf")))
 
-        active_time = controller.active_duration(engine.current_time)
+        # Reset plant mode timers for production measurement
+        plant.reset_mode_timers()
+
+        # Phase 2: Production
+        mine.total_ore_to_extract = config_kwargs.get(
+            "total_ore_to_extract", 6600000.0
+        )
+        engine.run(until=config_kwargs.get("replication_length", float("inf")))
+
+        active_time = plant.active_duration(plant.total_duration)
         if active_time > 0:
             throughput = mine.net_extracted_mass / active_time
             throughputs.append(throughput)
@@ -314,13 +313,22 @@ if __name__ == "__main__":
         std_dev_ore_fraction=args.std_dev_ore_fraction,
         prob_new_facies=0.3,
     )
-    mine, fleet, plant, controller, ore1_stock, ore2_stock = network
+    mine, fleet, plant, mode_ctrl, fleet_ctrl, ore1_stock, ore2_stock = network
 
-    controller.active_operating_mode.value = MODES["MODE_A"]
+    mode_ctrl.active_campaign_mode.value = MODES["MODE_A"]
 
     engine = DRSEngine()
     _register_and_policy(engine, network)
 
+    # Phase 1: Warmup Phase (extract initial burn-in tonnage to reach steady-state stockpiles)
+    mine.total_ore_to_extract = 600000.0
+    warmup_result = engine.run(until=99999.0)
+
+    # Reset operating mode duration timers for production metrics
+    plant.reset_mode_timers()
+
+    # Phase 2: Production Measurement Phase
+    mine.total_ore_to_extract = 6600000.0
     telemetry = Telemetry(model=engine)
     telemetry.register_metric(
         "MassOfCurrentParcel",
@@ -332,18 +340,18 @@ if __name__ == "__main__":
     )
     telemetry.register_metric(
         "Campaign_Shutdown",
-        lambda t, m, s, _: controller.current_campaign_duration.value,
+        lambda t, m, s, _: mode_ctrl.current_campaign_duration.value,
     )
     telemetry.register_metric(
         "Contingency",
-        lambda t, m, s, _: controller.current_contingency_duration.value,
+        lambda t, m, s, _: plant.current_contingency_duration.value,
     )
     engine.attach_telemetry(telemetry)
     result = engine.run(until=99999.0)
 
     print(result.summary())
 
-    print_statistics(controller, plant, mine)
+    print_statistics(plant, mine)
 
     df = prepare_history(result.history)
     print_transition_log(

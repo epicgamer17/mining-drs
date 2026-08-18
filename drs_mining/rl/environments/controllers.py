@@ -1,8 +1,8 @@
-from drs_mining.components.controllers import BlendingController
+from drs_mining.components.controllers import OperatingModeController
 
 
-class RL_MineController(BlendingController):
-    """State container that exposes pending_rl_action to the operating policy.
+class RL_MineController(OperatingModeController):
+    """Supervisory controller that exposes pending_rl_action to the operating policy.
 
     The top-level policy (MiningRLEnv._step_policy) reads pending_rl_action when
     a campaign decision is required and raises RequireDecision to yield to the

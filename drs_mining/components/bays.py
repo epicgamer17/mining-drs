@@ -3,6 +3,7 @@ import drs
 from .fleet import Truck, TruckState, LHD
 
 
+# TODO: not a drs.Module should it be?
 class LoadingBay:
     """Bridges LHD/Truck load cycles to DRS Stockpile/Muck Bay Levels and Flow Rates."""
 
@@ -43,7 +44,9 @@ class LoadingBay:
     def calculate_load_duration_sec(self, truck: Truck) -> float:
         """Calculates exact load duration in seconds for an active truck."""
         lhd_cycle_sec = self.lhd.get_bucket_cycle_sec()
-        return (self.truck_spot_min + self.acquisition_delay_min) * 60.0 + self.bucket_passes * lhd_cycle_sec
+        return (
+            self.truck_spot_min + self.acquisition_delay_min
+        ) * 60.0 + self.bucket_passes * lhd_cycle_sec
 
     def start_loading(self, truck: Truck) -> bool:
         """Starts loading an active truck at this muck bay gateway."""
@@ -81,6 +84,7 @@ class LoadingBay:
                 self.load_rate.value = 0.0
 
 
+# TODO: not a drs.Module should it be?
 class DumpingBay:
     """Bridges surface truck dumping to DRS Continuous Accumulators."""
 
@@ -98,12 +102,8 @@ class DumpingBay:
         self.dump_spot_min = dump_spot_min
         self.bed_raise_dump_min = bed_raise_dump_min
 
-        self.dumped_total = drs.Level(
-            f"dumped_{bay_type}_total", initial_value=0.0
-        )
-        self.dump_rate = drs.Variable(
-            f"dump_rate_{bay_type}", initial_value=0.0
-        )
+        self.dumped_total = drs.Level(f"dumped_{bay_type}_total", initial_value=0.0)
+        self.dump_rate = drs.Variable(f"dump_rate_{bay_type}", initial_value=0.0)
 
         self.active_truck: Optional[Truck] = None
         self.dump_time_remaining: float = 0.0

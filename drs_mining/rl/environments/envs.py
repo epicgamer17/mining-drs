@@ -1,26 +1,28 @@
-import math
-import random
-from typing import Optional
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+import random
+from typing import Optional
+
 import drs
-from drs.telemetry import Telemetry
-from drs import DRSEngine
-from drs_mining.components.modes import RequireDecision
-from drs_mining.components.factories import build_mining_simulation
+from drs import DRSEngine, Telemetry
+from drs_mining.components import (
+    build_mining_simulation,
+    MODES,
+    RequireDecision,
+)
 from .controllers import RL_MineController
 
 
-
 class MiningRLEnv(gym.Env):
-    """
-    Gymnasium environment wrapping the DRS Mining Simulation.
-    Follows standard Gymnasium API conventions.
-    """
+    """Reinforcement Learning Environment for Mining Operations."""
+
+    metadata = {"render_modes": ["human"]}
 
     def __init__(
         self,
+        mean_ore_fraction: float = 0.30,
+        std_dev_ore_fraction: float = 0.05,
         target_ore_stock_level: float = 60000.0,
         total_ore_to_extract: float = 6600000.0,
         ore_to_be_extracted_during_warming_period: float = 600000.0,
@@ -28,25 +30,24 @@ class MiningRLEnv(gym.Env):
         duration_of_production_campaigns: float = 34.0,
         duration_of_shutdowns: float = 1.0,
         duration_of_contingency_segments: float = 1.0,
-        replication_length: float = math.inf,
-        mean_ore_fraction: float = 0.30,
-        std_dev_ore_fraction: float = 0.05,
         min_ore_mass: float = 30000.0,
         max_ore_mass: float = 50000.0,
         prob_new_facies: float = 0.3,
         variation_same_facies: float = 0.01,
-        dense_reward_target_throughput: float = 5500.0,
-        sparse_reward_time_penalty_scale: float = 35.0,
-        sparse_reward_stock_penalty_weight: float = 0.05,
+        replication_length: float = 999999.0,
+        max_steps: int = 100,
+        reward_type: str = "dense",
+        dense_reward_target_throughput: float = 5800.0,
+        sparse_reward_time_penalty_scale: float = 1000.0,
+        sparse_reward_stock_penalty_weight: float = 10.0,
         stockpile_scaling_factor: float = 1000.0,
         time_scaling_factor: float = 1000.0,
-        max_steps: int = 1000,
         enable_telemetry: bool = False,
-        reward_type: str = "sparse",
-        **kwargs,
     ):
-
         super().__init__()
+
+        self.mean_ore_fraction = mean_ore_fraction
+        self.std_dev_ore_fraction = std_dev_ore_fraction
         self.target_ore_stock_level = target_ore_stock_level
         self.total_ore_to_extract = total_ore_to_extract
         self.ore_to_be_extracted_during_warming_period = (
@@ -56,27 +57,23 @@ class MiningRLEnv(gym.Env):
         self.duration_of_production_campaigns = duration_of_production_campaigns
         self.duration_of_shutdowns = duration_of_shutdowns
         self.duration_of_contingency_segments = duration_of_contingency_segments
-        self.replication_length = replication_length
-        self.mean_ore_fraction = mean_ore_fraction
-        self.std_dev_ore_fraction = std_dev_ore_fraction
         self.min_ore_mass = min_ore_mass
         self.max_ore_mass = max_ore_mass
         self.prob_new_facies = prob_new_facies
         self.variation_same_facies = variation_same_facies
-
+        self.replication_length = replication_length
+        self.max_steps = max_steps
+        self.reward_type = reward_type
         self.dense_reward_target_throughput = dense_reward_target_throughput
         self.sparse_reward_time_penalty_scale = sparse_reward_time_penalty_scale
-        self.sparse_reward_stock_penalty_weight = sparse_reward_stock_penalty_weight
+        self.sparse_reward_stock_penalty_weight = (
+            sparse_reward_stock_penalty_weight
+        )
         self.stockpile_scaling_factor = stockpile_scaling_factor
         self.time_scaling_factor = time_scaling_factor
-        self.max_steps = max_steps
         self.enable_telemetry = enable_telemetry
-        self.reward_type = reward_type
 
-        # 0: Mode A, 1: Mode B
         self.action_space = spaces.Discrete(2)
-
-        # [Ore1_Stock, Ore2_Stock, Total_Stock, Parcel_Ore_Fraction, Time]
         self.observation_space = spaces.Box(
             low=0.0, high=np.inf, shape=(5,), dtype=np.float32
         )
@@ -84,6 +81,8 @@ class MiningRLEnv(gym.Env):
         self.mine = None
         self.fleet = None
         self.plant = None
+        self.mode_controller = None
+        self.fleet_controller = None
         self.controller = None
         self.ore1_stock = None
         self.ore2_stock = None
@@ -96,14 +95,18 @@ class MiningRLEnv(gym.Env):
 
     def _get_current_time(self):
         """Helper to safely calculate total elapsed simulation days."""
-        return self.controller.total_duration
+        if hasattr(self, "engine") and self.engine is not None:
+            return self.engine.current_time
+        if hasattr(self, "plant") and self.plant is not None:
+            return self.plant.total_duration
+        return 0.0
 
     def _setup_simulation(self):
         """Builds the flat leaf components, registers them, and wires the policy."""
-        faces, self.fleet, self.plant, self.controller, self.ore1_stock, self.ore2_stock = (
+        faces, self.fleet, self.plant, self.mode_controller, self.fleet_controller, self.ore1_stock, self.ore2_stock = (
             build_mining_simulation(
                 num_faces=1,
-                controller_cls=RL_MineController,
+                mode_controller_cls=RL_MineController,
                 mean_ore_fraction=self.mean_ore_fraction,
                 std_dev_ore_fraction=self.std_dev_ore_fraction,
                 target_ore_stock_level=self.target_ore_stock_level,
@@ -120,6 +123,7 @@ class MiningRLEnv(gym.Env):
             )
         )
         self.mine = faces[0]
+        self.controller = self.mode_controller
         self.global_time = drs.Timer("GlobalTime", initial_value=0.0)
 
         self.engine = DRSEngine()
@@ -127,7 +131,8 @@ class MiningRLEnv(gym.Env):
             self.mine,
             self.fleet,
             self.plant,
-            self.controller,
+            self.mode_controller,
+            self.fleet_controller,
             self.ore1_stock,
             self.ore2_stock,
         )
@@ -136,22 +141,31 @@ class MiningRLEnv(gym.Env):
         def _policy(time):
             self._step_policy(time)
 
-
     def _step_policy(self, time):
         """Top-level control policy invoked by the engine once per step."""
         self.global_time.rate = 1.0
-        ctrl = self.controller
 
-        mode = ctrl.update_mode(self.ore1_stock, self.ore2_stock)
-        mine_target, stock1_target, stock2_target = ctrl.get_target_rates(
-            mode, self.fleet
+        # 1. Mode decision
+        mode = self.mode_controller.update(self.ore2_stock.level)
+
+        # 2. Plant draw rates and mine target
+        plant_draw, mine_target = self.plant.get_target_rates(
+            mode,
+            ore1_level=self.ore1_stock.level,
+            ore2_level=self.ore2_stock.level,
+            stockpile2_routing_fraction=self.fleet.stockpile2_routing_fraction.value,
         )
 
-        self.mine.target_rate = mine_target
+        # 3. Fleet extraction allocation
+        face_rates = self.fleet_controller.allocate(
+            mine_target, self.plant.active_operating_mode.value
+        )
+        self.mine.target_rate = face_rates[0]
 
+        # 4. Routing, stockpile draw, and milling
         ore1_in, ore2_in = self.fleet.route(sources=[self.mine])
-        out1 = self.ore1_stock.feed_and_draw(ore1_in, stock1_target)
-        out2 = self.ore2_stock.feed_and_draw(ore2_in, stock2_target)
+        out1 = self.ore1_stock.feed_and_draw(ore1_in, plant_draw.ore1)
+        out2 = self.ore2_stock.feed_and_draw(ore2_in, plant_draw.ore2)
 
         self.plant.process(out1 + out2)
 
@@ -170,11 +184,11 @@ class MiningRLEnv(gym.Env):
         )
         self.telemetry.register_metric(
             "Campaign_Shutdown",
-            lambda t, m, s, _: self.controller.current_campaign_duration.value,
+            lambda t, m, s, _: self.mode_controller.current_campaign_duration.value,
         )
         self.telemetry.register_metric(
             "Contingency",
-            lambda t, m, s, _: self.controller.current_contingency_duration.value,
+            lambda t, m, s, _: self.plant.current_contingency_duration.value,
         )
 
         self.engine.attach_telemetry(self.telemetry)
@@ -213,7 +227,9 @@ class MiningRLEnv(gym.Env):
     def _calculate_sparse_reward(self, dt: float) -> float:
         reward_time_penalty = -(dt / self.sparse_reward_time_penalty_scale)
         stock_penalty_weight = self.sparse_reward_stock_penalty_weight
-        total_stock = self.ore1_stock.current_mass.value + self.ore2_stock.current_mass.value
+        total_stock = (
+            self.ore1_stock.current_mass.value + self.ore2_stock.current_mass.value
+        )
         overstock = max(0.0, total_stock - self.target_ore_stock_level)
         overstock_scaled = overstock / self.stockpile_scaling_factor
         return reward_time_penalty - (stock_penalty_weight * overstock_scaled)
@@ -221,20 +237,15 @@ class MiningRLEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        if (
-            action == 0
-            and self.controller.total_system_ore_mass.value
-            > self.target_ore_stock_level
-        ):
+        total_stock = (
+            self.ore1_stock.current_mass.value + self.ore2_stock.current_mass.value
+        )
+        if action == 0 and total_stock > self.target_ore_stock_level:
             action = 2  # Mode A Mine Surging
-        elif (
-            action == 1
-            and self.controller.total_system_ore_mass.value
-            > self.target_ore_stock_level
-        ):
+        elif action == 1 and total_stock > self.target_ore_stock_level:
             action = 3  # Mode B Mine Surging
 
-        self.controller.pending_rl_action = action
+        self.mode_controller.pending_rl_action = action
 
         try:
             self.engine.run(until=self.replication_length)
@@ -245,7 +256,6 @@ class MiningRLEnv(gym.Env):
         truncated = False
         if self.max_steps > 0 and self.current_step >= self.max_steps:
             truncated = True
-
 
         current_time = self._get_current_time()
         current_extraction = self.mine.cumulative_extracted_mass.value

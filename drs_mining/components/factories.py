@@ -7,7 +7,7 @@ from .stockpiles import Stockpile
 from .mine_face import MineFace
 from .fleet import ContinuousFleetLogistics, Truck, LHD
 from .plant import MetallurgicalPlant
-from .controllers import BlendingController
+from .controllers import OperatingModeController, FleetController
 from .generators import StochasticFaciesGenerator
 
 
@@ -128,7 +128,8 @@ def build_mining_simulation(
     faces: Sequence[MineFace] = (),
     face_generators: Sequence = (),
     face_mean_fractions: Sequence[float] = (),
-    controller_cls=BlendingController,
+    mode_controller_cls=OperatingModeController,
+    fleet_controller_cls=FleetController,
     mean_ore_fraction: float = 0.30,
     std_dev_ore_fraction: float = 0.05,
     target_ore_stock_level: float = 60000.0,
@@ -165,12 +166,10 @@ def build_mining_simulation(
     development_rate_per_extra_truck: float = 50.0,
     mode_allocations: Mapping = (),
 ):
-    """Builds a mining blending simulation for arbitrary number of mine faces (N >= 1).
+    """Builds a mining simulation for arbitrary number of mine faces (N >= 1).
 
     Returns:
-        tuple: ``(faces, fleet, plant, controller, ore1_stock, ore2_stock)``
-        When ``num_faces == 1`` and ``faces`` is not explicitly provided,
-        ``faces`` will be a single-element list ``[mine_face]``.
+        tuple: ``(faces, fleet, plant, mode_controller, fleet_controller, ore1_stock, ore2_stock)``
     """
     if not faces:
         if face_generators:
@@ -258,17 +257,9 @@ def build_mining_simulation(
         attr_inflow=0.0,
     )
 
-    plant = MetallurgicalPlant(stockpiles=[ore1_stock, ore2_stock])
-
-    controller = controller_cls(
-        faces=faces,
-        fleet=fleet,
-        plant=plant,
+    plant = MetallurgicalPlant(
+        stockpiles=[ore1_stock, ore2_stock],
         target_ore_stock_level=target_ore_stock_level,
-        critical_ore2_level=critical_ore2_level,
-        total_ore_to_extract=total_ore_to_extract,
-        duration_of_production_campaigns=duration_of_production_campaigns,
-        duration_of_shutdowns=duration_of_shutdowns,
         duration_of_contingency_segments=duration_of_contingency_segments,
         mode_a_ore1_milling_rate=mode_a_ore1_milling_rate,
         mode_a_ore2_milling_rate=mode_a_ore2_milling_rate,
@@ -276,7 +267,25 @@ def build_mining_simulation(
         mode_b_ore1_milling_rate=mode_b_ore1_milling_rate,
         mode_b_ore2_milling_rate=mode_b_ore2_milling_rate,
         mode_b_contingency_ore2_milling_rate=mode_b_contingency_ore2_milling_rate,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+    )
+
+    mode_controller = mode_controller_cls(
+        duration_of_production_campaigns=duration_of_production_campaigns,
+        duration_of_shutdowns=duration_of_shutdowns,
+        critical_ore2_level=critical_ore2_level,
+        target_ore_stock_level=target_ore_stock_level,
+        total_ore_to_extract=total_ore_to_extract,
+    )
+
+    mode_rates = {
+        "MODE_A": (mode_a_ore1_milling_rate, mode_a_ore2_milling_rate),
+        "MODE_A_CONTINGENCY": (mode_a_contingency_ore1_milling_rate, 0.0),
+        "MODE_B": (mode_b_ore1_milling_rate, mode_b_ore2_milling_rate),
+        "MODE_B_CONTINGENCY": (0.0, mode_b_contingency_ore2_milling_rate),
+    }
+
+    fleet_controller = fleet_controller_cls(
+        faces=faces,
         fleet_shift_duration=fleet_shift_duration,
         total_lhd_count=total_lhd_count,
         total_truck_count=total_truck_count,
@@ -293,6 +302,10 @@ def build_mining_simulation(
         truck_payload_tonnes=truck_payload_tonnes,
         development_rate_per_extra_truck=development_rate_per_extra_truck,
         mode_allocations=mode_allocations,
+        mode_rates=mode_rates,
     )
 
-    return faces, fleet, plant, controller, ore1_stock, ore2_stock
+    return faces, fleet, plant, mode_controller, fleet_controller, ore1_stock, ore2_stock
+
+
+create_blending_system = build_mining_simulation

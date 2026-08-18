@@ -1,6 +1,7 @@
 from drs_mining.components import (
     MineFace,
-    BlendingController,
+    OperatingModeController,
+    FleetController,
     load_topology_dict,
     build_mining_simulation,
 )
@@ -10,7 +11,7 @@ import os
 
 
 def test_direct_parameter_instantiation():
-    faces, fleet, plant, controller, ore1_stock, ore2_stock = (
+    faces, fleet, plant, mode_controller, fleet_controller, ore1_stock, ore2_stock = (
         build_mining_simulation(
             num_faces=1,
             target_ore_stock_level=50000.0,
@@ -21,9 +22,10 @@ def test_direct_parameter_instantiation():
     mine = faces[0]
     assert mine.mean_ore_fraction == 0.35
     assert mine.total_ore_to_extract == 1000000.0
-    assert controller.target_ore_stock_level == 50000.0
+    assert mode_controller.target_ore_stock_level == 50000.0
+    assert plant.target_ore_stock_level == 50000.0
 
-    faces, fleet, plant, controller, ore1_stock, ore2_stock = (
+    faces, fleet, plant, mode_controller, fleet_controller, ore1_stock, ore2_stock = (
         build_mining_simulation(
             num_faces=2,
             total_truck_count=12.0,
@@ -32,10 +34,10 @@ def test_direct_parameter_instantiation():
     )
     assert faces and len(faces) == 2
     assert all(isinstance(face, MineFace) for face in faces)
-    assert isinstance(controller, BlendingController)
-    assert controller.total_truck_count == 12.0
-    assert controller.total_lhd_count == 4.0
-
+    assert isinstance(mode_controller, OperatingModeController)
+    assert isinstance(fleet_controller, FleetController)
+    assert fleet_controller.total_truck_count == 12.0
+    assert fleet_controller.total_lhd_count == 4.0
 
 
 def test_topology_dict_loading():

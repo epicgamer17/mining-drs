@@ -8,7 +8,10 @@ from dataclasses import replace
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from .simulation import _run_capacity_case
+try:
+    from .simulation import _run_capacity_case
+except ImportError:
+    from examples.multi_face_fleet.simulation import _run_capacity_case
 
 
 def plot_theoretical_fleet_diminishing_returns():
@@ -223,11 +226,12 @@ def generate_infinite_vs_constrained_plots():
     axes[2].set_ylabel("Ore 2 Stock (t)")
     axes[2].set_xlabel("Time (days)")
     axes[2].axhline(
-        y=base_config.critical_ore2_level,
+        y=20400.0,
         color="red",
         linestyle=":",
         label="Critical Limit",
     )
+
     axes[2].grid(True, alpha=0.3)
     axes[2].legend()
 

@@ -2,6 +2,7 @@ class RequireDecision(Exception):
     pass
 
 
+# TODO: make this arbitrary. Allow for arbirtraty modes and number and type of modes.
 _MODE_IDS = {
     "MODE_A": 0,
     "MODE_A_CONTINGENCY": 1,

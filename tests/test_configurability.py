@@ -15,7 +15,8 @@ from drs_mining import (
     build_mining_simulation,
     MineFace,
     MetallurgicalPlant,
-    BlendingController,
+    OperatingModeController,
+    FleetController,
     ContinuousFleetLogistics,
     StochasticFaciesGenerator,
     TruckState,
@@ -223,7 +224,7 @@ def test_multi_stockpile_fleet_routing():
 
 def test_multi_face_simulation_arbitrary_n():
     for num_faces in [1, 2, 3, 4, 5]:
-        faces, fleet, plant, controller, ore1_stock, ore2_stock = build_mining_simulation(
+        faces, fleet, plant, mode_ctrl, fleet_ctrl, ore1_stock, ore2_stock = build_mining_simulation(
             num_faces=num_faces,
             total_truck_count=15.0,
             total_lhd_count=5.0,
@@ -233,17 +234,17 @@ def test_multi_face_simulation_arbitrary_n():
             max_lhds_per_face=2.0,
         )
         assert len(faces) == num_faces
-        assert controller.total_truck_count == 15.0
-        assert controller.total_lhd_count == 5.0
+        assert fleet_ctrl.total_truck_count == 15.0
+        assert fleet_ctrl.total_lhd_count == 5.0
 
         for mode in ["MODE_A", "MODE_B", "MODE_A_CONTINGENCY", "MODE_B_CONTINGENCY", "MODE_A_MINE_SURGING", "MODE_B_MINE_SURGING"]:
-            alloc = controller._get_allocations_for_mode(mode)
+            alloc = fleet_ctrl._get_allocations_for_mode(mode)
             assert len(alloc) == num_faces
             assert math.isclose(sum(alloc), 1.0, rel_tol=1e-5)
 
 
 def test_multi_face_simulation_execution_3_faces():
-    faces, fleet, plant, controller, ore1_stock, ore2_stock = build_mining_simulation(
+    faces, fleet, plant, mode_ctrl, fleet_ctrl, ore1_stock, ore2_stock = build_mining_simulation(
         num_faces=3,
         face_mean_fractions=[0.10, 0.30, 0.50],
         total_truck_count=12.0,
@@ -251,17 +252,24 @@ def test_multi_face_simulation_execution_3_faces():
     )
 
     engine = drs.DRSEngine()
-    engine.register(*faces, fleet, plant, controller, ore1_stock, ore2_stock)
+    engine.register(*faces, fleet, plant, mode_ctrl, fleet_ctrl, ore1_stock, ore2_stock)
 
     @engine.on_step
     def manage_step(t):
-        mode = controller.update_mode(ore1_stock, ore2_stock)
-        mine_target, s1_target, s2_target = controller.get_target_rates(mode, fleet)
-        controller.schedule_fleet_shifts(mode)
-        controller.drive_faces(mine_target)
+        mode = mode_ctrl.update(ore2_stock.level)
+        plant_draw, mine_target = plant.get_target_rates(
+            mode,
+            ore1_level=ore1_stock.level,
+            ore2_level=ore2_stock.level,
+            stockpile2_routing_fraction=fleet.stockpile2_routing_fraction.value,
+        )
+        face_rates = fleet_ctrl.allocate(mine_target, plant.active_operating_mode.value)
+        for face, rate in zip(faces, face_rates):
+            face.target_rate = rate
+
         ore1_in, ore2_in = fleet.route(sources=faces)
-        out1 = ore1_stock.feed_and_draw(ore1_in, s1_target)
-        out2 = ore2_stock.feed_and_draw(ore2_in, s2_target)
+        out1 = ore1_stock.feed_and_draw(ore1_in, plant_draw.ore1)
+        out2 = ore2_stock.feed_and_draw(ore2_in, plant_draw.ore2)
         plant.process(out1 + out2)
 
     engine.run(until=2.0)

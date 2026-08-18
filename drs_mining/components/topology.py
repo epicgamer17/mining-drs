@@ -4,6 +4,7 @@ import drs
 from .fleet import Truck
 
 
+# TODO: not a module? why?
 class RoadSegment:
     """Represents a discrete single-lane haulage road corridor with timer decay."""
 
@@ -42,4 +43,3 @@ class RoadSegment:
             self.time_until_free.value = max(0.0, self.time_until_free.value - dt)
             if self.time_until_free.value <= 0.0:
                 self.occupying_truck = None
-

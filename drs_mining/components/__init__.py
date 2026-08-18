@@ -10,12 +10,13 @@ from .fleet import (
 from .topology import RoadSegment
 from .bays import LoadingBay, DumpingBay
 from .mine_face import MineFace
-from .plant import MetallurgicalPlant
-from .controllers import BlendingController
+from .plant import MetallurgicalPlant, PlantDrawRates
+from .controllers import OperatingModeController, FleetController
 from .stockpiles import Stockpile
 from .dispatch import ShelswellDispatchController
 from .factories import (
     build_mining_simulation,
+    create_blending_system,
     create_stockpiles,
     load_topology_dict,
     create_truck_fleet,
@@ -27,7 +28,9 @@ __all__ = [
     "Processor",
     "MineFace",
     "MetallurgicalPlant",
-    "BlendingController",
+    "PlantDrawRates",
+    "OperatingModeController",
+    "FleetController",
     "Stockpile",
     "create_stockpiles",
     "ShelswellDispatchController",
@@ -41,6 +44,7 @@ __all__ = [
     "DumpingBay",
     "load_topology_dict",
     "build_mining_simulation",
+    "create_blending_system",
     "StochasticFaciesGenerator",
     "MODES",
     "OperatingMode",

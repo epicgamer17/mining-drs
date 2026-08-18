@@ -16,6 +16,7 @@ class TruckState(Enum):
     MAINTENANCE = auto()
 
 
+# TODO: is dataclass good or should python-drs introduce a Entity class?
 @dataclass
 class Truck:
     truck_id: str
@@ -28,13 +29,13 @@ class Truck:
     state: TruckState = TruckState.PARKED
     current_location: str = "SURFACE_PARKING"
     current_payload: float = 0.0
-    payload_type: str = "ORE"       # "ORE" or "WASTE"
+    payload_type: str = "ORE"  # "ORE" or "WASTE"
     target_level: Optional[int] = None
     target_bay_id: Optional[str] = None
 
     # Fuel & Mechanical State
-    fuel_level_pct: float = 100.0   # 0.0 - 100.0%
-    fuel_burn_rate_pct_per_sec: float = 0.005 # per-second burn rate
+    fuel_level_pct: float = 100.0  # 0.0 - 100.0%
+    fuel_burn_rate_pct_per_sec: float = 0.005  # per-second burn rate
     next_failure_time: float = 1e9  # Calculated from MTBF
 
     def get_speed_mps(self, segment_type: str) -> float:
@@ -44,6 +45,7 @@ class Truck:
         return kph / 3.6
 
 
+# TODO: is dataclass good or should python-drs introduce a Entity class?
 @dataclass
 class LHD:
     lhd_id: str
@@ -59,14 +61,27 @@ class LHD:
 
     def get_bucket_cycle_sec(self) -> float:
         """Calculates duration in seconds of 1 LHD digging & tramming bucket pass."""
-        speed_loaded_mpm = (self.speed_loaded_kph * 1000.0 / 60.0) if self.speed_loaded_kph > 0 else 1.0
-        speed_empty_mpm = (self.speed_empty_kph * 1000.0 / 60.0) if self.speed_empty_kph > 0 else 1.0
+        speed_loaded_mpm = (
+            (self.speed_loaded_kph * 1000.0 / 60.0)
+            if self.speed_loaded_kph > 0
+            else 1.0
+        )
+        speed_empty_mpm = (
+            (self.speed_empty_kph * 1000.0 / 60.0) if self.speed_empty_kph > 0 else 1.0
+        )
         t_tram_loaded_min = self.tram_dist_m / speed_loaded_mpm
         t_tram_empty_min = self.tram_dist_m / speed_empty_mpm
-        total_min = (self.load_spot_min + self.load_min + t_tram_loaded_min + self.dump_min + t_tram_empty_min)
+        total_min = (
+            self.load_spot_min
+            + self.load_min
+            + t_tram_loaded_min
+            + self.dump_min
+            + t_tram_empty_min
+        )
         return total_min * 60.0
 
 
+# TODO: what does this do? Why do we need it? can we remove it?
 class ContinuousFleetLogistics(drs.Module):
     def __init__(self, num_stockpiles: int = 2):
         super().__init__()

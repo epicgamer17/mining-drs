@@ -4,6 +4,7 @@ from .bays import LoadingBay
 from .topology import RoadSegment
 
 
+# TODO: should this be in controllers.py? I think this is a fleet controller, but for individual trucks. How can we make that clear and stuff. im not sure. like we have two kinds of fleet controllers, two kinds of contracts. it is supposed to be a library where you can create modules and systems etc, and this is something we compared (inidividual trucks vs not), but how should that be handled and stuff? Is there a way to merge the two?
 class ShelswellDispatchController:
     """Implements Shelswell's operational dispatch rules cleanly in Python."""
 
@@ -31,7 +32,10 @@ class ShelswellDispatchController:
     def assign_payload_type(self, truck: Truck):
         """Assigns ORE or WASTE payload type according to the production schedule ratio."""
         self.dispatch_counter += 1
-        if self.waste_trip_interval > 0 and self.dispatch_counter % self.waste_trip_interval == 0:
+        if (
+            self.waste_trip_interval > 0
+            and self.dispatch_counter % self.waste_trip_interval == 0
+        ):
             truck.payload_type = "WASTE"
         else:
             truck.payload_type = "ORE"

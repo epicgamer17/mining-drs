@@ -689,10 +689,17 @@ def prepare_history(df):
         lambda m: 1 if m == "SHUTDOWN" else 0
     )
 
+    if "total_system_ore_mass" not in df.columns:
+        if "Ore1Stock_mass" in df.columns and "Ore2Stock_mass" in df.columns:
+            df["total_system_ore_mass"] = df["Ore1Stock_mass"] + df["Ore2Stock_mass"]
+        else:
+            df["total_system_ore_mass"] = 0.0
+
     df["Total Ore Stockpile Level"] = df["total_system_ore_mass"] / 1000.0
-    df["Ore 1 Stockpile Level"] = df["Ore1Stock_mass"] / 1000.0
-    df["Ore 2 Stockpile Level"] = df["Ore2Stock_mass"] / 1000.0
+    df["Ore 1 Stockpile Level"] = df["Ore1Stock_mass"] / 1000.0 if "Ore1Stock_mass" in df.columns else 0.0
+    df["Ore 2 Stockpile Level"] = df["Ore2Stock_mass"] / 1000.0 if "Ore2Stock_mass" in df.columns else 0.0
     return df
+
 
 
 def print_state_change_transitions(events, variable="active_operating_mode"):

@@ -24,30 +24,30 @@ def test_mine_face_net_extracted_mass():
 
 
 def test_controller_durations():
-    _, _, _, controller, _, _ = build_mining_simulation()
+    _, _, plant, mode_controller, fleet_controller, _, _ = build_mining_simulation()
 
-    controller.cumulative_time_mode_a.value = 10.0
-    controller.cumulative_time_mode_b.value = 5.0
-    controller.cumulative_time_shutdown.value = 2.0
+    plant.cumulative_time_mode_a.value = 10.0
+    plant.cumulative_time_mode_b.value = 5.0
+    plant.cumulative_time_shutdown.value = 2.0
 
-    assert controller.total_duration == 17.0
-    assert controller.active_duration(controller.total_duration) == 15.0
-    assert controller.active_duration() == 15.0
-    assert controller.active_duration(10.0) == 8.0
+    assert plant.total_duration == 17.0
+    assert plant.active_duration(plant.total_duration) == 15.0
+    assert plant.active_duration() == 15.0
+    assert plant.active_duration(10.0) == 8.0
 
 
 def test_flat_build_wiring():
-    faces, fleet, plant, controller, ore1_stock, ore2_stock = (
+    faces, fleet, plant, mode_controller, fleet_controller, ore1_stock, ore2_stock = (
         build_mining_simulation()
     )
 
     ore1_stock.current_mass.value = 1000.0
     ore2_stock.current_mass.value = 2000.0
     fleet.stockpile2_routing_fraction.value = 0.35
-    controller.target_mine_mass_rate.value = 5000.0
+    plant.target_mine_mass_rate.value = 5000.0
 
     assert ore1_stock.current_mass.value == 1000.0
     assert ore2_stock.current_mass.value == 2000.0
     assert ore1_stock.current_mass.value + ore2_stock.current_mass.value == 3000.0
     assert fleet.stockpile2_routing_fraction.value == 0.35
-    assert controller.target_mine_mass_rate.value == 5000.0
+    assert plant.target_mine_mass_rate.value == 5000.0

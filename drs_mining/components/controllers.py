@@ -1,101 +1,135 @@
 import math
-from typing import List, Dict, Mapping, Sequence
+from typing import List, Dict, Mapping, Sequence, Optional, Union, Tuple
 import drs
-from .modes import MODES, RequireDecision
+from .modes import MODES, OperatingMode, RequireDecision
 from .mine_face import MineFace
-from .fleet import ContinuousFleetLogistics
-from .plant import MetallurgicalPlant
 
 
-class BlendingController(drs.Module):
-    r"""Unified state container and mode/allocation bookkeeping for blending control."""
+class OperatingModeController(drs.Module):
+    """High-level supervisory controller that manages campaign timers and operating mode transitions."""
 
-    _MODE_TIMER_ATTRS = {
-        "MODE_A": "cumulative_time_mode_a",
-        "MODE_A_CONTINGENCY": "cumulative_time_mode_a_contingency",
-        "MODE_A_MINE_SURGING": "cumulative_time_mode_a_surging",
-        "MODE_B": "cumulative_time_mode_b",
-        "MODE_B_CONTINGENCY": "cumulative_time_mode_b_contingency",
-        "MODE_B_MINE_SURGING": "cumulative_time_mode_b_surging",
-        "SHUTDOWN": "cumulative_time_shutdown",
-    }
+    def __init__(
+        self,
+        duration_of_production_campaigns: float,
+        duration_of_shutdowns: float,
+        critical_ore2_level: float,
+        target_ore_stock_level: float = 60000.0,
+        total_ore_to_extract: float = 6600000.0,
+        initial_mode: OperatingMode = MODES["MODE_A"],
+    ):
+        super().__init__()
+        self.duration_of_production_campaigns = duration_of_production_campaigns
+        self.duration_of_shutdowns = duration_of_shutdowns
+        self.critical_ore2_level = critical_ore2_level
+        self.target_ore_stock_level = target_ore_stock_level
+        self.total_ore_to_extract = total_ore_to_extract
 
-    _RATE_MAP = {
-        "MODE_A": ("mode_a_ore1_milling_rate", "mode_a_ore2_milling_rate"),
-        "MODE_A_CONTINGENCY": ("mode_a_contingency_ore1_milling_rate", None),
-        "MODE_A_MINE_SURGING": ("mode_a_ore1_milling_rate", "mode_a_ore2_milling_rate"),
-        "MODE_B": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
-        "MODE_B_CONTINGENCY": (None, "mode_b_contingency_ore2_milling_rate"),
-        "MODE_B_MINE_SURGING": ("mode_b_ore1_milling_rate", "mode_b_ore2_milling_rate"),
-        "SHUTDOWN": (None, None),
-    }
+        self.active_campaign_mode = drs.Variable(
+            "active_campaign_mode", initial_mode
+        )
+        self.active_operating_mode = self.active_campaign_mode
 
-    _CONTINGENCY_MODES = {"MODE_A_CONTINGENCY", "MODE_B_CONTINGENCY"}
+        self.current_campaign_duration = drs.Timer(
+            "current_campaign_duration", initial_value=0.0
+        )
 
-    _RL_ACTION_MODES = [
-        MODES["MODE_A"],
-        MODES["MODE_B"],
-        MODES["MODE_A_MINE_SURGING"],
-        MODES["MODE_B_MINE_SURGING"],
-    ]
+    def update(
+        self,
+        ore2_stock_level: float,
+        total_stock_level: Optional[float] = None,
+    ) -> OperatingMode:
+        """Advance campaign timer and determine active campaign mode (MODE_A, MODE_B, SHUTDOWN)."""
+        name = self.active_campaign_mode.value.name
+
+        if self._campaign_complete():
+            if name == "SHUTDOWN":
+                rl_action = getattr(self, "pending_rl_action", None)
+                if rl_action is not None:
+                    self.current_campaign_duration.reset()
+                    self.pending_rl_action = None
+                    action_modes = [
+                        MODES["MODE_A"],
+                        MODES["MODE_B"],
+                        MODES["MODE_A_MINE_SURGING"],
+                        MODES["MODE_B_MINE_SURGING"],
+                    ]
+                    next_mode = action_modes[rl_action]
+                    self.active_campaign_mode.value = next_mode
+                    self._update_campaign_timers(next_mode.name)
+                    return next_mode
+
+                if hasattr(self, "pending_rl_action"):
+                    raise RequireDecision()
+
+                self.current_campaign_duration.reset()
+                next_mode = self._choose_next_campaign_mode(ore2_stock_level, total_stock_level)
+                self.active_campaign_mode.value = next_mode
+            else:
+                self.current_campaign_duration.reset()
+                self.active_campaign_mode.value = MODES["SHUTDOWN"]
+
+        active_name = self.active_campaign_mode.value.name
+        self._update_campaign_timers(active_name)
+        return self.active_campaign_mode.value
+
+    def _choose_next_campaign_mode(
+        self, ore2_stock_level: float, total_stock_level: Optional[float] = None
+    ) -> OperatingMode:
+        if ore2_stock_level > self.critical_ore2_level:
+            return MODES["MODE_A"]
+        return MODES["MODE_B"]
+
+    def _campaign_complete(self) -> bool:
+        threshold = (
+            self.duration_of_shutdowns
+            if self.active_campaign_mode.value.name == "SHUTDOWN"
+            else self.duration_of_production_campaigns
+        )
+        self.current_campaign_duration.upper_threshold = threshold
+        return self.current_campaign_duration.value >= (threshold - 1e-6)
+
+    def _update_campaign_timers(self, name: str):
+        self.current_campaign_duration.rate = 1.0
+        self.current_campaign_duration.upper_threshold = (
+            self.duration_of_shutdowns
+            if name == "SHUTDOWN"
+            else self.duration_of_production_campaigns
+        )
+
+    def is_terminating_condition_met(self) -> bool:
+        return False
+
+
+class FleetController(drs.Module):
+    """Underground haulage & extraction controller managing discrete fleet allocation,
+    cycle times, match factors, and per-face extraction rates.
+    """
 
     def __init__(
         self,
         faces: Sequence[MineFace],
-        fleet: ContinuousFleetLogistics,
-        plant: MetallurgicalPlant,
-        target_ore_stock_level: float,
-        critical_ore2_level: float,
-        total_ore_to_extract: float,
-        duration_of_production_campaigns: float,
-        duration_of_shutdowns: float,
-        duration_of_contingency_segments: float,
-        mode_a_ore1_milling_rate: float,
-        mode_a_ore2_milling_rate: float,
-        mode_a_contingency_ore1_milling_rate: float,
-        mode_b_ore1_milling_rate: float,
-        mode_b_ore2_milling_rate: float,
-        mode_b_contingency_ore2_milling_rate: float,
-        ore_to_be_extracted_during_warming_period: float,
-        fleet_shift_duration: float,
-        total_lhd_count: float,
-        total_truck_count: float,
-        max_lhds_per_face: Sequence[float],
-        max_trucks_per_face: Sequence[float],
-        face_haul_distance: Sequence[float],
-        face_accessibility_fraction: Sequence[float],
-        truck_velocity: float,
-        loader_cycle_time_hours: float,
-        truck_dump_time_hours: float,
-        traffic_delay_per_truck_hours: float,
-        fleet_mechanical_availability: float,
-        loader_payload_tonnes: float,
-        truck_payload_tonnes: float,
-        development_rate_per_extra_truck: float,
-        mode_allocations: Mapping[str, Sequence[float]],
+        fleet_shift_duration: float = 0.5,
+        total_lhd_count: float = 3.0,
+        total_truck_count: float = 10.0,
+        max_lhds_per_face: Sequence[float] = (2.0,),
+        max_trucks_per_face: Sequence[float] = (6.0,),
+        face_haul_distance: Sequence[float] = (1.5, 2.2),
+        face_accessibility_fraction: Sequence[float] = (0.93, 0.91),
+        truck_velocity: float = 15.0,
+        loader_cycle_time_hours: float = 0.0833,
+        truck_dump_time_hours: float = 0.033,
+        traffic_delay_per_truck_hours: float = 0.015,
+        fleet_mechanical_availability: float = 0.85,
+        loader_payload_tonnes: float = 15.0,
+        truck_payload_tonnes: float = 30.0,
+        development_rate_per_extra_truck: float = 50.0,
+        mode_allocations: Optional[Mapping[str, Sequence[float]]] = None,
+        mode_rates: Optional[Mapping[str, Tuple[float, float]]] = None,
     ):
         super().__init__()
         self.faces = list(faces) if isinstance(faces, (list, tuple)) else [faces]
         if not self.faces:
-            raise ValueError("BlendingController requires at least one MineFace in faces.")
-
-        self.mine = self.faces[0] if len(self.faces) == 1 else None
-        self.fleet = fleet
-        self.plant = plant
-        self.target_ore_stock_level = target_ore_stock_level
-        self.critical_ore2_level = critical_ore2_level
-        self.duration_of_production_campaigns = duration_of_production_campaigns
-        self.duration_of_shutdowns = duration_of_shutdowns
-        self.duration_of_contingency_segments = duration_of_contingency_segments
-        self.ore_to_be_extracted_during_warming_period = ore_to_be_extracted_during_warming_period
-        self.total_ore_to_extract = total_ore_to_extract
-
-        self.mode_a_ore1_milling_rate = mode_a_ore1_milling_rate
-        self.mode_a_ore2_milling_rate = mode_a_ore2_milling_rate
-        self.mode_a_contingency_ore1_milling_rate = mode_a_contingency_ore1_milling_rate
-        self.mode_b_ore1_milling_rate = mode_b_ore1_milling_rate
-        self.mode_b_ore2_milling_rate = mode_b_ore2_milling_rate
-        self.mode_b_contingency_ore2_milling_rate = mode_b_contingency_ore2_milling_rate
+            raise ValueError("FleetController requires at least one MineFace in faces.")
 
         self.fleet_shift_duration = fleet_shift_duration
         self.total_lhd_count = total_lhd_count
@@ -119,53 +153,13 @@ class BlendingController(drs.Module):
         self.truck_payload_tonnes = truck_payload_tonnes
         self.development_rate_per_extra_truck = development_rate_per_extra_truck
 
-        self.active_operating_mode = drs.Variable(
-            "active_operating_mode", MODES["MODE_A"]
-        )
-        self.total_system_ore_mass = drs.Level(
-            "total_system_ore_mass", initial_value=self.target_ore_stock_level
-        )
-
-        self.current_campaign_duration = drs.Timer(
-            "current_campaign_duration", initial_value=0.0
-        )
-        self.current_contingency_duration = drs.Timer(
-            "current_contingency_duration", initial_value=0.0
-        )
-        self.cumulative_time_mode_a = drs.Timer(
-            "cumulative_time_mode_a", initial_value=0.0
-        )
-        self.cumulative_time_mode_a_contingency = drs.Timer(
-            "cumulative_time_mode_a_contingency", initial_value=0.0
-        )
-        self.cumulative_time_mode_a_surging = drs.Timer(
-            "cumulative_time_mode_a_surging", initial_value=0.0
-        )
-        self.cumulative_time_mode_b = drs.Timer(
-            "cumulative_time_mode_b", initial_value=0.0
-        )
-        self.cumulative_time_mode_b_contingency = drs.Timer(
-            "cumulative_time_mode_b_contingency", initial_value=0.0
-        )
-        self.cumulative_time_mode_b_surging = drs.Timer(
-            "cumulative_time_mode_b_surging", initial_value=0.0
-        )
-        self.cumulative_time_shutdown = drs.Timer(
-            "cumulative_time_shutdown", initial_value=0.0
-        )
-
-        self.target_mine_mass_rate = drs.Variable("target_mine_mass_rate", 0.0)
-        self.target_stock1_outflow_rate = drs.Variable(
-            "target_stock1_outflow_rate", 0.0
-        )
-        self.target_stock2_outflow_rate = drs.Variable(
-            "target_stock2_outflow_rate", 0.0
-        )
-
+        self.fleet_shift_timer = drs.Timer("fleet_shift_timer", initial_value=0.0)
+        self.fleet_shift_count = drs.Variable("fleet_shift_count", 0)
         self.total_extra_trucks = drs.Variable("total_extra_trucks", 0.0)
         self.cumulative_mine_development = drs.Level(
             "cumulative_mine_development", initial_value=0.0
         )
+
         self.face_target_extraction_rates = []
         self.face_real_extraction_rates = []
         self.face_achieved_extraction_rates = []
@@ -215,11 +209,13 @@ class BlendingController(drs.Module):
             self.face_match_factors.append(match_factor)
             self.face_truck_cycle_times.append(truck_cycle)
 
-        self._mode_allocations = dict(mode_allocations) if mode_allocations else self._precompute_allocations()
+        self._mode_allocations = (
+            dict(mode_allocations)
+            if mode_allocations
+            else self._precompute_allocations(mode_rates)
+        )
         self.current_shift_allocations = None
         self.current_shift_mode_name = None
-        self.fleet_shift_timer = drs.Timer("fleet_shift_timer", initial_value=0.0)
-        self.fleet_shift_count = drs.Variable("fleet_shift_count", 0)
 
     @staticmethod
     def _normalize_param_list(param, count: int, default_val: float) -> List[float]:
@@ -232,244 +228,22 @@ class BlendingController(drs.Module):
             return lst + [lst[-1]] * (count - len(lst))
         return [default_val] * count
 
-    @property
-    def total_duration(self) -> float:
-        """Returns total accumulated duration across all modes and shutdown."""
-        return (
-            self.cumulative_time_mode_a.value
-            + self.cumulative_time_mode_a_contingency.value
-            + self.cumulative_time_mode_a_surging.value
-            + self.cumulative_time_mode_b.value
-            + self.cumulative_time_mode_b_contingency.value
-            + self.cumulative_time_mode_b_surging.value
-            + self.cumulative_time_shutdown.value
-        )
-
-    def active_duration(self, current_time: float = -1.0) -> float:
-        """Encapsulate state calculations for active operational duration."""
-        if current_time < 0.0:
-            current_time = self.total_duration
-        return max(0.0, current_time - self.cumulative_time_shutdown.value)
-
-    def update_mode(self, ore1_stock, ore2_stock) -> str:
-        """High-level mode bookkeeping for one engine step."""
-        self._reset_mode_timers_if_fresh()
-        self.total_system_ore_mass.value = (
-            ore1_stock.current_mass.value + ore2_stock.current_mass.value
-        )
-
-        next_mode = self._next_mode(ore1_stock, ore2_stock)
-        if next_mode is not None:
-            self.active_operating_mode.value = next_mode
-
-        name = self.active_operating_mode.value.name
-        self._update_mode_timers(name)
-
-        self.total_system_ore_mass.rate = (
-            ore1_stock.current_mass.rate + ore2_stock.current_mass.rate
-        )
-        return name
-
-    def get_target_rates(self, mode, fleet=None):
-        """Compute the target extraction and stockpile outflow rates for a mode."""
-        name = mode.name if hasattr(mode, "name") else str(mode)
-        ore1, ore2 = self._read_rates(name)
-        eff_fleet = fleet or self.fleet
-
-        if "_MINE_SURGING" in name:
-            self.total_system_ore_mass.lower_threshold = self.target_ore_stock_level
-            p = eff_fleet.stockpile2_routing_fraction.value if eff_fleet else 0.0
-            if p <= 1e-4 and len(self.faces) > 0:
-                p = self.faces[0]._get_current_attr_value()
-            if name == "MODE_A_MINE_SURGING":
-                effective_fraction = max(1.0 - p, 0.01)
-                extraction = ore1 / effective_fraction
-            else:
-                effective_fraction = max(p, 0.01)
-                extraction = ore2 / effective_fraction
-        else:
-            extraction = ore1 + ore2
-
-        self.target_mine_mass_rate.value = extraction
-        self.target_stock1_outflow_rate.value = ore1
-        self.target_stock2_outflow_rate.value = ore2
-        return extraction, ore1, ore2
-
-    def _read_rates(self, name: str) -> tuple:
-        """Read the per-mode milling-rate pair (ore1, ore2) for ``name``."""
-        ore1_attr, ore2_attr = self._RATE_MAP.get(name, (None, None))
-        ore1 = getattr(self, ore1_attr, 0.0) if ore1_attr else 0.0
-        ore2 = getattr(self, ore2_attr, 0.0) if ore2_attr else 0.0
-        return ore1, ore2
-
-    def _reset_mode_timers_if_fresh(self):
-        if self.faces and abs(sum(s.net_extracted_mass for s in self.faces)) < 1e-6:
-            for timer_name in self._MODE_TIMER_ATTRS.values():
-                getattr(self, timer_name).reset()
-
-    def _next_mode(self, ore1_stock, ore2_stock):
-        name = self.active_operating_mode.value.name
-        eps = 1e-9
-        target_stock = self.target_ore_stock_level
-
-        if self._campaign_complete():
-            if name == "SHUTDOWN":
-                rl_action = getattr(self, "pending_rl_action", None)
-                if rl_action is not None:
-                    self.current_campaign_duration.reset()
-                    self.pending_rl_action = None
-                    return self._RL_ACTION_MODES[rl_action]
-                if hasattr(self, "pending_rl_action"):
-                    raise RequireDecision()
-            self.current_campaign_duration.reset()
-            return (
-                self._choose_next_campaign_mode(ore2_stock)
-                if name == "SHUTDOWN"
-                else MODES["SHUTDOWN"]
-            )
-
-        if name == "SHUTDOWN":
-            return None
-
-        ore1 = ore1_stock.current_mass.value
-        ore2 = ore2_stock.current_mass.value
-
-        if "_CONTINGENCY" in name:
-            if self._contingency_complete():
-                self.current_contingency_duration.reset()
-                return MODES[name.replace("_CONTINGENCY", "")]
-            base = name.replace("_CONTINGENCY", "")
-            if base == "MODE_A" and ore1 <= eps:
-                return MODES[base + "_MINE_SURGING"]
-            if base == "MODE_B" and ore2 <= eps:
-                return MODES[base + "_MINE_SURGING"]
-            return None
-
-        if "_MINE_SURGING" in name:
-            if self.total_system_ore_mass.value <= target_stock + 1e-6:
-                return MODES[name.replace("_MINE_SURGING", "")]
-            return None
-
-        if name == "MODE_A":
-            if ore1 <= eps:
-                return MODES[name + "_MINE_SURGING"]
-            if ore2 <= eps:
-                self.current_contingency_duration.reset()
-                return MODES[name + "_CONTINGENCY"]
-            return None
-
-        if name == "MODE_B":
-            if ore1 <= eps:
-                self.current_contingency_duration.reset()
-                return MODES[name + "_CONTINGENCY"]
-            if ore2 <= eps:
-                return MODES[name + "_MINE_SURGING"]
-            return None
-
-        return None
-
-    def _campaign_complete(self) -> bool:
-        threshold = (
-            self.duration_of_shutdowns
-            if self.active_operating_mode.value.name == "SHUTDOWN"
-            else self.duration_of_production_campaigns
-        )
-        self.current_campaign_duration.upper_threshold = threshold
-        return self.current_campaign_duration.value >= (threshold - 1e-6)
-
-    def _contingency_complete(self) -> bool:
-        threshold = self.duration_of_contingency_segments
-        self.current_contingency_duration.upper_threshold = threshold
-        return self.current_contingency_duration.value >= (threshold - 1e-6)
-
-    def _choose_next_campaign_mode(self, ore2_stock):
-        ore2 = ore2_stock.current_mass.value
-        total_stock = self.total_system_ore_mass.value
-        EPS = 1e-6
-        if ore2 > self.critical_ore2_level:
-            return (
-                MODES["MODE_A"]
-                if total_stock <= self.target_ore_stock_level + EPS
-                else MODES["MODE_A_MINE_SURGING"]
-            )
-        return (
-            MODES["MODE_B"]
-            if total_stock <= self.target_ore_stock_level + EPS
-            else MODES["MODE_B_MINE_SURGING"]
-        )
-
-    def _update_mode_timers(self, name):
-        for timer_name in self._MODE_TIMER_ATTRS.values():
-            getattr(self, timer_name).rate = 0.0
-        timer_attr = self._MODE_TIMER_ATTRS.get(name)
-        if timer_attr:
-            getattr(self, timer_attr).rate = 1.0
-        self.current_campaign_duration.rate = 1.0
-        self.current_campaign_duration.upper_threshold = (
-            self.duration_of_shutdowns
-            if name == "SHUTDOWN"
-            else self.duration_of_production_campaigns
-        )
-        if name in self._CONTINGENCY_MODES:
-            self.current_contingency_duration.rate = 1.0
-            self.current_contingency_duration.upper_threshold = (
-                self.duration_of_contingency_segments
-            )
-        else:
-            self.current_contingency_duration.rate = 0.0
-
-    def is_terminating_condition_met(self) -> bool:
-        """True once the combined extraction of every mine source reaches the target."""
-        return (
-            sum(s.cumulative_extracted_mass.value for s in self.faces)
-            >= self.total_ore_to_extract
-        )
-
-    @property
-    def state_components(self) -> list:
-        """Stateful leaf components owned by this controller (mine faces and controller module)."""
-        comps = list(self.faces)
-        comps.append(self)
-        return comps
-
-    def time_to_event(self) -> float:
-        min_dt = math.inf
-        for level in self._owned_levels():
-            dt = level.time_to_event()
-            if 0.0 <= dt < min_dt:
-                min_dt = dt
-        return min_dt
-
-    def step(self, dt: float) -> None:
-        for level in self._owned_levels():
-            level.step(dt)
-
-    def _precompute_allocations(self):
-        """Pre-compute face extraction fractions per mode using face mean ore fractions."""
+    def _precompute_allocations(
+        self, mode_rates: Optional[Mapping[str, Tuple[float, float]]] = None
+    ) -> Dict[str, List[float]]:
         num_faces = len(self.faces)
         if num_faces == 0:
             return {}
 
         face_ore1_fracs = [1.0 - f.mean_ore_fraction for f in self.faces]
 
-        modes_to_compute = {
-            "MODE_A": (
-                self.mode_a_ore1_milling_rate,
-                self.mode_a_ore2_milling_rate,
-            ),
-            "MODE_A_CONTINGENCY": (
-                self.mode_a_contingency_ore1_milling_rate,
-                0.0,
-            ),
-            "MODE_B": (
-                self.mode_b_ore1_milling_rate,
-                self.mode_b_ore2_milling_rate,
-            ),
-            "MODE_B_CONTINGENCY": (
-                0.0,
-                self.mode_b_contingency_ore2_milling_rate,
-            ),
+        default_rates = {
+            "MODE_A": (540.0 * 24.0, 60.0 * 24.0),
+            "MODE_A_CONTINGENCY": (500.0 * 24.0, 0.0),
+            "MODE_B": (300.0 * 24.0, 300.0 * 24.0),
+            "MODE_B_CONTINGENCY": (0.0, 450.0 * 24.0),
         }
+        modes_to_compute = dict(mode_rates) if mode_rates else default_rates
         result = {}
 
         if num_faces == 1:
@@ -560,7 +334,6 @@ class BlendingController(drs.Module):
             return
         for i, factor in enumerate(self.face_shift_allocation_fractions):
             factor.value = self.current_shift_allocations[i]
-
         self._distribute_discrete_fleet(self.current_shift_allocations)
 
     def _distribute_discrete_fleet(self, fracs: list):
@@ -614,7 +387,9 @@ class BlendingController(drs.Module):
         for i in range(num_faces):
             self.face_truck_allocations[i].value = float(truck_assignments[i])
 
-    def _face_real_extraction_rate(self, face_index: int, target_extraction_rate: float) -> float:
+    def _face_real_extraction_rate(
+        self, face_index: int, target_extraction_rate: float
+    ) -> float:
         lhd_alloc = self.face_lhd_allocations[face_index].value
         truck_alloc = self.face_truck_allocations[face_index].value
 
@@ -623,10 +398,13 @@ class BlendingController(drs.Module):
         mechanical_availability = self.fleet_mechanical_availability
 
         traffic_delay = self.traffic_delay_per_truck_hours * truck_alloc
-        travel_time = (2 * distance) / self.truck_velocity if self.truck_velocity > 0 else 0.0
+        travel_time = (
+            (2 * distance) / self.truck_velocity if self.truck_velocity > 0 else 0.0
+        )
 
         truck_loading_time_hours = (
-            self.loader_cycle_time_hours * (self.truck_payload_tonnes / self.loader_payload_tonnes)
+            self.loader_cycle_time_hours
+            * (self.truck_payload_tonnes / self.loader_payload_tonnes)
             if self.loader_payload_tonnes > 0
             else 0.0
         )
@@ -662,7 +440,9 @@ class BlendingController(drs.Module):
                 else 0.0
             )
 
-        final_real_extraction_rate = max_rate * accessibility * mechanical_availability
+        final_real_extraction_rate = (
+            max_rate * accessibility * mechanical_availability
+        )
 
         if (
             final_real_extraction_rate > target_extraction_rate
@@ -676,15 +456,7 @@ class BlendingController(drs.Module):
         self.total_extra_trucks.value += unused_trucks
         return max(0.0, final_real_extraction_rate)
 
-    def _reallocate_fleet_for_shift(self):
-        mode_name = self.active_operating_mode.value.name
-        self.current_shift_allocations = self._get_allocations_for_mode(mode_name)
-        self.current_shift_mode_name = mode_name
-        self._refresh_shift_allocation_fractions()
-        self.fleet_shift_count.value += 1
-
-    def schedule_fleet_shifts(self, mode_name: str):
-        """Drive the fleet-shift timer and reallocate the fleet when due."""
+    def _schedule_shifts(self, mode_name: str):
         self.fleet_shift_timer.rate = 1.0
         self.fleet_shift_timer.upper_threshold = self.fleet_shift_duration
 
@@ -692,27 +464,45 @@ class BlendingController(drs.Module):
         mode_changed = mode_name != self.current_shift_mode_name
         if self.current_shift_allocations is None or shift_due or mode_changed:
             self.fleet_shift_timer.reset()
-            self._reallocate_fleet_for_shift()
+            self.current_shift_allocations = self._get_allocations_for_mode(mode_name)
+            self.current_shift_mode_name = mode_name
+            self._refresh_shift_allocation_fractions()
+            self.fleet_shift_count.value += 1
 
-    def drive_faces(self, mine_target: float):
-        """Split ``mine_target`` across the faces and drive each face's rate."""
+    def allocate(
+        self, mine_target: float, mode: Union[OperatingMode, str]
+    ) -> List[float]:
+        """Schedules shifts, splits ``mine_target`` across faces, enforces fleet haulage limits,
+        and returns the achievable extraction rates for each face.
+        """
+        mode_name = mode.name if hasattr(mode, "name") else str(mode)
+        self._schedule_shifts(mode_name)
+
         self.total_extra_trucks.value = 0.0
         fracs = self.current_shift_allocations
+        achieved_rates = []
+
         for i, face in enumerate(self.faces):
             if fracs is not None and i < len(fracs):
                 target = mine_target * fracs[i]
                 real = self._face_real_extraction_rate(i, target)
+                achieved = min(target, real)
                 self.face_target_extraction_rates[i].value = target
                 self.face_real_extraction_rates[i].value = real
-                self.face_achieved_extraction_rates[i].value = min(target, real)
-                face.target_rate = self.face_achieved_extraction_rates[i].value
+                self.face_achieved_extraction_rates[i].value = achieved
+                achieved_rates.append(achieved)
             else:
                 self.face_target_extraction_rates[i].value = 0.0
                 self.face_real_extraction_rates[i].value = 0.0
                 self.face_achieved_extraction_rates[i].value = 0.0
                 self.face_operational_downtime_fractions[i].value = 0.0
-                face.target_rate = 0.0
+                achieved_rates.append(0.0)
 
         self.cumulative_mine_development.rate = (
             self.total_extra_trucks.value * self.development_rate_per_extra_truck
         )
+        return achieved_rates
+
+    def is_terminating_condition_met(self) -> bool:
+        return False
+
