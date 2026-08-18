@@ -1,10 +1,7 @@
 from drs_mining.components import (
-    ConcentratorMineFace,
     ContinuousMineFace,
-    ConcentratorController,
     MultiFaceConcentratorController,
     load_topology_dict,
-    build_simulation_from_dict,
     build_concentrator_simulation,
     build_multi_face_simulation,
 )
@@ -49,18 +46,6 @@ def test_topology_dict_loading():
 
     tree_dict = load_topology_dict(tree_path)
     assert isinstance(tree_dict, dict)
-
-    mine, fleet, plant, controller, ore1_stock, ore2_stock = build_simulation_from_dict(
-        flat_dict
-    )
-    assert isinstance(mine, ConcentratorMineFace)
-    assert isinstance(controller, ConcentratorController)
-
-    mine, fleet, plant, controller, ore1_stock, ore2_stock = build_simulation_from_dict(
-        tree_dict
-    )
-    assert isinstance(mine, ConcentratorMineFace)
-    assert isinstance(controller, ConcentratorController)
 
     hybrid_sim = ShelswellHybridSimulation(topology_dict=flat_dict)
     assert hybrid_sim.num_trucks == 10

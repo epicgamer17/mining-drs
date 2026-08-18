@@ -2,7 +2,7 @@ from drs import Storage, Processor
 from .modes import MODES, OperatingMode, RequireDecision
 from .generators import StochasticFaciesGenerator
 from .fleet import ContinuousFleetLogistics, TruckState, Truck, LHD
-from .topology import DRSRoadSegment, load_topology_dict, build_simulation_from_dict
+from .topology import DRSRoadSegment, load_topology_dict
 from .bays import DRSLoadingBay, DRSDumpingBay
 from .mine_face import BaseMineFace, ConcentratorMineFace, ContinuousMineFace
 from .plant import BaseMetallurgicalPlant, ConcentratorPlant
@@ -36,7 +36,6 @@ __all__ = [
     "DRSLoadingBay",
     "DRSDumpingBay",
     "load_topology_dict",
-    "build_simulation_from_dict",
     "build_concentrator_simulation",
     "build_multi_face_simulation",
 ]

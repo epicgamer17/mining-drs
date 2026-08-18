@@ -20,7 +20,6 @@ from drs_mining.components import (
     DRSLoadingBay,
     DRSDumpingBay,
     load_topology_dict,
-    build_simulation_from_dict,
     build_concentrator_simulation,
     build_multi_face_simulation,
 )
@@ -45,7 +44,6 @@ __all__ = [
     "DRSLoadingBay",
     "DRSDumpingBay",
     "load_topology_dict",
-    "build_simulation_from_dict",
     "build_concentrator_simulation",
     "build_multi_face_simulation",
     "ShelswellDispatchController",

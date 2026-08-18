@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Union, List
+from typing import Optional, Union
 import json
 import drs
 from .fleet import Truck
@@ -70,40 +70,3 @@ def load_topology_dict(topology: Union[dict, list, str, bytes]) -> Union[dict, l
             with open(topology, "r", encoding="utf-8") as f:
                 return json.load(f)
     raise TypeError(f"Unsupported topology input type: {type(topology)}")
-
-
-# TODO: should this be in python-drs?
-def build_simulation_from_dict(
-    topology: Union[dict, list, str],
-    enable_telemetry: bool = False,
-    **kwargs,
-):
-    """Builds a simulation from a native Python topology dictionary/list
-    or JSON filepath without intermediate Config objects.
-
-    Returns:
-        tuple: ``(mine, fleet, plant, controller, ore1_stock, ore2_stock)``,
-        or ``([face1, face2], fleet, plant, controller, ore1_stock, ore2_stock)``
-        for multi-face topologies.
-    """
-    from .factories import build_concentrator_simulation, build_multi_face_simulation
-
-    data = load_topology_dict(topology)
-
-    # Extract model attributes or override with direct kwargs
-    if isinstance(data, list):
-        model_node = next(
-            (node for node in data if node.get("class") == "DRSModel"), {}
-        )
-        attrs = model_node.get("attributes", {})
-    elif isinstance(data, dict):
-        attrs = data.get("attributes", {})
-    else:
-        attrs = {}
-
-    params = {**attrs, **kwargs}
-    is_multi_face = params.pop("multi_face", False)
-    if is_multi_face:
-        return build_multi_face_simulation(**params)
-    else:
-        return build_concentrator_simulation(**params)
