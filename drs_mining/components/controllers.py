@@ -177,9 +177,6 @@ class BaseBlendingController(drs.Module):
         )
         return name
 
-    # Backwards-compatible alias for the pre-Step-3 name.
-    step_mode = update_mode
-
     def get_target_rates(self, mode, fleet=None):
         """Compute the target extraction and stockpile outflow rates for a mode.
 

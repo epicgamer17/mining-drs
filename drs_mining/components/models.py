@@ -16,12 +16,6 @@ from .generators import (
 )
 
 
-def _equipment_schedules(total_units, downtime_start, downtime_duration, schedules):
-    if schedules is not None:
-        return schedules
-    return [(downtime_start, downtime_duration) for _ in range(int(total_units))]
-
-
 class BaseBlendingModel(drs.Module):
     def __init__(
         self,
@@ -120,47 +114,6 @@ class BaseBlendingModel(drs.Module):
             self.mine.cumulative_extracted_mass.value
             >= self.total_ore_to_extract
         )
-
-    def print_statistics(self):
-        print("\n--- Output Statistics ---")
-        total_time = self.controller.total_duration
-
-        if total_time > 0:
-            print(
-                f"PortionOfTimeInModeA: {self.controller.cumulative_time_mode_a.value / total_time:.4f}"
-            )
-            print(
-                f"PortionOfTimeInModeAContingency: {self.controller.cumulative_time_mode_a_contingency.value / total_time:.4f}"
-            )
-            print(
-                f"PortionOfTimeInModeAMineSurging: {self.controller.cumulative_time_mode_a_surging.value / total_time:.4f}"
-            )
-            print(
-                f"PortionOfTimeInModeB: {self.controller.cumulative_time_mode_b.value / total_time:.4f}"
-            )
-            print(
-                f"PortionOfTimeInModeBContingency: {self.controller.cumulative_time_mode_b_contingency.value / total_time:.4f}"
-            )
-            print(
-                f"PortionOfTimeInModeBMineSurging: {self.controller.cumulative_time_mode_b_surging.value / total_time:.4f}"
-            )
-            print(
-                f"PortionOfTimeInShutdown: {self.controller.cumulative_time_shutdown.value / total_time:.4f}"
-            )
-        else:
-            print("Total time is 0. Cannot calculate mode portions.")
-
-        active_time = self.controller.active_duration(total_time)
-        if active_time > 0:
-            if hasattr(self.plant, "cumulative_milled_mass"):
-                total_ore_processed = self.plant.cumulative_milled_mass.value
-            else:
-                total_ore_processed = self.mine.net_extracted_mass
-
-            throughput = total_ore_processed / active_time
-            print(f"Throughput: {throughput:.4f} tons/day")
-        else:
-            print("Active time is 0. Cannot calculate throughput.")
 
 
 class ConcentratorModel(BaseBlendingModel):

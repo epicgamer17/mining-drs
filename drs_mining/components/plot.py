@@ -1,6 +1,5 @@
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
-import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -161,101 +160,6 @@ def plot_ore_with_modes(
     ax.set_ylabel("Ore Stockpile", fontsize=12)
     ax.set_xlabel("Simulation Time", fontsize=12)
     ax.set_title(title, fontsize=14, pad=15)
-
-    return ax
-
-
-def plot_state_space(
-    df,
-    col_x="Ore1Stock_mass",
-    col_y="Ore2Stock_mass",
-    title="State Space Trajectory",
-    ax=None,
-):
-    ax = _get_ax(ax, figsize=(8, 8))
-
-    if col_x not in df.columns or col_y not in df.columns:
-        return ax
-
-    ax.plot(df[col_x], df[col_y], color="gray", alpha=0.5, linewidth=1, zorder=1)
-
-    time_col = "time" if "time" in df.columns else df.columns[0]
-    scatter = ax.scatter(
-        df[col_x], df[col_y], c=df[time_col], cmap="viridis", s=10, zorder=2
-    )
-
-    ax.figure.colorbar(scatter, ax=ax, label="Simulation Time")
-
-    ax.plot(
-        df[col_x].iloc[0],
-        df[col_y].iloc[0],
-        "go",
-        markersize=10,
-        label="Start",
-        zorder=3,
-    )
-    ax.plot(
-        df[col_x].iloc[-1],
-        df[col_y].iloc[-1],
-        "ro",
-        markersize=10,
-        label="End",
-        zorder=3,
-    )
-
-    ax.set_xlabel(col_x, fontsize=12)
-    ax.set_ylabel(col_y, fontsize=12)
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.axhline(0, color="red", linestyle="--", alpha=0.5)
-    ax.axvline(0, color="red", linestyle="--", alpha=0.5)
-    ax.legend(loc="upper left")
-    ax.grid(True)
-
-    return ax
-
-
-def plot_cumulative_throughput(
-    df,
-    extraction_col="cumulative_extracted_mass",
-    time_col="time",
-    ideal_rate=None,
-    title="Cumulative Throughput vs Target",
-    ax=None,
-):
-    ax = _get_ax(ax, figsize=(10, 6))
-
-    if extraction_col not in df.columns or time_col not in df.columns:
-        return ax
-
-    ax.plot(
-        df[time_col],
-        df[extraction_col],
-        label="Actual Extraction",
-        color="green",
-        linewidth=2,
-    )
-
-    if ideal_rate is not None:
-        min_time = df[time_col].min()
-        max_time = df[time_col].max()
-        ideal_times = [min_time, max_time]
-
-        start_val = df[extraction_col].min()
-        ideal_vals = [start_val, start_val + ideal_rate * (max_time - min_time)]
-
-        ax.plot(
-            ideal_times,
-            ideal_vals,
-            "k--",
-            label=f"Ideal Rate ({ideal_rate}/t)",
-            alpha=0.7,
-            linewidth=2,
-        )
-
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.set_ylabel("Cumulative Ore Extracted", fontsize=12)
-    ax.legend(loc="upper left")
-    ax.grid(True)
 
     return ax
 

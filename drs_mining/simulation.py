@@ -33,7 +33,6 @@ class ShelswellHybridSimulation:
         num_trucks: int = 10,
         num_operators: int = 10,
         mechanical_availability: float = 1.0,
-        step_size_sec: float = 1.0,
         topology_dict: Optional[Union[dict, list]] = None,
     ):
         if topology_dict is not None:
