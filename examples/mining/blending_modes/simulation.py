@@ -10,9 +10,7 @@ sys.path.append(
 
 import random
 import numpy as np
-import seaborn as sns
 import matplotlib.pyplot as plt
-import types
 
 from drs import DRSEngine, Telemetry
 from drs_mining.components import (
@@ -24,6 +22,12 @@ from drs_mining.components import (
     Stockpile,
 )
 from drs_mining.components.modes import MODES
+from drs_mining.components.plot import (
+    plot_single_face_dashboard,
+    prepare_history,
+    print_deficit_by_mode,
+    print_state_change_transitions,
+)
 
 
 # ============================================================
@@ -322,267 +326,16 @@ if __name__ == "__main__":
 
     print_statistics(controller, network.plant, mine)
 
-    df = result.history
+    df = prepare_history(result.history)
+    print_state_change_transitions(result.events)
 
-    # --- Mode Transition Log ---
-    state_change_events = [
-        e
-        for e in result.events
-        if e.event_type == "STATE_CHANGE"
-        and e.details.get("variable") == "active_operating_mode"
-    ]
-    if state_change_events:
-        print("\n--- Mode Transition Log ---")
-        for e in state_change_events:
-            old = (
-                e.details["old_value"].name
-                if hasattr(e.details["old_value"], "name")
-                else str(e.details["old_value"])
-            )
-            new = (
-                e.details["new_value"].name
-                if hasattr(e.details["new_value"], "name")
-                else str(e.details["new_value"])
-            )
-            print(f"Time: {e.time:.2f} | Transition: {old} -> {new}")
-        print("---------------------------\n")
-
-    # --- Cumulative Deficit by Mode Log ---
-    import pandas as pd
-
-    dt = df["time"].diff().fillna(0)
-    actual_extraction_step = df["cumulative_extracted_mass"].diff().fillna(0)
-    ideal_extraction_step = dt * 6000.0
-    step_deficit = (ideal_extraction_step - actual_extraction_step).clip(lower=0)
-
-    # We still need the active_operating_mode_name column for downstream plotting and analysis
-    df["active_operating_mode_name"] = df["active_operating_mode"].apply(
-        lambda x: x.name if x else "None"
-    )
-
-    deficit_df = pd.DataFrame(
-        {"mode": df["active_operating_mode_name"], "deficit": step_deficit}
-    )
-
-    total_deficit_by_mode = (
-        deficit_df.groupby("mode")["deficit"].sum().sort_values(ascending=False)
-    )
-
-    print("\n--- Cumulative Lost Production (Deficit) by Mode ---")
-    total_lost = total_deficit_by_mode.sum()
-    for mode, lost in total_deficit_by_mode.items():
-        mode_name = str(mode).split(".")[-1]
-        pct = (lost / total_lost * 100) if total_lost > 0 else 0
-        print(f"{mode_name}: {lost:.1f} tons ({pct:.1f}%)")
-    print(f"TOTAL: {total_lost:.1f} tons")
-    print("----------------------------------------------------\n")
-
-    # Create Modes Series
-    df["Mode A"] = df["active_operating_mode_name"].apply(
-        lambda m: (
-            3
-            if m
-            in (
-                "MODE_A",
-                "MODE_A_CONTINGENCY",
-                "MODE_A_MINE_SURGING",
-            )
-            else 0
-        )
-    )
-    df["Mode B"] = df["active_operating_mode_name"].apply(
-        lambda m: (
-            2
-            if m
-            in (
-                "MODE_B",
-                "MODE_B_CONTINGENCY",
-                "MODE_B_MINE_SURGING",
-            )
-            else 0
-        )
-    )
-    df["Shutdown"] = df["active_operating_mode_name"].apply(
-        lambda m: 1 if m == "SHUTDOWN" else 0
-    )
-
-    # Create Ore Level Series (scaled by 1000)
-    df["Total Ore Stockpile Level"] = df["total_system_ore_mass"] / 1000.0
-    df["Ore 1 Stockpile Level"] = df["Ore1Stock_mass"] / 1000.0
-    df["Ore 2 Stockpile Level"] = df["Ore2Stock_mass"] / 1000.0
-
-    from drs.plot import (
-        plot_time_series,
-        plot_dual_axis_step,
-        plot_safety_margin,
-        Dashboard,
-    )
-    from drs_mining.components.plot import (
-        plot_ore_with_modes,
-        plot_mode_distribution,
-        plot_mode_dwell_times,
-        plot_normalized_deviation_violin,
-        plot_attributed_deficit,
-        plot_deficit_disparity,
-        plot_deficit_breakdown_bar,
-        plot_structural_vs_operational_deficit,
-        plot_normalized_cumulative_deficit,
-        plot_structural_vs_operational_by_mode,
-    )
-
-    palette = {
-        "MODE_A": "#1f77b4",
-        "MODE_A_CONTINGENCY": "#2ca02c",
-        "MODE_A_MINE_SURGING": "#9467bd",
-        "MODE_B": "#d62728",
-        "MODE_B_CONTINGENCY": "#ff7f0e",
-        "MODE_B_MINE_SURGING": "#8c564b",
-        "SHUTDOWN": "#FFD700",
-    }
-
-    structural_modes = ["SHUTDOWN", "MODE_A"]
-
-    dash = Dashboard(
-        nrows=14, ncols=1, figsize=(18, 69), sharex=False, title="Comprehensive Mine Diagnostics"
-    )
-    dash.link_xaxes([0, 1, 2, 3, 4, 8, 11, 12])
-
-    plot_time_series(
+    print_deficit_by_mode(
         df,
-        y_columns=["Mode A", "Mode B", "Shutdown"],
-        title="Modes (Step)",
-        is_step=True,
-        ax=dash[0],
-    )
-    plot_ore_with_modes(
-        df,
-        time_col="time",
-        ore_cols=[
-            "total_system_ore_mass",
-            "Ore1Stock_mass",
-            "Ore2Stock_mass",
-        ],
-        mode_col="active_operating_mode_name",
-        campaign_split_mode="SHUTDOWN",
-        title="Ore Stockpiles & Campaigns",
-        palette=palette,
-        hlines=[
-            {
-                "y": 60000,
-                "color": "black",
-                "linestyle": "--",
-                "linewidth": 1.5,
-                "alpha": 0.7,
-                "label": "Target Total (60k)",
-            },
-            {
-                "y": 20400,
-                "color": "red",
-                "linestyle": ":",
-                "linewidth": 2,
-                "alpha": 0.8,
-                "label": "Critical Ore 2 (20.4k)",
-            },
-        ],
-        ax=dash[1],
-    )
-    plot_dual_axis_step(
-        df,
-        y1_col="MassOfCurrentParcel",
-        y2_col="CurrentParcelRoutingFraction",
-        y1_label="Parcel Mass (tons)",
-        y2_label="Grade (% Ore 2)",
-        title="Current Parcel Properties",
-        ax=dash[2],
-    )
-    plot_safety_margin(
-        df,
-        level_col="Ore1Stock_mass",
-        constraint_value=0.0,
-        constraint_type="lower",
-        title="Safety Margin: Ore 1 Distance to Floor",
-        danger_threshold=1000.0,
-        ax=dash[3],
-    )
-    plot_safety_margin(
-        df,
-        level_col="Ore2Stock_mass",
-        constraint_value=0.0,
-        constraint_type="lower",
-        title="Safety Margin: Ore 2 Distance to Floor",
-        danger_threshold=1000.0,
-        ax=dash[4],
-    )
-    plot_mode_distribution(
-        df,
-        mode_col="active_operating_mode_name",
-        time_col="time",
-        title="Mode Distribution (% of Time Spent)",
-        palette=palette,
-        ax=dash[5],
-    )
-    plot_mode_dwell_times(
-        df,
-        time_col="time",
-        mode_col="active_operating_mode_name",
-        title="Mode Stability (Dwell Times)",
-        ax=dash[6],
-    )
-    plot_normalized_deviation_violin(
-        df,
-        title="Stockpile Deviation Variance (Violin)",
-        target_total=60000.0,
-        target_ore1=42000.0,
-        target_ore2=18000.0,
-        ax=dash[7],
-    )
-    plot_attributed_deficit(
-        df,
-        time_col="time",
-        mode_col="active_operating_mode_name",
-        extraction_col="cumulative_extracted_mass",
-        ideal_rate_per_day=6000.0,
-        title="Cumulative Production Deficit by Mode",
-        palette=palette,
-        ax=dash[8],
-    )
-    plot_deficit_disparity(
-        df,
-        mode_col="active_operating_mode_name",
-        title="Mode Efficiency (Time Spent vs. Deficit Caused)",
+        extraction_cols=["cumulative_extracted_mass"],
         ideal_rate=6000.0,
-        ax=dash[9],
-    )
-    plot_deficit_breakdown_bar(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate_per_day=6000.0,
-        palette=palette,
-        ax=dash[10],
-    )
-    plot_structural_vs_operational_deficit(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate=6000.0,
-        structural_modes=structural_modes,
-        ax=dash[11],
-    )
-    plot_normalized_cumulative_deficit(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate_per_day=6000.0,
-        palette=palette,
-        ax=dash[12],
-    )
-    plot_structural_vs_operational_by_mode(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate=6000.0,
-        structural_modes=structural_modes,
-        ax=dash[13],
     )
 
-    dash.save("plots/Comprehensive_Diagnostics_Plot.png")
+    plot_single_face_dashboard(df)
 
     # Recreate Figure 5 from paper
     plot_monte_carlo_throughput(
