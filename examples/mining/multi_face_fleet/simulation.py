@@ -23,7 +23,6 @@ import matplotlib.pyplot as plt
 
 from drs import DRSEngine, Telemetry
 from drs_mining.components import (
-    BlendingNetwork,
     ConcentratorPlant,
     ContinuousFleetLogistics,
     ContinuousMineFace,
@@ -92,12 +91,12 @@ def build_multi_face_network(
     truck_payload_tonnes: float = 30.0,
     development_rate_per_extra_truck: float = 50.0,
     enable_telemetry: bool = False,
-) -> "BlendingNetwork":
+) -> tuple:
     """Construct the two-face fleet network flat: every entity is built here.
 
-    Returns a ``BlendingNetwork`` holding ``(faces, fleet, plant, controller,
-    ore1_stock, ore2_stock)``. There is no scenario container; call
-    ``network.register(engine)`` to register every stateful leaf.
+    Returns ``(faces, fleet, plant, controller, ore1_stock, ore2_stock)``.
+    There is no scenario container; register every stateful leaf with the
+    engine in that order.
 
     Two geologically distinct mine faces (face1 low-grade ~15%, face2
     high-grade ~45%), the shared continuous truck/LHD fleet, the two initial
@@ -190,25 +189,14 @@ def build_multi_face_network(
         development_rate_per_extra_truck=development_rate_per_extra_truck,
     )
 
-    return BlendingNetwork(
-        faces=[face1, face2],
-        fleet=fleet,
-        plant=plant,
-        controller=controller,
-        ore1_stock=ore1_stock,
-        ore2_stock=ore2_stock,
-    )
+    return [face1, face2], fleet, plant, controller, ore1_stock, ore2_stock
 
 
 def _register_and_policy(engine, network):
     """Register the stateful leaves and wire the inline policy onto the engine."""
-    network.register(engine)
-
-    ctrl = network.controller
-    fleet = network.fleet
-    plant = network.plant
-    ore1_stock = network.ore1_stock
-    ore2_stock = network.ore2_stock
+    faces, fleet, plant, controller, ore1_stock, ore2_stock = network
+    engine.register(*faces, fleet, plant, controller, ore1_stock, ore2_stock)
+    ctrl = controller
 
     @engine.on_step
     def manage_blending(t: float):
@@ -241,11 +229,8 @@ def build_telemetry(engine, network):
     productivities the analysis joins into its dataframe.
     """
     telemetry = Telemetry(model=engine)
-    controller = network.controller
-    face1, face2 = network.faces
-    fleet = network.fleet
-    ore1_stock = network.ore1_stock
-    ore2_stock = network.ore2_stock
+    faces, fleet, plant, controller, ore1_stock, ore2_stock = network
+    face1, face2 = faces
 
     def _face1_alloc(t, m, s, _):
         return controller.face_target_rates[0].value / max(
@@ -356,6 +341,7 @@ def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, 
 
     for idx in range(N):
         network = build_multi_face_network(**kwargs)
+        faces, fleet, plant, controller, ore1_stock, ore2_stock = network
 
         engine = DRSEngine()
         _register_and_policy(engine, network)
@@ -365,11 +351,10 @@ def evaluate_throughput(config_kwargs: dict = None, N: int = 1) -> tuple[float, 
 
         engine.run(until=kwargs.get("replication_length", float("inf")))
 
-        active_time = network.controller.active_duration(engine.current_time)
+        active_time = controller.active_duration(engine.current_time)
         if active_time > 0:
             throughput = (
-                network.faces[0].net_extracted_mass
-                + network.faces[1].net_extracted_mass
+                faces[0].net_extracted_mass + faces[1].net_extracted_mass
             ) / active_time
             throughputs.append(throughput)
 
@@ -466,7 +451,7 @@ def _run_capacity_case(
 
     kwargs = config_kwargs or {}
     network = build_multi_face_network(**kwargs)
-    controller = network.controller
+    faces, fleet, plant, controller, ore1_stock, ore2_stock = network
     if equal_allocation:
         _apply_equal_allocation(controller)
 
@@ -808,7 +793,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     np.random.seed(42)
     random.seed(11)
     network = build_multi_face_network(**config)
-    controller = network.controller
+    faces, fleet, plant, controller, ore1_stock, ore2_stock = network
     if equal_allocation:
         _apply_equal_allocation(controller)
 
@@ -820,7 +805,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     telemetry = build_telemetry(engine, network)
     engine.attach_telemetry(telemetry)
     result = engine.run(until=config.get("replication_length", 99999.0))
-    print_statistics(controller, network.plant, network.faces)
+    print_statistics(controller, plant, faces)
 
     df = prepare_history(result.history)
     print_transition_log(

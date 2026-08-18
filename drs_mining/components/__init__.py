@@ -7,7 +7,6 @@ from .bays import DRSLoadingBay, DRSDumpingBay
 from .mine_face import BaseMineFace, ConcentratorMineFace, ContinuousMineFace
 from .plant import BaseMetallurgicalPlant, ConcentratorPlant
 from .controllers import (
-    BlendingNetwork,
     BaseBlendingController,
     ConcentratorController,
     MultiFaceConcentratorController,
@@ -23,7 +22,6 @@ __all__ = [
     "Storage",
     "Processor",
     "BaseBlendingModel",
-    "BlendingNetwork",
     "BaseBlendingController",
     "ConcentratorModel",
     "ActiveFleetConcentratorModel",

@@ -1,64 +1,10 @@
 import math
-from dataclasses import dataclass
-from typing import List, Optional
 
 import drs
 from .modes import MODES, RequireDecision
 from .mine_face import BaseMineFace, ConcentratorMineFace
 from .fleet import ContinuousFleetLogistics
 from .plant import BaseMetallurgicalPlant, ConcentratorPlant
-from .stockpiles import Stockpile
-
-
-@dataclass
-class BlendingNetwork:
-    """Lightweight container for a flat blending-network build.
-
-    Eliminates long multi-tuple unpacking: callers receive one object holding
-    the physical and control entities and register everything with a single
-    ``register`` call. The controller may be registered alongside its children
-    because ``BaseBlendingController`` steps only its own owned levels (it does
-    not recursively advance nested components).
-    """
-
-    mine: Optional[BaseMineFace] = None
-    fleet: Optional[ContinuousFleetLogistics] = None
-    plant: Optional[BaseMetallurgicalPlant] = None
-    controller: Optional["BaseBlendingController"] = None
-    ore1_stock: Optional[Stockpile] = None
-    ore2_stock: Optional[Stockpile] = None
-    faces: Optional[List[BaseMineFace]] = None
-
-    @property
-    def sources(self) -> List[BaseMineFace]:
-        """All extraction sources (faces for multi-face, else the single mine)."""
-        if self.faces:
-            return self.faces
-        return [self.mine] if self.mine is not None else []
-
-    def components(self) -> tuple:
-        """Stateful leaves to register with a DRS engine."""
-        comps = []
-        if self.mine is not None:
-            comps.append(self.mine)
-        for face in self.faces or []:
-            comps.append(face)
-        if self.fleet is not None:
-            comps.append(self.fleet)
-        if self.plant is not None:
-            comps.append(self.plant)
-        if self.controller is not None:
-            comps.append(self.controller)
-        if self.ore1_stock is not None:
-            comps.append(self.ore1_stock)
-        if self.ore2_stock is not None:
-            comps.append(self.ore2_stock)
-        return tuple(comps)
-
-    def register(self, engine) -> "BlendingNetwork":
-        """Register every stateful leaf onto ``engine``. Returns ``self``."""
-        engine.register(*self.components())
-        return self
 
 
 class BaseBlendingController(drs.Module):

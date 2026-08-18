@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 
 from drs import DRSEngine, Telemetry
 from drs_mining.components import (
-    BlendingNetwork,
     ConcentratorMineFace,
     ConcentratorPlant,
     ConcentratorController,
@@ -66,12 +65,12 @@ def build_blending_network(
     ore2_capacity: float = float("inf"),
     plant_max_rate: float = float("inf"),
     **kwargs,
-) -> "BlendingNetwork":
+) -> tuple:
     """Build the blending network flat: every entity is constructed here.
 
-    Returns a ``BlendingNetwork`` holding ``(mine, fleet, plant, controller,
-    ore1_stock, ore2_stock)``. There is no scenario container; call
-    ``network.register(engine)`` to register every stateful leaf.
+    Returns ``(mine, fleet, plant, controller, ore1_stock, ore2_stock)``.
+    There is no scenario container; register every stateful leaf with the
+    engine in that order.
     """
     mine = ConcentratorMineFace(
         mean_ore_fraction=mean_ore_fraction,
@@ -124,26 +123,14 @@ def build_blending_network(
         total_ore_to_extract=total_ore_to_extract,
     )
 
-    return BlendingNetwork(
-        mine=mine,
-        fleet=fleet,
-        plant=plant,
-        controller=controller,
-        ore1_stock=ore1_stock,
-        ore2_stock=ore2_stock,
-    )
+    return mine, fleet, plant, controller, ore1_stock, ore2_stock
 
 
 def _register_and_policy(engine, network):
     """Register the stateful leaves and wire the inline policy onto the engine."""
-    network.register(engine)
-
-    mine = network.mine
-    fleet = network.fleet
-    ctrl = network.controller
-    plant = network.plant
-    ore1_stock = network.ore1_stock
-    ore2_stock = network.ore2_stock
+    mine, fleet, plant, controller, ore1_stock, ore2_stock = network
+    engine.register(mine, fleet, plant, controller, ore1_stock, ore2_stock)
+    ctrl = controller
 
     @engine.on_step
     def manage_blending(t: float):
@@ -209,14 +196,15 @@ def evaluate_throughput(config_kwargs: dict, N: int) -> tuple[float, float]:
         random.seed(idx)
 
         network = build_blending_network(**config_kwargs)
+        mine, fleet, plant, controller, ore1_stock, ore2_stock = network
 
         engine = DRSEngine()
         _register_and_policy(engine, network)
         engine.run(until=config_kwargs.get("replication_length", float("inf")))
 
-        active_time = network.controller.active_duration(engine.current_time)
+        active_time = controller.active_duration(engine.current_time)
         if active_time > 0:
-            throughput = network.mine.net_extracted_mass / active_time
+            throughput = mine.net_extracted_mass / active_time
             throughputs.append(throughput)
 
     if not throughputs:
@@ -293,9 +281,7 @@ if __name__ == "__main__":
         std_dev_ore_fraction=args.std_dev_ore_fraction,
         prob_new_facies=0.3,
     )
-    mine = network.mine
-    fleet = network.fleet
-    controller = network.controller
+    mine, fleet, plant, controller, ore1_stock, ore2_stock = network
 
     controller.active_operating_mode.value = MODES["MODE_A"]
 
@@ -324,7 +310,7 @@ if __name__ == "__main__":
 
     print(result.summary())
 
-    print_statistics(controller, network.plant, mine)
+    print_statistics(controller, plant, mine)
 
     df = prepare_history(result.history)
     print_state_change_transitions(result.events)
