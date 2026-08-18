@@ -5,7 +5,6 @@ from drs_mining.components import (
     build_concentrator_simulation,
     build_multi_face_simulation,
 )
-from drs_mining.simulation import ShelswellHybridSimulation
 from drs_mining.rl.environments import MiningRLEnv
 import gymnasium as gym
 import os
@@ -46,9 +45,6 @@ def test_topology_dict_loading():
 
     tree_dict = load_topology_dict(tree_path)
     assert isinstance(tree_dict, dict)
-
-    hybrid_sim = ShelswellHybridSimulation(topology_dict=flat_dict)
-    assert hybrid_sim.num_trucks == 10
 
 
 def test_gym_make_environment():

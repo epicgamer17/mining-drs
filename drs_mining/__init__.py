@@ -24,7 +24,6 @@ from drs_mining.components import (
     build_multi_face_simulation,
 )
 from drs_mining.controllers.dispatch import ShelswellDispatchController
-from drs_mining.simulation import ShelswellHybridSimulation
 
 __all__ = [
     "Storage",
@@ -47,6 +46,5 @@ __all__ = [
     "build_concentrator_simulation",
     "build_multi_face_simulation",
     "ShelswellDispatchController",
-    "ShelswellHybridSimulation",
 ]
 

@@ -6,7 +6,6 @@ from drs_mining.components.fleet import Truck, TruckState, LHD
 from drs_mining.components.topology import DRSRoadSegment
 from drs_mining.components.bays import DRSLoadingBay, DRSDumpingBay
 from drs_mining.controllers.dispatch import ShelswellDispatchController
-from drs_mining.simulation import ShelswellHybridSimulation, HybridDRSModule
 
 
 def test_truck_discrete_state():
@@ -26,7 +25,7 @@ def test_truck_discrete_state():
 
 
 def test_road_availability_timer():
-    module = HybridDRSModule()
+    module = drs.Module()
     engine = drs.DRSEngine()
     engine.register(module)
     road = DRSRoadSegment(engine, "test_segment", length_m=100.0, segment_type="decline")
@@ -44,7 +43,7 @@ def test_road_availability_timer():
 
 
 def test_loading_and_dumping_bays():
-    module = HybridDRSModule()
+    module = drs.Module()
     engine = drs.DRSEngine()
     engine.register(module)
     bay = DRSLoadingBay(engine, "L1_ORE", "ORE", 1, initial_muck=1000.0)
@@ -89,12 +88,3 @@ def test_dispatch_controller():
     controller.assign_next_destination(truck)
     assert truck.state == TruckState.REFUELING
     assert truck.current_location == "SURFACE_FUEL_DEPOT"
-
-
-def test_hybrid_simulation_step():
-    sim = ShelswellHybridSimulation(num_trucks=4, num_operators=4, mechanical_availability=1.0)
-    assert len(sim.trucks) == 4
-
-    # Run short 1-day simulation
-    prod = sim.run_simulation(total_days=1.0)
-    assert prod >= 0.0

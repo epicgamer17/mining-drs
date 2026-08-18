@@ -27,7 +27,229 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
-from drs_mining.simulation import ShelswellHybridSimulation
+import drs
+from drs_mining.components.fleet import Truck, TruckState
+from drs_mining.components.topology import DRSRoadSegment, load_topology_dict
+from drs_mining.components.bays import DRSLoadingBay, DRSDumpingBay
+from drs_mining.controllers.dispatch import ShelswellDispatchController
+
+
+def build_shelswell_simulation(
+    num_trucks: int = 10,
+    num_operators: int = 10,
+    mechanical_availability: float = 1.0,
+    topology_dict=None,
+) -> dict:
+    """Constructs the haulage simulation state from library components.
+
+    Returns:
+        dict: The simulation state (roads, bays, trucks, dispatch, arrays,
+        timers) consumed by :func:`step_simulation` / :func:`run_haulage_simulation`.
+    """
+    if topology_dict is not None:
+        top_data = load_topology_dict(topology_dict)
+        if isinstance(top_data, dict) and "attributes" in top_data:
+            attrs = top_data["attributes"]
+            num_trucks = attrs.get("num_trucks", num_trucks)
+            num_operators = attrs.get("num_operators", num_operators)
+            mechanical_availability = attrs.get(
+                "mechanical_availability", mechanical_availability
+            )
+
+    engine = drs.DRSEngine()
+
+    # Mine topology & availability timers
+    decline = DRSRoadSegment(engine, "decline_2100m", 2100.0, "decline")
+    ramp_levels = [
+        DRSRoadSegment(engine, f"ramp_L{i}", 300.0, "ramp")
+        for i in range(1, 8)
+    ]
+    surface_rom_road = DRSRoadSegment(engine, "surf_rom", 300.0, "surface")
+    surface_waste_road = DRSRoadSegment(engine, "surf_waste", 440.0, "surface")
+
+    # Loading & dumping bays (unconstrained upstream muck supply per paper spec)
+    loading_bays = []
+    for i in range(1, 8):
+        loading_bays.append(
+            DRSLoadingBay(engine, f"L{i}_ORE", "ORE", i, initial_muck=10_000_000.0)
+        )
+        loading_bays.append(
+            DRSLoadingBay(engine, f"L{i}_WASTE", "WASTE", i, initial_muck=2_000_000.0)
+        )
+
+    rom_dump_bay = DRSDumpingBay(engine, "ROM_PAD", "ORE", "SURFACE_ROM")
+    waste_dump_bay = DRSDumpingBay(engine, "WASTE_DUMP", "WASTE", "SURFACE_WASTE_DUMP")
+    dump_bays = [rom_dump_bay, waste_dump_bay]
+
+    # Fleet & vectorized state arrays
+    eff_trucks_count = int(min(num_trucks * mechanical_availability, num_operators))
+    eff_trucks_count = max(1, eff_trucks_count)
+
+    trucks = [
+        Truck(truck_id=f"T{i:02d}", truck_type="AD30")
+        for i in range(1, eff_trucks_count + 1)
+    ]
+    dispatch = ShelswellDispatchController(trucks, loading_bays, {})
+
+    timers = np.zeros(len(trucks), dtype=np.float64)
+    fuel_pct = np.full(len(trucks), 100.0, dtype=np.float64)
+
+    global_time = drs.Timer("GlobalTime", initial_value=0.0)
+    ore_hauled = drs.Level("OreHauled", initial_value=0.0)
+    waste_hauled = drs.Level("WasteHauled", initial_value=0.0)
+
+    return {
+        "engine": engine,
+        "decline": decline,
+        "ramp_levels": ramp_levels,
+        "surface_rom_road": surface_rom_road,
+        "surface_waste_road": surface_waste_road,
+        "loading_bays": loading_bays,
+        "rom_dump_bay": rom_dump_bay,
+        "waste_dump_bay": waste_dump_bay,
+        "dump_bays": dump_bays,
+        "trucks": trucks,
+        "dispatch": dispatch,
+        "timers": timers,
+        "fuel_pct": fuel_pct,
+        "global_time": global_time,
+        "ore_hauled": ore_hauled,
+        "waste_hauled": waste_hauled,
+    }
+
+
+def get_travel_time_sec(truck: Truck, is_loaded: bool) -> float:
+    """Calculates exact baseline travel duration in seconds based on mine layout."""
+    level = truck.target_level or 4
+    muck_type = truck.payload_type.lower()
+
+    v_surf = truck.get_speed_mps("surface")
+    v_dec = truck.get_speed_mps("decline")
+    v_ramp = truck.get_speed_mps("ramp")
+    v_lvl = truck.get_speed_mps("level")
+
+    d_dec = 2100.0
+    d_ramp = (level - 1) * 300.0
+    d_lvl = 40.0 if muck_type == "ore" else 55.0
+    d_surf = 300.0 if muck_type == "ore" else 440.0
+
+    if not is_loaded:
+        t_total_s = (d_surf / v_surf) + (d_dec / v_dec) + (d_ramp / v_ramp) + (d_lvl / v_lvl)
+    else:
+        t_total_s = (d_lvl / v_lvl) + (d_ramp / v_ramp) + (d_dec / v_dec) + (d_surf / v_surf)
+
+    return t_total_s
+
+
+def step_simulation(state: dict, dt_step: float):
+    """Single simulation step execution."""
+    timers = state["timers"]
+    trucks = state["trucks"]
+    fuel_pct = state["fuel_pct"]
+    dispatch = state["dispatch"]
+    loading_bays = state["loading_bays"]
+    rom_dump_bay = state["rom_dump_bay"]
+    waste_dump_bay = state["waste_dump_bay"]
+    dump_bays = state["dump_bays"]
+
+    active_mask = timers > 0
+    timers[active_mask] = np.maximum(0.0, timers[active_mask] - dt_step)
+
+    for i, truck in enumerate(trucks):
+        if truck.state in (TruckState.TRAVEL_EMPTY, TruckState.TRAVEL_LOADED):
+            fuel_pct[i] -= truck.fuel_burn_rate_pct_per_sec * dt_step
+            truck.fuel_level_pct = fuel_pct[i]
+
+    for i, truck in enumerate(trucks):
+        if truck.state == TruckState.PARKED:
+            dispatch.assign_next_destination(truck)
+            if truck.state == TruckState.TRAVEL_EMPTY:
+                t_travel = get_travel_time_sec(truck, is_loaded=False)
+                timers[i] = t_travel
+
+        elif truck.state == TruckState.TRAVEL_EMPTY:
+            if timers[i] <= 0.0:
+                truck.state = TruckState.WAITING_LOAD
+
+        if truck.state == TruckState.WAITING_LOAD:
+            target_bay = next(
+                (b for b in loading_bays if b.bay_id == truck.target_bay_id), None
+            )
+            if target_bay and target_bay.start_loading(truck):
+                timers[i] = target_bay.total_load_duration_sec
+
+        elif truck.state == TruckState.TRAVEL_LOADED:
+            if timers[i] <= 0.0:
+                truck.state = TruckState.WAITING_DUMP
+
+        if truck.state == TruckState.WAITING_DUMP:
+            target_dump = rom_dump_bay if truck.payload_type == "ORE" else waste_dump_bay
+            if target_dump.start_dumping(truck):
+                timers[i] = target_dump.dump_time_remaining
+
+        elif truck.state == TruckState.REFUELING:
+            fuel_pct[i] = 100.0
+            truck.fuel_level_pct = 100.0
+            truck.state = TruckState.PARKED
+
+    state["decline"].update_continuous_step(dt_step)
+    for ramp in state["ramp_levels"]:
+        ramp.update_continuous_step(dt_step)
+
+    for bay in loading_bays:
+        bay.update_continuous_step(dt_step)
+        if bay.active_truck is not None and bay.active_truck.state == TruckState.TRAVEL_LOADED:
+            idx = trucks.index(bay.active_truck)
+            if timers[idx] <= 0.0:
+                t_travel = get_travel_time_sec(bay.active_truck, is_loaded=True)
+                timers[idx] = t_travel
+
+    for dump_bay in dump_bays:
+        dump_bay.update_continuous_step(dt_step)
+
+    state["ore_hauled"].value = rom_dump_bay.dumped_total.value
+    state["waste_hauled"].value = waste_dump_bay.dumped_total.value
+    state["global_time"].rate = 1.0
+    state["global_time"]._update(dt_step / 86400.0)
+
+
+def run_haulage_simulation(
+    state: dict, total_days: float = 365.0, dt: float = 300.0, show_progress: bool = False
+) -> float:
+    """Runs event-driven DRS integration over specified days (365 calendar days baseline)."""
+    total_seconds = float(total_days * 24.0 * 3600.0)
+    current_sec = 0.0
+    step_dt = float(dt)
+
+    pbar = tqdm(
+        total=int(total_seconds),
+        desc=f"Simulating {total_days:.0f} days",
+        disable=not show_progress,
+    )
+
+    while current_sec < total_seconds:
+        time_in_day = current_sec % 86400.0
+        is_shift_gap = (10.5 * 3600.0 <= time_in_day < 12.0 * 3600.0) or (
+            22.5 * 3600.0 <= time_in_day < 24.0 * 3600.0
+        )
+
+        if is_shift_gap:
+            state["global_time"]._update(step_dt / 86400.0)
+            current_sec += step_dt
+            pbar.update(int(step_dt))
+            continue
+
+        step_simulation(state, step_dt)
+
+        current_sec += step_dt
+        pbar.update(int(step_dt))
+
+    pbar.close()
+    total_hauled = (
+        state["rom_dump_bay"].dumped_total.value
+        + state["waste_dump_bay"].dumped_total.value
+    )
+    return total_hauled / total_days
 
 
 def run_simulation(trucks: int, operators: int, availability: float) -> float:
@@ -44,12 +266,12 @@ def run_simulation(trucks: int, operators: int, availability: float) -> float:
     random.seed(42)
     np.random.seed(42)
 
-    sim = ShelswellHybridSimulation(
+    state = build_shelswell_simulation(
         num_trucks=trucks,
         num_operators=operators,
         mechanical_availability=availability,
     )
-    return sim.run_simulation(total_days=365.0, dt=300.0, show_progress=False)
+    return run_haulage_simulation(state, total_days=365.0, dt=300.0, show_progress=False)
 
 
 def _run_task(args):
