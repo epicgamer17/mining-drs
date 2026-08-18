@@ -8,8 +8,9 @@ import drs
 from drs.telemetry import Telemetry
 from drs import DRSEngine
 from drs_mining.components.modes import RequireDecision
-from drs_mining.components.factories import build_concentrator_simulation
+from drs_mining.components.factories import build_mining_simulation
 from .controllers import RL_MineController
+
 
 
 class MiningRLEnv(gym.Env):
@@ -98,8 +99,9 @@ class MiningRLEnv(gym.Env):
 
     def _setup_simulation(self):
         """Builds the flat leaf components, registers them, and wires the policy."""
-        self.mine, self.fleet, self.plant, self.controller, self.ore1_stock, self.ore2_stock = (
-            build_concentrator_simulation(
+        faces, self.fleet, self.plant, self.controller, self.ore1_stock, self.ore2_stock = (
+            build_mining_simulation(
+                num_faces=1,
                 controller_cls=RL_MineController,
                 mean_ore_fraction=self.mean_ore_fraction,
                 std_dev_ore_fraction=self.std_dev_ore_fraction,
@@ -116,6 +118,7 @@ class MiningRLEnv(gym.Env):
                 variation_same_facies=self.variation_same_facies,
             )
         )
+        self.mine = faces[0]
         self.global_time = drs.Timer("GlobalTime", initial_value=0.0)
 
         self.engine = DRSEngine()
@@ -131,6 +134,7 @@ class MiningRLEnv(gym.Env):
         @self.engine.on_step
         def _policy(time):
             self._step_policy(time)
+
 
     def _step_policy(self, time):
         """Top-level control policy invoked by the engine once per step."""

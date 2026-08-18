@@ -11,31 +11,19 @@ from .fleet import (
 )
 from .topology import DRSRoadSegment, load_topology_dict
 from .bays import DRSLoadingBay, DRSDumpingBay
-from .mine_face import BaseMineFace, ConcentratorMineFace, ContinuousMineFace
-from .plant import BaseMetallurgicalPlant, ConcentratorPlant
-from .controllers import (
-    BaseBlendingController,
-    ConcentratorController,
-    MultiFaceConcentratorController,
-)
-from .factories import (
-    build_concentrator_simulation,
-    build_multi_face_simulation,
-)
+from .mine_face import MineFace
+from .plant import MetallurgicalPlant
+from .controllers import BlendingController
+from .factories import build_mining_simulation
 from .stockpiles import Stockpile, create_stockpiles
 from .dispatch import ShelswellDispatchController
 
 __all__ = [
     "Storage",
     "Processor",
-    "BaseBlendingController",
-    "MultiFaceConcentratorController",
-    "BaseMineFace",
-    "ContinuousMineFace",
-    "ConcentratorMineFace",
-    "BaseMetallurgicalPlant",
-    "ConcentratorPlant",
-    "ConcentratorController",
+    "MineFace",
+    "MetallurgicalPlant",
+    "BlendingController",
     "Stockpile",
     "create_stockpiles",
     "ShelswellDispatchController",
@@ -48,8 +36,10 @@ __all__ = [
     "DRSLoadingBay",
     "DRSDumpingBay",
     "load_topology_dict",
-    "build_concentrator_simulation",
-    "build_multi_face_simulation",
+    "build_mining_simulation",
+    "StochasticFaciesGenerator",
+    "MODES",
+    "OperatingMode",
+    "RequireDecision",
+    "ContinuousFleetLogistics",
 ]
-
-

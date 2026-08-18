@@ -1,9 +1,8 @@
 from drs_mining.components import (
-    ContinuousMineFace,
-    MultiFaceConcentratorController,
+    MineFace,
+    BlendingController,
     load_topology_dict,
-    build_concentrator_simulation,
-    build_multi_face_simulation,
+    build_mining_simulation,
 )
 from drs_mining.rl.environments import MiningRLEnv
 import gymnasium as gym
@@ -11,28 +10,32 @@ import os
 
 
 def test_direct_parameter_instantiation():
-    mine, fleet, plant, controller, ore1_stock, ore2_stock = (
-        build_concentrator_simulation(
+    faces, fleet, plant, controller, ore1_stock, ore2_stock = (
+        build_mining_simulation(
+            num_faces=1,
             target_ore_stock_level=50000.0,
             mean_ore_fraction=0.35,
             total_ore_to_extract=1000000.0,
         )
     )
+    mine = faces[0]
     assert mine.mean_ore_fraction == 0.35
     assert mine.total_ore_to_extract == 1000000.0
     assert controller.target_ore_stock_level == 50000.0
 
     faces, fleet, plant, controller, ore1_stock, ore2_stock = (
-        build_multi_face_simulation(
+        build_mining_simulation(
+            num_faces=2,
             total_truck_count=12.0,
             total_lhd_count=4.0,
         )
     )
     assert faces and len(faces) == 2
-    assert all(isinstance(face, ContinuousMineFace) for face in faces)
-    assert isinstance(controller, MultiFaceConcentratorController)
+    assert all(isinstance(face, MineFace) for face in faces)
+    assert isinstance(controller, BlendingController)
     assert controller.total_truck_count == 12.0
     assert controller.total_lhd_count == 4.0
+
 
 
 def test_topology_dict_loading():

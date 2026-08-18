@@ -3,8 +3,8 @@ import pytest
 from drs import Processor, Storage
 
 from drs_mining.components import (
-    ConcentratorMineFace,
-    ConcentratorPlant,
+    MineFace,
+    MetallurgicalPlant,
     ContinuousFleetLogistics,
     Stockpile,
 )
@@ -74,7 +74,7 @@ def test_mining_plant_is_a_processor():
     fleet = ContinuousFleetLogistics()
     ore1 = Stockpile(name="Ore1Stock", expected_attributes=["x"], initial_mass=100.0)
     ore2 = Stockpile(name="Ore2Stock", expected_attributes=["x"], initial_mass=100.0)
-    plant = ConcentratorPlant(None, fleet, ore1, ore2, max_rate=600.0)
+    plant = MetallurgicalPlant(None, fleet, ore1, ore2, max_rate=600.0)
 
     assert isinstance(plant, Processor)
     assert plant.max_rate == 600.0
@@ -88,7 +88,7 @@ def test_mining_plant_is_a_processor():
 
 
 def test_mining_face_is_a_processor_driven_by_target_rate():
-    face = ConcentratorMineFace(
+    face = MineFace(
         mean_ore_fraction=0.3,
         std_dev_ore_fraction=0.05,
         min_ore_mass=30000.0,

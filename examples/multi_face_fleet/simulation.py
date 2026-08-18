@@ -21,10 +21,10 @@ import matplotlib.pyplot as plt
 
 from drs import DRSEngine, Telemetry
 from drs_mining.components import (
-    ConcentratorPlant,
+    MetallurgicalPlant,
     ContinuousFleetLogistics,
-    ContinuousMineFace,
-    MultiFaceConcentratorController,
+    MineFace,
+    BlendingController,
     StochasticFaciesGenerator,
     Stockpile,
 )
@@ -113,13 +113,13 @@ def build_multi_face_network(
         prob_new_facies=prob_new_facies,
         variation_same_facies=variation_same_facies,
     )
-    face1 = ContinuousMineFace(
+    face1 = MineFace(
         face_id=1,
         generator=gen1,
         total_ore_to_extract=total_ore_to_extract,
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
     )
-    face2 = ContinuousMineFace(
+    face2 = MineFace(
         face_id=2,
         generator=gen2,
         total_ore_to_extract=total_ore_to_extract,
@@ -150,10 +150,10 @@ def build_multi_face_network(
         attr_inflow=0.0,
     )
 
-    plant = ConcentratorPlant(
+    plant = MetallurgicalPlant(
         None, fleet, ore1_stock, ore2_stock, max_rate=plant_max_rate
     )
-    controller = MultiFaceConcentratorController(
+    controller = BlendingController(
         faces=[face1, face2],
         fleet=fleet,
         plant=plant,
@@ -163,6 +163,7 @@ def build_multi_face_network(
         duration_of_shutdowns=duration_of_shutdowns,
         duration_of_contingency_segments=duration_of_contingency_segments,
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+
         total_ore_to_extract=total_ore_to_extract,
         mode_a_ore1_milling_rate=mode_a_ore1_milling_rate,
         mode_a_ore2_milling_rate=mode_a_ore2_milling_rate,

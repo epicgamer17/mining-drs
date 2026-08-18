@@ -1,25 +1,21 @@
-"""Flat, tuple-returning builders for the mining blending simulation.
+"""Unified flat, tuple-returning simulation builder for mining blending operations."""
 
-Replaces the former ``drs_mining.components.models`` container classes: each
-builder constructs the leaf components directly and returns them as a plain
-tuple, leaving registration, policy wiring, and telemetry to the caller
-(engine, environment, or example script).
-"""
-
+from typing import Optional, List, Sequence, Union
 from .stockpiles import Stockpile
-from .mine_face import ConcentratorMineFace, ContinuousMineFace
+from .mine_face import MineFace
 from .fleet import ContinuousFleetLogistics
-from .plant import ConcentratorPlant
-from .controllers import (
-    ConcentratorController,
-    MultiFaceConcentratorController,
-)
+from .plant import MetallurgicalPlant
+from .controllers import BlendingController
 from .generators import StochasticFaciesGenerator
 
 
-def build_concentrator_simulation(
+def build_mining_simulation(
     *,
-    controller_cls=ConcentratorController,
+    num_faces: int = 1,
+    faces: Optional[List[MineFace]] = None,
+    face_generators: Optional[List] = None,
+    face_mean_fractions: Optional[Sequence[float]] = None,
+    controller_cls=BlendingController,
     mean_ore_fraction: float = 0.30,
     std_dev_ore_fraction: float = 0.05,
     target_ore_stock_level: float = 60000.0,
@@ -33,80 +29,6 @@ def build_concentrator_simulation(
     max_ore_mass: float = 50000.0,
     prob_new_facies: float = 0.3,
     variation_same_facies: float = 0.01,
-):
-    """Builds a single-face concentrator simulation.
-
-    Returns:
-        tuple: ``(mine, fleet, plant, controller, ore1_stock, ore2_stock)``
-    """
-    mine = ConcentratorMineFace(
-        mean_ore_fraction=mean_ore_fraction,
-        std_dev_ore_fraction=std_dev_ore_fraction,
-        prob_new_facies=prob_new_facies,
-        variation_same_facies=variation_same_facies,
-        min_ore_mass=min_ore_mass,
-        max_ore_mass=max_ore_mass,
-        total_ore_to_extract=total_ore_to_extract,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-    )
-    fleet = ContinuousFleetLogistics()
-
-    initial_fraction = mean_ore_fraction
-    initial_mass1 = (1 - initial_fraction) * target_ore_stock_level
-    ore1_stock = Stockpile(
-        name="Ore1Stock",
-        expected_attributes=["contained_ore_fraction_mass"],
-        initial_mass=initial_mass1,
-        initial_attributes={
-            "contained_ore_fraction_mass": initial_mass1 * mean_ore_fraction
-        },
-        attr_inflow=1.0,
-    )
-    initial_mass2 = initial_fraction * target_ore_stock_level
-    ore2_stock = Stockpile(
-        name="Ore2Stock",
-        expected_attributes=["contained_ore_fraction_mass"],
-        initial_mass=initial_mass2,
-        initial_attributes={
-            "contained_ore_fraction_mass": initial_mass2 * mean_ore_fraction
-        },
-        attr_inflow=0.0,
-    )
-
-    plant = ConcentratorPlant(mine, fleet, ore1_stock, ore2_stock)
-    controller = controller_cls(
-        mine=mine,
-        fleet=fleet,
-        plant=plant,
-        target_ore_stock_level=target_ore_stock_level,
-        critical_ore2_level=critical_ore2_level,
-        duration_of_production_campaigns=duration_of_production_campaigns,
-        duration_of_shutdowns=duration_of_shutdowns,
-        duration_of_contingency_segments=duration_of_contingency_segments,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-    )
-
-    return mine, fleet, plant, controller, ore1_stock, ore2_stock
-
-
-def build_multi_face_simulation(
-    *,
-    num_faces: int = 2,
-    faces: list = None,
-    face_generators: list = None,
-    face_mean_fractions: list = None,
-    controller_cls=MultiFaceConcentratorController,
-    mean_ore_fraction: float = 0.30,
-    std_dev_ore_fraction: float = 0.05,
-    target_ore_stock_level: float = 60000.0,
-    total_ore_to_extract: float = 6600000.0,
-    ore_to_be_extracted_during_warming_period: float = 600000.0,
-    critical_ore2_level: float = 20400.0,
-    duration_of_production_campaigns: float = 34.0,
-    duration_of_shutdowns: float = 1.0,
-    duration_of_contingency_segments: float = 1.0,
-    prob_new_facies: float = 0.3,
-    variation_same_facies: float = 0.01,
     mode_a_ore1_milling_rate: float = 3600.0,
     mode_a_ore2_milling_rate: float = 2400.0,
     mode_a_contingency_ore1_milling_rate: float = 3900.0,
@@ -116,10 +38,10 @@ def build_multi_face_simulation(
     fleet_shift_duration: float = 0.5,
     total_lhd_count: float = 3.0,
     total_truck_count: float = 10.0,
-    max_lhds_per_face: float = 2.0,
-    max_trucks_per_face: float = 6.0,
-    face_haul_distance=(1.5, 2.2),
-    face_accessibility_fraction=(0.93, 0.91),
+    max_lhds_per_face: Union[float, Sequence[float]] = 2.0,
+    max_trucks_per_face: Union[float, Sequence[float]] = 6.0,
+    face_haul_distance: Union[float, Sequence[float]] = (1.5, 2.2),
+    face_accessibility_fraction: Union[float, Sequence[float]] = (0.93, 0.91),
     truck_velocity: float = 15.0,
     loader_cycle_time_hours: float = 0.0833,
     truck_dump_time_hours: float = 0.033,
@@ -128,21 +50,25 @@ def build_multi_face_simulation(
     loader_payload_tonnes: float = 15.0,
     truck_payload_tonnes: float = 30.0,
     development_rate_per_extra_truck: float = 50.0,
-    mode_allocations: dict = None,
+    mode_allocations: Optional[dict] = None,
 ):
-    """Builds a multi-face (N >= 1) concentrator simulation.
+    """Builds a mining blending simulation for arbitrary number of mine faces (N >= 1).
 
     Returns:
         tuple: ``(faces, fleet, plant, controller, ore1_stock, ore2_stock)``
+        When ``num_faces == 1`` and ``faces`` is not explicitly provided,
+        ``faces`` will be a single-element list ``[mine_face]``.
     """
     if faces is None:
         if face_generators is not None:
             created_faces = []
             for i, gen in enumerate(face_generators, 1):
                 created_faces.append(
-                    ContinuousMineFace(
+                    MineFace(
                         face_id=i,
                         generator=gen,
+                        min_ore_mass=min_ore_mass,
+                        max_ore_mass=max_ore_mass,
                         total_ore_to_extract=total_ore_to_extract,
                         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
                     )
@@ -157,7 +83,6 @@ def build_multi_face_simulation(
             elif num_faces == 2:
                 means = [0.15, 0.45]
             else:
-                # Distribute evenly between 0.15 and 0.45 for N faces
                 step = (0.45 - 0.15) / (num_faces - 1)
                 means = [0.15 + i * step for i in range(num_faces)]
 
@@ -171,9 +96,14 @@ def build_multi_face_simulation(
                     variation_same_facies=variation_same_facies,
                 )
                 created_faces.append(
-                    ContinuousMineFace(
-                        face_id=i,
+                    MineFace(
+                        face_id=i if num_faces > 1 else None,
+                        name=f"mine_face_{i}" if num_faces > 1 else "mine_face",
                         generator=gen,
+                        mean_ore_fraction=mean_frac,
+                        std_dev_ore_fraction=std_dev,
+                        min_ore_mass=min_ore_mass,
+                        max_ore_mass=max_ore_mass,
                         total_ore_to_extract=total_ore_to_extract,
                         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
                     )
@@ -204,7 +134,7 @@ def build_multi_face_simulation(
         attr_inflow=0.0,
     )
 
-    plant = ConcentratorPlant(None, fleet, ore1_stock, ore2_stock)
+    plant = MetallurgicalPlant(None, fleet, ore1_stock, ore2_stock)
 
     controller = controller_cls(
         faces=faces,
@@ -242,4 +172,3 @@ def build_multi_face_simulation(
     )
 
     return faces, fleet, plant, controller, ore1_stock, ore2_stock
-

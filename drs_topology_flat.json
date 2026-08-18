@@ -22,7 +22,7 @@
   },
   {
     "id": "mine",
-    "class": "ConcentratorMineFace",
+    "class": "MineFace",
     "layout": {
       "x": 80,
       "y": 245
@@ -180,7 +180,7 @@
   },
   {
     "id": "plant",
-    "class": "ConcentratorPlant",
+    "class": "MetallurgicalPlant",
     "layout": {
       "x": 920,
       "y": 220
@@ -214,7 +214,7 @@
   },
   {
     "id": "controller",
-    "class": "ConcentratorController",
+    "class": "BlendingController",
     "layout": {
       "x": 215,
       "y": 440

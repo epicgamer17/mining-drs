@@ -12,14 +12,14 @@ from drs_mining import (
     DRSLoadingBay,
     DRSDumpingBay,
     ShelswellDispatchController,
-    build_multi_face_simulation,
-    build_concentrator_simulation,
-    ContinuousMineFace,
-    ConcentratorPlant,
+    build_mining_simulation,
+    MineFace,
+    MetallurgicalPlant,
+    BlendingController,
+    ContinuousFleetLogistics,
+    StochasticFaciesGenerator,
+    TruckState,
 )
-from drs_mining.components.fleet import ContinuousFleetLogistics, TruckState
-from drs_mining.components.controllers import MultiFaceConcentratorController
-from drs_mining.components.generators import StochasticFaciesGenerator
 
 
 def test_create_truck_and_lhd_fleets():
@@ -100,13 +100,11 @@ def test_configurable_dispatch_controller():
         parking_location="CUSTOM_PARKING",
     )
 
-    # Test custom refuel threshold
     trucks[0].fuel_level_pct = 19.0
     controller.assign_next_destination(trucks[0])
     assert trucks[0].state == TruckState.REFUELING
     assert trucks[0].current_location == "CUSTOM_DEPOT"
 
-    # Test round robin strategy
     rr_ctrl = ShelswellDispatchController(
         trucks=trucks,
         loading_bays=[bay1, bay2],
@@ -120,12 +118,10 @@ def test_configurable_dispatch_controller():
 def test_multi_stockpile_fleet_routing():
     fleet = ContinuousFleetLogistics(num_stockpiles=3)
     gen1 = StochasticFaciesGenerator(mean_fraction=0.2, std_dev=0.05)
-    face = ContinuousMineFace(face_id=1, generator=gen1)
+    face = MineFace(face_id=1, generator=gen1)
     face.target_rate = 1000.0
     face.step(1.0)
 
-
-    # Custom 3-way split function: 50% stock 1, 30% stock 2, 20% stock 3
     inflows = fleet.route_multi(
         sources=[face],
         split_fn=lambda r, g: [0.5 * r, 0.3 * r, 0.2 * r],
@@ -138,12 +134,12 @@ def test_multi_stockpile_fleet_routing():
 
 def test_multi_face_simulation_arbitrary_n():
     for num_faces in [1, 2, 3, 4, 5]:
-        faces, fleet, plant, controller, ore1_stock, ore2_stock = build_multi_face_simulation(
+        faces, fleet, plant, controller, ore1_stock, ore2_stock = build_mining_simulation(
             num_faces=num_faces,
             total_truck_count=15.0,
             total_lhd_count=5.0,
-            face_haul_distance=1.8,  # scalar broadcast
-            face_accessibility_fraction=0.95,  # scalar broadcast
+            face_haul_distance=1.8,
+            face_accessibility_fraction=0.95,
             max_trucks_per_face=5.0,
             max_lhds_per_face=2.0,
         )
@@ -151,7 +147,6 @@ def test_multi_face_simulation_arbitrary_n():
         assert controller.total_truck_count == 15.0
         assert controller.total_lhd_count == 5.0
 
-        # Check allocations exist for all standard modes
         for mode in ["MODE_A", "MODE_B", "MODE_A_CONTINGENCY", "MODE_B_CONTINGENCY", "MODE_A_MINE_SURGING", "MODE_B_MINE_SURGING"]:
             alloc = controller._get_allocations_for_mode(mode)
             assert len(alloc) == num_faces
@@ -159,7 +154,7 @@ def test_multi_face_simulation_arbitrary_n():
 
 
 def test_multi_face_simulation_execution_3_faces():
-    faces, fleet, plant, controller, ore1_stock, ore2_stock = build_multi_face_simulation(
+    faces, fleet, plant, controller, ore1_stock, ore2_stock = build_mining_simulation(
         num_faces=3,
         face_mean_fractions=[0.10, 0.30, 0.50],
         total_truck_count=12.0,
@@ -191,7 +186,7 @@ def test_plant_with_multiple_stockpiles():
         {"name": "S2", "initial_mass": 500.0},
         {"name": "S3", "initial_mass": 500.0},
     ])
-    plant = ConcentratorPlant(stockpiles=stocks, max_rate=1200.0)
+    plant = MetallurgicalPlant(stockpiles=stocks, max_rate=1200.0)
     assert len(plant.stockpiles) == 3
     assert plant.ore1_stock is stocks[0]
     assert plant.ore2_stock is stocks[1]

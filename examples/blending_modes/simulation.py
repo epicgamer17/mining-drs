@@ -12,9 +12,9 @@ import matplotlib.pyplot as plt
 
 from drs import DRSEngine, Telemetry
 from drs_mining.components import (
-    ConcentratorMineFace,
-    ConcentratorPlant,
-    ConcentratorController,
+    MineFace,
+    MetallurgicalPlant,
+    BlendingController,
     ContinuousFleetLogistics,
     Stockpile,
 )
@@ -70,7 +70,7 @@ def build_blending_network(
     There is no scenario container; register every stateful leaf with the
     engine in that order.
     """
-    mine = ConcentratorMineFace(
+    mine = MineFace(
         mean_ore_fraction=mean_ore_fraction,
         std_dev_ore_fraction=std_dev_ore_fraction,
         prob_new_facies=prob_new_facies,
@@ -105,10 +105,10 @@ def build_blending_network(
         attr_inflow=0.0,
     )
 
-    plant = ConcentratorPlant(
+    plant = MetallurgicalPlant(
         mine, fleet, ore1_stock, ore2_stock, max_rate=plant_max_rate
     )
-    controller = ConcentratorController(
+    controller = BlendingController(
         mine=mine,
         fleet=fleet,
         plant=plant,
@@ -122,6 +122,7 @@ def build_blending_network(
     )
 
     return mine, fleet, plant, controller, ore1_stock, ore2_stock
+
 
 
 def _register_and_policy(engine, network):

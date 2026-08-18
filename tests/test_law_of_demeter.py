@@ -1,9 +1,9 @@
-from drs_mining.components.mine_face import ConcentratorMineFace
-from drs_mining.components.factories import build_concentrator_simulation
+from drs_mining.components.mine_face import MineFace
+from drs_mining.components.factories import build_mining_simulation
 
 
 def test_mine_face_net_extracted_mass():
-    mine = ConcentratorMineFace(
+    mine = MineFace(
         total_ore_to_extract=6600000.0,
         ore_to_be_extracted_during_warming_period=600000.0,
     )
@@ -12,7 +12,7 @@ def test_mine_face_net_extracted_mass():
 
 
 def test_controller_durations():
-    _, _, _, controller, _, _ = build_concentrator_simulation()
+    _, _, _, controller, _, _ = build_mining_simulation()
 
     controller.cumulative_time_mode_a.value = 10.0
     controller.cumulative_time_mode_b.value = 5.0
@@ -25,8 +25,8 @@ def test_controller_durations():
 
 
 def test_flat_build_wiring():
-    mine, fleet, plant, controller, ore1_stock, ore2_stock = (
-        build_concentrator_simulation()
+    faces, fleet, plant, controller, ore1_stock, ore2_stock = (
+        build_mining_simulation()
     )
 
     ore1_stock.current_mass.value = 1000.0

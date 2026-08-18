@@ -5,7 +5,9 @@ from drs import Processor
 from .fleet import ContinuousFleetLogistics
 
 
-class BaseMetallurgicalPlant(Processor):
+class MetallurgicalPlant(Processor):
+    """Represents a metallurgical plant / concentrator processing mined ore."""
+
     def __init__(
         self,
         mine=None,
@@ -41,28 +43,3 @@ class BaseMetallurgicalPlant(Processor):
         """
         self.target_rate = mass_rate
         self.cumulative_milled_mass.rate = self.actual_rate
-
-
-class ConcentratorPlant(BaseMetallurgicalPlant):
-    def __init__(
-        self,
-        mine=None,
-        fleet: Optional[ContinuousFleetLogistics] = None,
-        ore1_stock=None,
-        ore2_stock=None,
-        max_rate: float = math.inf,
-        name: str = "concentrator_plant",
-        stockpiles: Optional[Sequence] = None,
-    ):
-        super().__init__(
-            mine=mine,
-            fleet=fleet,
-            ore1_stock=ore1_stock,
-            ore2_stock=ore2_stock,
-            max_rate=max_rate,
-            name=name,
-            stockpiles=stockpiles,
-        )
-
-
-
