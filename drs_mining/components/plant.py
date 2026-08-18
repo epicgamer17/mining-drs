@@ -1,8 +1,8 @@
-from typing import Optional, Sequence
+from typing import Sequence
 import math
 import drs
 from drs import Processor
-from .fleet import ContinuousFleetLogistics
+from .stockpiles import Stockpile
 
 
 class MetallurgicalPlant(Processor):
@@ -10,27 +10,18 @@ class MetallurgicalPlant(Processor):
 
     def __init__(
         self,
-        mine=None,
-        fleet: Optional[ContinuousFleetLogistics] = None,
-        ore1_stock=None,
-        ore2_stock=None,
+        stockpiles: Sequence[Stockpile],
         max_rate: float = math.inf,
         name: str = "metallurgical_plant",
-        stockpiles: Optional[Sequence] = None,
     ):
         super().__init__(name=name, max_rate=max_rate)
-        self.mine = mine
-        self.fleet = fleet
-
-        if stockpiles is not None:
-            self.stockpiles = list(stockpiles)
-            self.ore1_stock = self.stockpiles[0] if len(self.stockpiles) > 0 else ore1_stock
-            self.ore2_stock = self.stockpiles[1] if len(self.stockpiles) > 1 else ore2_stock
-        else:
-            self.ore1_stock = ore1_stock
-            self.ore2_stock = ore2_stock
-            self.stockpiles = [s for s in [ore1_stock, ore2_stock] if s is not None]
-
+        self.stockpiles = list(stockpiles)
+        if len(self.stockpiles) < 2:
+            raise ValueError(
+                f"MetallurgicalPlant requires at least 2 stockpiles (Ore1 and Ore2), got {len(self.stockpiles)}"
+            )
+        self.ore1_stock = self.stockpiles[0]
+        self.ore2_stock = self.stockpiles[1]
         self.cumulative_milled_mass = drs.Level(
             "cumulative_milled_mass", initial_value=0.0
         )

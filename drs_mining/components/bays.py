@@ -8,44 +8,33 @@ class DRSLoadingBay:
 
     def __init__(
         self,
-        engine,
         bay_id: str,
         bay_type: str,
         level_index: int,
-        initial_muck: float = 0.0,
-        lhd: Optional[LHD] = None,
-        truck_spot_min: float = 0.82,
-        acquisition_delay_min: float = 1.5,
-        bucket_passes: float = 2.0,
+        initial_muck: float,
+        truck_spot_min: float,
+        acquisition_delay_min: float,
+        bucket_passes: float,
+        lhd: LHD,
     ):
-        self.engine = engine
         self.bay_id = bay_id
         self.bay_type = bay_type  # "ORE" or "WASTE"
         self.level_index = level_index
-        self.lhd = lhd or LHD(f"LHD_L{level_index}", level_index)
+        self.initial_muck = initial_muck
+        self.lhd = lhd
         self.truck_spot_min = truck_spot_min
         self.acquisition_delay_min = acquisition_delay_min
         self.bucket_passes = bucket_passes
 
         # Continuous Muck Bay Level (Tonnes available)
-        if hasattr(engine, "create_variable"):
-            self.muck_level = engine.create_variable(
-                name=f"muck_level_L{level_index}_{bay_type}",
-                initial_value=initial_muck,
-            )
-            self.load_rate = engine.create_variable(
-                name=f"load_rate_L{level_index}_{bay_type}",
-                initial_value=0.0,
-            )
-        else:
-            self.muck_level = drs.Level(
-                f"muck_level_L{level_index}_{bay_type}",
-                initial_value=initial_muck,
-            )
-            self.load_rate = drs.Variable(
-                f"load_rate_L{level_index}_{bay_type}",
-                initial_value=0.0,
-            )
+        self.muck_level = drs.Level(
+            f"muck_level_L{level_index}_{bay_type}",
+            initial_value=initial_muck,
+        )
+        self.load_rate = drs.Variable(
+            f"load_rate_L{level_index}_{bay_type}",
+            initial_value=0.0,
+        )
 
         self.active_truck: Optional[Truck] = None
         self.load_time_remaining: float = 0.0
@@ -66,6 +55,8 @@ class DRSLoadingBay:
         )
 
         total_load_time_sec = self.calculate_load_duration_sec(truck)
+        if total_load_time_sec <= 0.0:
+            total_load_time_sec = 1.0
 
         self.active_truck = truck
         self.active_truck.state = TruckState.LOADING
@@ -79,14 +70,12 @@ class DRSLoadingBay:
     def update_continuous_step(self, dt: float):
         """Integrates muck removal and truck loading continuously."""
         if self.active_truck is not None:
-            # Drain muck level and fill truck
             tonnes_moved = min(self.load_rate.value * dt, self.muck_level.value)
             self.muck_level.value = max(0.0, self.muck_level.value - tonnes_moved)
             self.active_truck.current_payload += tonnes_moved
 
             self.load_time_remaining -= dt
             if self.load_time_remaining <= 0.0:
-                # Loading complete
                 self.active_truck.state = TruckState.TRAVEL_LOADED
                 self.active_truck = None
                 self.load_rate.value = 0.0
@@ -97,41 +86,32 @@ class DRSDumpingBay:
 
     def __init__(
         self,
-        engine,
         bay_id: str,
         bay_type: str,
         location_name: str,
-        dump_spot_min: float = 0.57,
-        bed_raise_dump_min: float = 0.88,
+        dump_spot_min: float,
+        bed_raise_dump_min: float,
     ):
-        self.engine = engine
         self.bay_id = bay_id
         self.bay_type = bay_type  # "ORE" or "WASTE"
         self.location_name = location_name
         self.dump_spot_min = dump_spot_min
         self.bed_raise_dump_min = bed_raise_dump_min
 
-        if hasattr(engine, "create_variable"):
-            self.dumped_total = engine.create_variable(
-                name=f"dumped_{bay_type}_total", initial_value=0.0
-            )
-            self.dump_rate = engine.create_variable(
-                name=f"dump_rate_{bay_type}", initial_value=0.0
-            )
-        else:
-            self.dumped_total = drs.Level(
-                f"dumped_{bay_type}_total", initial_value=0.0
-            )
-            self.dump_rate = drs.Variable(
-                f"dump_rate_{bay_type}", initial_value=0.0
-            )
+        self.dumped_total = drs.Level(
+            f"dumped_{bay_type}_total", initial_value=0.0
+        )
+        self.dump_rate = drs.Variable(
+            f"dump_rate_{bay_type}", initial_value=0.0
+        )
 
         self.active_truck: Optional[Truck] = None
         self.dump_time_remaining: float = 0.0
 
     def calculate_dump_duration_sec(self, truck: Truck) -> float:
         """Calculates dump duration in seconds."""
-        return (self.dump_spot_min + self.bed_raise_dump_min) * 60.0
+        duration = (self.dump_spot_min + self.bed_raise_dump_min) * 60.0
+        return duration if duration > 0.0 else 1.0
 
     def start_dumping(self, truck: Truck) -> bool:
         """Starts surface dumping for a loaded truck."""
@@ -143,24 +123,25 @@ class DRSDumpingBay:
         self.active_truck = truck
         self.active_truck.state = TruckState.DUMPING
         self.dump_time_remaining = total_dump_time_sec
+
+        # Flow into surface stockpile accumulator (Tonnes / Sec)
         self.dump_rate.value = truck.current_payload / total_dump_time_sec
         return True
 
     def update_continuous_step(self, dt: float):
-        """Integrates truck unloading and surface stockpile accumulation continuously."""
+        """Integrates continuous dumping and flow rate resets."""
         if self.active_truck is not None:
             tonnes_dumped = min(
                 self.dump_rate.value * dt, self.active_truck.current_payload
             )
+            self.dumped_total.value += tonnes_dumped
             self.active_truck.current_payload = max(
                 0.0, self.active_truck.current_payload - tonnes_dumped
             )
-            self.dumped_total.value += tonnes_dumped
 
             self.dump_time_remaining -= dt
             if self.dump_time_remaining <= 0.0:
                 self.active_truck.current_payload = 0.0
-                self.active_truck.state = TruckState.PARKED
+                self.active_truck.state = TruckState.TRAVEL_EMPTY
                 self.active_truck = None
                 self.dump_rate.value = 0.0
-

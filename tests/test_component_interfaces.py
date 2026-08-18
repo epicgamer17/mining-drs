@@ -7,6 +7,7 @@ from drs_mining.components import (
     MetallurgicalPlant,
     ContinuousFleetLogistics,
     Stockpile,
+    StochasticFaciesGenerator,
 )
 
 
@@ -58,6 +59,7 @@ def test_mining_stockpile_is_a_storage():
         name="Ore1Stock",
         expected_attributes=["contained_ore_fraction_mass"],
         initial_mass=0.0,
+        initial_attributes={},
         capacity=1_000_000.0,
     )
     assert isinstance(stock, Storage)
@@ -72,9 +74,9 @@ def test_mining_stockpile_is_a_storage():
 
 def test_mining_plant_is_a_processor():
     fleet = ContinuousFleetLogistics()
-    ore1 = Stockpile(name="Ore1Stock", expected_attributes=["x"], initial_mass=100.0)
-    ore2 = Stockpile(name="Ore2Stock", expected_attributes=["x"], initial_mass=100.0)
-    plant = MetallurgicalPlant(None, fleet, ore1, ore2, max_rate=600.0)
+    ore1 = Stockpile(name="Ore1Stock", expected_attributes=["x"], initial_mass=100.0, initial_attributes={})
+    ore2 = Stockpile(name="Ore2Stock", expected_attributes=["x"], initial_mass=100.0, initial_attributes={})
+    plant = MetallurgicalPlant(stockpiles=[ore1, ore2], max_rate=600.0)
 
     assert isinstance(plant, Processor)
     assert plant.max_rate == 600.0
@@ -88,11 +90,20 @@ def test_mining_plant_is_a_processor():
 
 
 def test_mining_face_is_a_processor_driven_by_target_rate():
+    gen = StochasticFaciesGenerator(mean_fraction=0.3, std_dev=0.05, prob_new_facies=0.3, variation_same_facies=0.01)
     face = MineFace(
-        mean_ore_fraction=0.3,
-        std_dev_ore_fraction=0.05,
+        name="mine_face_1",
+        face_id=1,
+        generator=gen,
         min_ore_mass=30000.0,
         max_ore_mass=50000.0,
+        total_ore_to_extract=6600000.0,
+        ore_to_be_extracted_during_warming_period=600000.0,
+        mean_ore_fraction=0.3,
+        std_dev_ore_fraction=0.05,
+        prob_new_facies=0.3,
+        variation_same_facies=0.01,
+        initial_parcel_mass=30000.0,
     )
     assert isinstance(face, Processor)
 

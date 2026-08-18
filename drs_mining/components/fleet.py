@@ -1,8 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Tuple, List, Dict, Union, Sequence, Callable
-import math
-
+from typing import Optional, Tuple, List, Sequence, Mapping, Callable
 import drs
 
 
@@ -21,9 +19,10 @@ class TruckState(Enum):
 @dataclass
 class Truck:
     truck_id: str
-    truck_type: str = "CAT AD30"
-    ore_payload_cap: float = 26.1   # tonnes
-    waste_payload_cap: float = 24.6 # tonnes
+    truck_type: str
+    ore_payload_cap: float
+    waste_payload_cap: float
+    speeds: dict
 
     # State tracking
     state: TruckState = TruckState.PARKED
@@ -35,16 +34,8 @@ class Truck:
 
     # Fuel & Mechanical State
     fuel_level_pct: float = 100.0   # 0.0 - 100.0%
-    fuel_burn_rate_pct_per_sec: float = 0.005 # ~20h tank
+    fuel_burn_rate_pct_per_sec: float = 0.005 # per-second burn rate
     next_failure_time: float = 1e9  # Calculated from MTBF
-
-    # Speed Specs (kph) across Mine Corridors
-    speeds: dict = field(default_factory=lambda: {
-        "surface": {"empty": 17.4, "loaded": 13.4},
-        "decline": {"empty": 15.1, "loaded": 11.2},
-        "ramp":    {"empty": 12.9, "loaded": 9.2},
-        "level":   {"empty": 7.6,  "loaded": 6.6}
-    })
 
     def get_speed_mps(self, segment_type: str) -> float:
         """Returns speed in meters/second for current load state."""
@@ -57,64 +48,68 @@ class Truck:
 class LHD:
     lhd_id: str
     level_index: int
-    bucket_ore_cap: float = 14.0   # tonnes
-    bucket_waste_cap: float = 12.5 # tonnes
-
-    load_spot_min: float = 0.46
-    load_min: float = 0.88
-    dump_min: float = 0.73
-    tram_dist_m: float = 35.0
-    speed_loaded_kph: float = 5.89
-    speed_empty_kph: float = 6.78
+    bucket_ore_cap: float
+    bucket_waste_cap: float
+    load_spot_min: float
+    load_min: float
+    dump_min: float
+    tram_dist_m: float
+    speed_loaded_kph: float
+    speed_empty_kph: float
 
     def get_bucket_cycle_sec(self) -> float:
         """Calculates duration in seconds of 1 LHD digging & tramming bucket pass."""
-        t_tram_loaded_min = (self.tram_dist_m / (self.speed_loaded_kph * 1000.0 / 60.0))
-        t_tram_empty_min = (self.tram_dist_m / (self.speed_empty_kph * 1000.0 / 60.0))
+        speed_loaded_mpm = (self.speed_loaded_kph * 1000.0 / 60.0) if self.speed_loaded_kph > 0 else 1.0
+        speed_empty_mpm = (self.speed_empty_kph * 1000.0 / 60.0) if self.speed_empty_kph > 0 else 1.0
+        t_tram_loaded_min = self.tram_dist_m / speed_loaded_mpm
+        t_tram_empty_min = self.tram_dist_m / speed_empty_mpm
         total_min = (self.load_spot_min + self.load_min + t_tram_loaded_min + self.dump_min + t_tram_empty_min)
         return total_min * 60.0
 
 
 def create_truck_fleet(
     count: int,
+    truck_type: str,
+    ore_payload_cap: float,
+    waste_payload_cap: float,
+    speeds: Mapping,
     prefix: str = "T",
-    truck_type: str = "CAT AD30",
-    ore_payload_cap: float = 26.1,
-    waste_payload_cap: float = 24.6,
-    speeds: Optional[dict] = None,
+    fuel_burn_rate_pct_per_sec: float = 0.005,
     **kwargs,
 ) -> List[Truck]:
-    """Creates a homogeneous or custom fleet of N trucks."""
-    trucks = []
+    """Creates a fleet of Truck dataclasses with given configuration."""
+    fleet = []
     for i in range(1, count + 1):
-        t_id = f"{prefix}{i:02d}"
-        truck_args = {
-            "truck_id": t_id,
-            "truck_type": truck_type,
-            "ore_payload_cap": ore_payload_cap,
-            "waste_payload_cap": waste_payload_cap,
+        truck_id = f"{prefix}{i:02d}" if prefix else str(i)
+        t = Truck(
+            truck_id=truck_id,
+            truck_type=truck_type,
+            ore_payload_cap=ore_payload_cap,
+            waste_payload_cap=waste_payload_cap,
+            speeds=dict(speeds),
+            fuel_burn_rate_pct_per_sec=fuel_burn_rate_pct_per_sec,
             **kwargs,
-        }
-        if speeds is not None:
-            truck_args["speeds"] = speeds
-        trucks.append(Truck(**truck_args))
-    return trucks
+        )
+        fleet.append(t)
+    return fleet
 
 
 def create_lhd_fleet(
-    levels: Union[int, Sequence[int]],
+    levels: Sequence[int],
+    bucket_ore_cap: float,
+    bucket_waste_cap: float,
+    load_spot_min: float,
+    load_min: float,
+    dump_min: float,
+    tram_dist_m: float,
+    speed_loaded_kph: float,
+    speed_empty_kph: float,
     count_per_level: int = 1,
     prefix: str = "LHD",
-    bucket_ore_cap: float = 14.0,
-    bucket_waste_cap: float = 12.5,
     **kwargs,
 ) -> List[LHD]:
     """Creates a fleet of LHD loaders assigned to specific mine levels."""
-    if isinstance(levels, int):
-        level_list = list(range(1, levels + 1))
-    else:
-        level_list = list(levels)
-
+    level_list = list(levels) if isinstance(levels, (list, tuple, range)) else list(range(1, int(levels) + 1))
     lhds = []
     for lvl in level_list:
         for idx in range(1, count_per_level + 1):
@@ -126,6 +121,12 @@ def create_lhd_fleet(
                     level_index=lvl,
                     bucket_ore_cap=bucket_ore_cap,
                     bucket_waste_cap=bucket_waste_cap,
+                    load_spot_min=load_spot_min,
+                    load_min=load_min,
+                    dump_min=dump_min,
+                    tram_dist_m=tram_dist_m,
+                    speed_loaded_kph=speed_loaded_kph,
+                    speed_empty_kph=speed_empty_kph,
                     **kwargs,
                 )
             )
@@ -133,7 +134,7 @@ def create_lhd_fleet(
 
 
 class ContinuousFleetLogistics(drs.Module):
-    def __init__(self, num_stockpiles: int = 2, *args, **kwargs):
+    def __init__(self, num_stockpiles: int = 2):
         super().__init__()
         self.num_stockpiles = num_stockpiles
         self.stockpile2_routing_fraction = drs.Variable(
@@ -145,22 +146,22 @@ class ContinuousFleetLogistics(drs.Module):
             self.routing_fractions.append(var)
             setattr(self, f"stockpile_{i+1}_routing_fraction", var)
 
-    def route(self, rate=None, ore_grade=None, *, sources=None) -> Tuple[float, float]:
-        """Split mined material into the two stockpile inflows.
-
-        Either pass a single source's ``(rate, ore_grade)`` or pass
-        ``sources=`` a sequence of mine faces to aggregate. Returns the
-        ``(ore1_in, ore2_in)`` flow rates arriving at the Ore1 / Ore2
-        stockpiles and stamps ``stockpile2_routing_fraction`` for telemetry.
-        """
+    def route(
+        self,
+        rate: float = 0.0,
+        ore_grade: float = 0.0,
+        *,
+        sources: Sequence = (),
+    ) -> Tuple[float, float]:
+        """Split mined material into the two stockpile inflows."""
         ore1 = ore2 = total = 0.0
-        if sources is not None:
+        if sources:
             for src in sources:
-                rate = src.actual_rate
-                grade = src.current_ore_grade
-                ore2 += rate * grade
-                ore1 += rate * (1.0 - grade)
-                total += rate
+                r = src.actual_rate
+                g = src.current_ore_grade
+                ore2 += r * g
+                ore1 += r * (1.0 - g)
+                total += r
         else:
             ore2 = rate * ore_grade
             ore1 = rate - ore2
@@ -174,33 +175,31 @@ class ContinuousFleetLogistics(drs.Module):
 
     def route_multi(
         self,
-        sources=None,
+        sources: Sequence = (),
         split_fn: Optional[Callable[[float, float], Sequence[float]]] = None,
     ) -> List[float]:
-        """Split mined material from arbitrary sources into N stockpile inflows.
+        """Split mined material from arbitrary sources into N stockpile inflows."""
+        if not sources:
+            return [0.0] * self.num_stockpiles
 
-        ``split_fn(rate, grade)`` returns a sequence of N flow rates for each source.
-        If ``split_fn`` is None, defaults to 2-stockpile binary split (ore1=(1-grade)*rate, ore2=grade*rate).
-        """
-        inflows = [0.0] * self.num_stockpiles
-        total = 0.0
-        if sources is not None:
-            for src in sources:
-                rate = src.actual_rate
-                grade = src.current_ore_grade
-                total += rate
-                if split_fn is not None:
-                    src_splits = split_fn(rate, grade)
-                else:
-                    src_splits = [rate * (1.0 - grade), rate * grade]
-                for idx, flow in enumerate(src_splits[: self.num_stockpiles]):
-                    inflows[idx] += flow
-        if total > 1e-6:
-            for idx, flow in enumerate(inflows):
-                if idx < len(self.routing_fractions):
-                    self.routing_fractions[idx].value = flow / total
-            if self.num_stockpiles >= 2:
-                self.stockpile2_routing_fraction.value = inflows[1] / total
+        total_rate = sum(src.actual_rate for src in sources)
+        avg_grade = (
+            sum(src.actual_rate * src.current_ore_grade for src in sources) / total_rate
+            if total_rate > 1e-6
+            else 0.0
+        )
+
+        if split_fn is not None:
+            inflows = list(split_fn(total_rate, avg_grade))
+        else:
+            ore1, ore2 = self.route(sources=sources)
+            inflows = [ore1, ore2] + [0.0] * max(0, self.num_stockpiles - 2)
+
+        if total_rate > 1e-6:
+            for i, inflow in enumerate(inflows):
+                if i < len(self.routing_fractions):
+                    self.routing_fractions[i].value = inflow / total_rate
+            if len(inflows) >= 2:
+                self.stockpile2_routing_fraction.value = inflows[1] / total_rate
+
         return inflows
-
-

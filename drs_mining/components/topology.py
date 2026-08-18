@@ -11,27 +11,20 @@ class DRSRoadSegment:
     The continuous engine integrates a -1.0 s/s decay rate down to 0.0.
     """
 
-    def __init__(self, engine, segment_id: str, length_m: float, segment_type: str):
-        self.engine = engine
+    def __init__(
+        self,
+        segment_id: str,
+        length_m: float,
+        segment_type: str,
+    ):
         self.segment_id = segment_id
         self.length_m = length_m
         self.segment_type = segment_type  # "decline", "ramp", "surface", "level"
 
-        # Continuous DRS Variable / Timer: seconds until segment is clear
-        if hasattr(engine, "create_variable"):
-            self.time_until_free = engine.create_variable(
-                name=f"road_{segment_id}_t_free", initial_value=0.0
-            )
-            self.decay_rate = engine.create_variable(
-                name=f"road_{segment_id}_decay", initial_value=-1.0
-            )
-        else:
-            self.time_until_free = drs.Timer(
-                f"road_{segment_id}_t_free", initial_value=0.0, rate=-1.0
-            )
-            self.decay_rate = drs.Variable(
-                f"road_{segment_id}_decay", initial_value=-1.0
-            )
+        self.time_until_free = drs.Timer(
+            f"road_{segment_id}_t_free", initial_value=0.0, rate=-1.0
+        )
+        self.decay_rate = drs.Variable(f"road_{segment_id}_decay", initial_value=-1.0)
 
         self.occupying_truck: Optional[Truck] = None
 
@@ -59,14 +52,26 @@ class DRSRoadSegment:
 def load_topology_dict(topology: Union[dict, list, str, bytes]) -> Union[dict, list]:
     """Loads native Python dictionary/list topology representation.
 
-    Accepts native Python dict/list directly, or JSON string/filepath.
+    Args:
+        topology: Path to JSON file, raw JSON string/bytes, or an already-loaded dict/list.
+
+    Returns:
+        The loaded topology dict/list structure.
     """
     if isinstance(topology, (dict, list)):
         return topology
-    if isinstance(topology, (str, bytes)):
-        try:
-            return json.loads(topology)
-        except (json.JSONDecodeError, TypeError):
+    elif isinstance(topology, bytes):
+        return json.loads(topology.decode("utf-8"))
+    elif isinstance(topology, str):
+        trimmed = topology.strip()
+        if (trimmed.startswith("{") and trimmed.endswith("}")) or (
+            trimmed.startswith("[") and trimmed.endswith("]")
+        ):
+            return json.loads(trimmed)
+        else:
             with open(topology, "r", encoding="utf-8") as f:
                 return json.load(f)
-    raise TypeError(f"Unsupported topology input type: {type(topology)}")
+    else:
+        raise TypeError(
+            f"Unsupported topology type: {type(topology)}. Expected dict, list, str (path or JSON), or bytes."
+        )

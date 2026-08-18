@@ -59,37 +59,99 @@ def build_shelswell_simulation(
     engine = drs.DRSEngine()
 
     # Mine topology & availability timers
-    decline = DRSRoadSegment(engine, "decline_2100m", 2100.0, "decline")
+    decline = DRSRoadSegment("decline_2100m", 2100.0, "decline")
     ramp_levels = [
-        DRSRoadSegment(engine, f"ramp_L{i}", 300.0, "ramp")
+        DRSRoadSegment(f"ramp_L{i}", 300.0, "ramp")
         for i in range(1, 8)
     ]
-    surface_rom_road = DRSRoadSegment(engine, "surf_rom", 300.0, "surface")
-    surface_waste_road = DRSRoadSegment(engine, "surf_waste", 440.0, "surface")
+    surface_rom_road = DRSRoadSegment("surf_rom", 300.0, "surface")
+    surface_waste_road = DRSRoadSegment("surf_waste", 440.0, "surface")
 
     # Loading & dumping bays (unconstrained upstream muck supply per paper spec)
     loading_bays = []
     for i in range(1, 8):
-        loading_bays.append(
-            DRSLoadingBay(engine, f"L{i}_ORE", "ORE", i, initial_muck=10_000_000.0)
+        lhd = LHD(
+            lhd_id=f"LHD_L{i}",
+            level_index=i,
+            bucket_ore_cap=14.0,
+            bucket_waste_cap=12.5,
+            load_spot_min=0.46,
+            load_min=0.88,
+            dump_min=0.73,
+            tram_dist_m=35.0,
+            speed_loaded_kph=5.89,
+            speed_empty_kph=6.78,
         )
         loading_bays.append(
-            DRSLoadingBay(engine, f"L{i}_WASTE", "WASTE", i, initial_muck=2_000_000.0)
+            DRSLoadingBay(
+                bay_id=f"L{i}_ORE",
+                bay_type="ORE",
+                level_index=i,
+                initial_muck=10_000_000.0,
+                truck_spot_min=0.82,
+                acquisition_delay_min=1.5,
+                bucket_passes=2.0,
+                lhd=lhd,
+            )
+        )
+        loading_bays.append(
+            DRSLoadingBay(
+                bay_id=f"L{i}_WASTE",
+                bay_type="WASTE",
+                level_index=i,
+                initial_muck=2_000_000.0,
+                truck_spot_min=0.82,
+                acquisition_delay_min=1.5,
+                bucket_passes=2.0,
+                lhd=lhd,
+            )
         )
 
-    rom_dump_bay = DRSDumpingBay(engine, "ROM_PAD", "ORE", "SURFACE_ROM")
-    waste_dump_bay = DRSDumpingBay(engine, "WASTE_DUMP", "WASTE", "SURFACE_WASTE_DUMP")
+    rom_dump_bay = DRSDumpingBay(
+        bay_id="ROM_PAD",
+        bay_type="ORE",
+        location_name="SURFACE_ROM",
+        dump_spot_min=0.57,
+        bed_raise_dump_min=0.88,
+    )
+    waste_dump_bay = DRSDumpingBay(
+        bay_id="WASTE_DUMP",
+        bay_type="WASTE",
+        location_name="SURFACE_WASTE_DUMP",
+        dump_spot_min=0.57,
+        bed_raise_dump_min=0.88,
+    )
     dump_bays = [rom_dump_bay, waste_dump_bay]
 
     # Fleet & vectorized state arrays
     eff_trucks_count = int(min(num_trucks * mechanical_availability, num_operators))
     eff_trucks_count = max(1, eff_trucks_count)
 
+    truck_speeds = {
+        "surface": {"empty": 17.4, "loaded": 13.4},
+        "decline": {"empty": 15.1, "loaded": 11.2},
+        "ramp":    {"empty": 12.9, "loaded": 9.2},
+        "level":   {"empty": 7.6,  "loaded": 6.6},
+    }
+
     trucks = [
-        Truck(truck_id=f"T{i:02d}", truck_type="AD30")
+        Truck(
+            truck_id=f"T{i:02d}",
+            truck_type="AD30",
+            ore_payload_cap=26.1,
+            waste_payload_cap=24.6,
+            fuel_burn_rate_pct_per_sec=0.005,
+            speeds=truck_speeds,
+        )
         for i in range(1, eff_trucks_count + 1)
     ]
-    dispatch = ShelswellDispatchController(trucks, loading_bays, {})
+    dispatch = ShelswellDispatchController(
+        trucks=trucks,
+        loading_bays=loading_bays,
+        roads={},
+        waste_trip_interval=13,
+    )
+
 
     timers = np.zeros(len(trucks), dtype=np.float64)
     fuel_pct = np.full(len(trucks), 100.0, dtype=np.float64)

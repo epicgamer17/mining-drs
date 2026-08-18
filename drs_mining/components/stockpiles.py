@@ -1,5 +1,5 @@
 import math
-from typing import List, Dict, Optional, Sequence
+from typing import Mapping, Sequence, List
 
 import drs
 from drs import Storage
@@ -11,28 +11,28 @@ class Stockpile(Storage):
     def __init__(
         self,
         name: str,
-        expected_attributes: List[str],
-        initial_mass: float = 0.0,
-        initial_attributes: Optional[Dict[str, float]] = None,
+        expected_attributes: Sequence[str],
+        initial_mass: float,
+        initial_attributes: Mapping[str, float],
         capacity: float = math.inf,
         attr_inflow: float = 1.0,
     ):
         super().__init__(name=f"{name}_mass", capacity=capacity, initial_level=initial_mass)
         self.name = name
-        self.expected_attributes = expected_attributes
+        self.expected_attributes = list(expected_attributes)
         self.attr_inflow = float(attr_inflow)
 
         # Bind current_mass to Storage's underlying Level for compatibility
         self.current_mass = self._level
         self.actual_outflow_rate = drs.Variable(f"{name}_actual_outflow_rate", 0.0)
 
-        initial_attributes = initial_attributes or {}
-        for attr in expected_attributes:
+        attrs = dict(initial_attributes)
+        for attr in self.expected_attributes:
             setattr(
                 self,
                 attr,
                 drs.Level(
-                    f"{name}_{attr}", initial_value=initial_attributes.get(attr, 0.0)
+                    f"{name}_{attr}", initial_value=attrs.get(attr, 0.0)
                 ),
             )
 
@@ -74,36 +74,39 @@ class Stockpile(Storage):
         net = inflow_rate - actual_outflow
         self.current_mass.rate = net
         for attr in self.expected_attributes:
-            level = getattr(self, attr)
-            level.rate = (
-                inflow_rate * attr_inflow
-                - actual_outflow * self.current_concentration(attr)
-            )
+            level = getattr(self, attr, None)
+            if level is not None:
+                level.rate = (
+                    inflow_rate * attr_inflow
+                    - actual_outflow * self.current_concentration(attr)
+                )
 
         if net < 0:
             self.current_mass.lower_threshold = 0.0
             for attr in self.expected_attributes:
-                getattr(self, attr).lower_threshold = 0.0
+                attr_level = getattr(self, attr, None)
+                if attr_level is not None:
+                    attr_level.lower_threshold = 0.0
 
         self.actual_outflow_rate.value = actual_outflow
         return actual_outflow
 
+    def is_terminating_condition_met(self) -> bool:
+        return False
 
-def create_stockpiles(configs: Sequence[Dict]) -> List[Stockpile]:
-    """Factory creating multiple stockpiles from a list of configuration dictionaries."""
+
+def create_stockpiles(configs: Sequence[Mapping]) -> List[Stockpile]:
+    """Factory helper to construct a list of Stockpiles from config dicts."""
     stockpiles = []
     for cfg in configs:
         stockpiles.append(
             Stockpile(
                 name=cfg["name"],
-                expected_attributes=cfg.get("expected_attributes", ["contained_ore_fraction_mass"]),
+                expected_attributes=cfg.get("expected_attributes", ()),
                 initial_mass=cfg.get("initial_mass", 0.0),
-                initial_attributes=cfg.get("initial_attributes"),
+                initial_attributes=cfg.get("initial_attributes", {}),
                 capacity=cfg.get("capacity", math.inf),
                 attr_inflow=cfg.get("attr_inflow", 1.0),
             )
         )
     return stockpiles
-
-
-

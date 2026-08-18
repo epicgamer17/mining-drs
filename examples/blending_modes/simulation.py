@@ -17,6 +17,7 @@ from drs_mining.components import (
     BlendingController,
     ContinuousFleetLogistics,
     Stockpile,
+    StochasticFaciesGenerator,
 )
 from drs_mining.components.modes import MODES
 from drs_mining.components.plot import (
@@ -70,15 +71,25 @@ def build_blending_network(
     There is no scenario container; register every stateful leaf with the
     engine in that order.
     """
-    mine = MineFace(
-        mean_ore_fraction=mean_ore_fraction,
-        std_dev_ore_fraction=std_dev_ore_fraction,
+    gen = StochasticFaciesGenerator(
+        mean_fraction=mean_ore_fraction,
+        std_dev=std_dev_ore_fraction,
         prob_new_facies=prob_new_facies,
         variation_same_facies=variation_same_facies,
+    )
+    mine = MineFace(
+        name="mine_face",
+        face_id=1,
+        generator=gen,
         min_ore_mass=min_ore_mass,
         max_ore_mass=max_ore_mass,
         total_ore_to_extract=total_ore_to_extract,
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        mean_ore_fraction=mean_ore_fraction,
+        std_dev_ore_fraction=std_dev_ore_fraction,
+        prob_new_facies=prob_new_facies,
+        variation_same_facies=variation_same_facies,
+        initial_parcel_mass=40000.0,
     )
     fleet = ContinuousFleetLogistics()
 
@@ -106,22 +117,45 @@ def build_blending_network(
     )
 
     plant = MetallurgicalPlant(
-        mine, fleet, ore1_stock, ore2_stock, max_rate=plant_max_rate
+        stockpiles=[ore1_stock, ore2_stock], max_rate=plant_max_rate
     )
     controller = BlendingController(
-        mine=mine,
+        faces=[mine],
         fleet=fleet,
         plant=plant,
         target_ore_stock_level=target_ore_stock_level,
         critical_ore2_level=critical_ore2_level,
+        total_ore_to_extract=total_ore_to_extract,
         duration_of_production_campaigns=duration_of_production_campaigns,
         duration_of_shutdowns=duration_of_shutdowns,
         duration_of_contingency_segments=duration_of_contingency_segments,
+        mode_a_ore1_milling_rate=3600.0,
+        mode_a_ore2_milling_rate=2400.0,
+        mode_a_contingency_ore1_milling_rate=3900.0,
+        mode_b_ore1_milling_rate=4600.0,
+        mode_b_ore2_milling_rate=800.0,
+        mode_b_contingency_ore2_milling_rate=2500.0,
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-        total_ore_to_extract=total_ore_to_extract,
+        fleet_shift_duration=0.5,
+        total_lhd_count=3.0,
+        total_truck_count=10.0,
+        max_lhds_per_face=(2.0,),
+        max_trucks_per_face=(6.0,),
+        face_haul_distance=(1.5, 2.2),
+        face_accessibility_fraction=(0.93, 0.91),
+        truck_velocity=15.0,
+        loader_cycle_time_hours=0.0833,
+        truck_dump_time_hours=0.033,
+        traffic_delay_per_truck_hours=0.015,
+        fleet_mechanical_availability=0.85,
+        loader_payload_tonnes=15.0,
+        truck_payload_tonnes=30.0,
+        development_rate_per_extra_truck=50.0,
+        mode_allocations={},
     )
 
     return mine, fleet, plant, controller, ore1_stock, ore2_stock
+
 
 
 

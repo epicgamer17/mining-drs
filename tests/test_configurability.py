@@ -23,13 +23,31 @@ from drs_mining import (
 
 
 def test_create_truck_and_lhd_fleets():
-    trucks = create_truck_fleet(5, prefix="HAUL", ore_payload_cap=35.0, waste_payload_cap=30.0)
+    trucks = create_truck_fleet(
+        count=5,
+        truck_type="CAT AD30",
+        ore_payload_cap=35.0,
+        waste_payload_cap=30.0,
+        speeds={"surface": {"empty": 17.4, "loaded": 13.4}},
+        prefix="HAUL",
+    )
     assert len(trucks) == 5
     assert trucks[0].truck_id == "HAUL01"
     assert trucks[4].truck_id == "HAUL05"
     assert trucks[0].ore_payload_cap == 35.0
 
-    lhds = create_lhd_fleet(levels=[1, 2, 3], count_per_level=2, bucket_ore_cap=16.0)
+    lhds = create_lhd_fleet(
+        levels=[1, 2, 3],
+        bucket_ore_cap=16.0,
+        bucket_waste_cap=14.0,
+        load_spot_min=0.4,
+        load_min=0.8,
+        dump_min=0.7,
+        tram_dist_m=30.0,
+        speed_loaded_kph=6.0,
+        speed_empty_kph=7.0,
+        count_per_level=2,
+    )
     assert len(lhds) == 6
     assert lhds[0].lhd_id == "LHD_L1_1"
     assert lhds[1].lhd_id == "LHD_L1_2"
@@ -50,20 +68,35 @@ def test_create_stockpiles_factory():
 
 
 def test_configurable_loading_and_dumping_bays():
-    engine = drs.DRSEngine()
-    lhd = LHD("LHD1", 1, tram_dist_m=20.0)
+    lhd = LHD(
+        lhd_id="LHD1",
+        level_index=1,
+        bucket_ore_cap=14.0,
+        bucket_waste_cap=12.5,
+        load_spot_min=0.4,
+        load_min=0.8,
+        dump_min=0.7,
+        tram_dist_m=20.0,
+        speed_loaded_kph=6.0,
+        speed_empty_kph=7.0,
+    )
     bay = DRSLoadingBay(
-        engine,
-        "L1_ORE",
-        "ORE",
-        1,
+        bay_id="L1_ORE",
+        bay_type="ORE",
+        level_index=1,
         initial_muck=5000.0,
-        lhd=lhd,
         truck_spot_min=0.5,
         acquisition_delay_min=1.0,
         bucket_passes=3.0,
+        lhd=lhd,
     )
-    truck = Truck("T01", ore_payload_cap=30.0)
+    truck = Truck(
+        truck_id="T01",
+        truck_type="AD30",
+        ore_payload_cap=30.0,
+        waste_payload_cap=25.0,
+        speeds={"surface": {"empty": 17.4, "loaded": 13.4}},
+    )
     assert bay.truck_spot_min == 0.5
     assert bay.bucket_passes == 3.0
 
@@ -75,10 +108,9 @@ def test_configurable_loading_and_dumping_bays():
     assert bay.total_load_duration_sec == duration
 
     dump_bay = DRSDumpingBay(
-        engine,
-        "ROM",
-        "ORE",
-        "SURFACE_ROM",
+        bay_id="ROM",
+        bay_type="ORE",
+        location_name="SURFACE_ROM",
         dump_spot_min=0.4,
         bed_raise_dump_min=0.6,
     )
@@ -87,17 +119,46 @@ def test_configurable_loading_and_dumping_bays():
 
 
 def test_configurable_dispatch_controller():
-    trucks = create_truck_fleet(3)
-    bay1 = DRSLoadingBay(None, "L1_ORE", "ORE", 1, initial_muck=100.0)
-    bay2 = DRSLoadingBay(None, "L2_ORE", "ORE", 2, initial_muck=500.0)
+    truck_speeds = {"surface": {"empty": 17.4, "loaded": 13.4}}
+    trucks = create_truck_fleet(
+        count=3,
+        truck_type="AD30",
+        ore_payload_cap=26.1,
+        waste_payload_cap=24.6,
+        speeds=truck_speeds,
+    )
+    lhd1 = LHD("LHD1", 1, 14.0, 12.5, 0.4, 0.8, 0.7, 30.0, 6.0, 7.0)
+    lhd2 = LHD("LHD2", 2, 14.0, 12.5, 0.4, 0.8, 0.7, 30.0, 6.0, 7.0)
+    bay1 = DRSLoadingBay(
+        bay_id="L1_ORE",
+        bay_type="ORE",
+        level_index=1,
+        initial_muck=100.0,
+        truck_spot_min=0.8,
+        acquisition_delay_min=1.5,
+        bucket_passes=2.0,
+        lhd=lhd1,
+    )
+    bay2 = DRSLoadingBay(
+        bay_id="L2_ORE",
+        bay_type="ORE",
+        level_index=2,
+        initial_muck=500.0,
+        truck_spot_min=0.8,
+        acquisition_delay_min=1.5,
+        bucket_passes=2.0,
+        lhd=lhd2,
+    )
 
     controller = ShelswellDispatchController(
         trucks=trucks,
         loading_bays=[bay1, bay2],
+        roads={},
         waste_trip_interval=5,
         refuel_threshold_pct=20.0,
         fuel_depot_location="CUSTOM_DEPOT",
         parking_location="CUSTOM_PARKING",
+        dispatch_strategy="highest_muck",
     )
 
     trucks[0].fuel_level_pct = 19.0
@@ -108,6 +169,11 @@ def test_configurable_dispatch_controller():
     rr_ctrl = ShelswellDispatchController(
         trucks=trucks,
         loading_bays=[bay1, bay2],
+        roads={},
+        waste_trip_interval=0,
+        refuel_threshold_pct=15.0,
+        fuel_depot_location="SURFACE_FUEL_DEPOT",
+        parking_location="SURFACE_PARKING",
         dispatch_strategy="round_robin",
     )
     trucks[1].fuel_level_pct = 100.0
@@ -117,8 +183,21 @@ def test_configurable_dispatch_controller():
 
 def test_multi_stockpile_fleet_routing():
     fleet = ContinuousFleetLogistics(num_stockpiles=3)
-    gen1 = StochasticFaciesGenerator(mean_fraction=0.2, std_dev=0.05)
-    face = MineFace(face_id=1, generator=gen1)
+    gen1 = StochasticFaciesGenerator(mean_fraction=0.2, std_dev=0.05, prob_new_facies=0.3, variation_same_facies=0.01)
+    face = MineFace(
+        name="mine_face_1",
+        face_id=1,
+        generator=gen1,
+        min_ore_mass=30000.0,
+        max_ore_mass=50000.0,
+        total_ore_to_extract=6600000.0,
+        ore_to_be_extracted_during_warming_period=600000.0,
+        mean_ore_fraction=0.2,
+        std_dev_ore_fraction=0.05,
+        prob_new_facies=0.3,
+        variation_same_facies=0.01,
+        initial_parcel_mass=30000.0,
+    )
     face.target_rate = 1000.0
     face.step(1.0)
 

@@ -1,6 +1,6 @@
 """Unified flat, tuple-returning simulation builder for mining blending operations."""
 
-from typing import Optional, List, Sequence, Union
+from typing import Sequence, Mapping, Union
 from .stockpiles import Stockpile
 from .mine_face import MineFace
 from .fleet import ContinuousFleetLogistics
@@ -12,9 +12,9 @@ from .generators import StochasticFaciesGenerator
 def build_mining_simulation(
     *,
     num_faces: int = 1,
-    faces: Optional[List[MineFace]] = None,
-    face_generators: Optional[List] = None,
-    face_mean_fractions: Optional[Sequence[float]] = None,
+    faces: Sequence[MineFace] = (),
+    face_generators: Sequence = (),
+    face_mean_fractions: Sequence[float] = (),
     controller_cls=BlendingController,
     mean_ore_fraction: float = 0.30,
     std_dev_ore_fraction: float = 0.05,
@@ -38,10 +38,10 @@ def build_mining_simulation(
     fleet_shift_duration: float = 0.5,
     total_lhd_count: float = 3.0,
     total_truck_count: float = 10.0,
-    max_lhds_per_face: Union[float, Sequence[float]] = 2.0,
-    max_trucks_per_face: Union[float, Sequence[float]] = 6.0,
-    face_haul_distance: Union[float, Sequence[float]] = (1.5, 2.2),
-    face_accessibility_fraction: Union[float, Sequence[float]] = (0.93, 0.91),
+    max_lhds_per_face: Sequence[float] = (2.0,),
+    max_trucks_per_face: Sequence[float] = (6.0,),
+    face_haul_distance: Sequence[float] = (1.5, 2.2),
+    face_accessibility_fraction: Sequence[float] = (0.93, 0.91),
     truck_velocity: float = 15.0,
     loader_cycle_time_hours: float = 0.0833,
     truck_dump_time_hours: float = 0.033,
@@ -50,7 +50,7 @@ def build_mining_simulation(
     loader_payload_tonnes: float = 15.0,
     truck_payload_tonnes: float = 30.0,
     development_rate_per_extra_truck: float = 50.0,
-    mode_allocations: Optional[dict] = None,
+    mode_allocations: Mapping = (),
 ):
     """Builds a mining blending simulation for arbitrary number of mine faces (N >= 1).
 
@@ -59,23 +59,29 @@ def build_mining_simulation(
         When ``num_faces == 1`` and ``faces`` is not explicitly provided,
         ``faces`` will be a single-element list ``[mine_face]``.
     """
-    if faces is None:
-        if face_generators is not None:
+    if not faces:
+        if face_generators:
             created_faces = []
             for i, gen in enumerate(face_generators, 1):
                 created_faces.append(
                     MineFace(
+                        name=f"mine_face_{i}",
                         face_id=i,
                         generator=gen,
                         min_ore_mass=min_ore_mass,
                         max_ore_mass=max_ore_mass,
                         total_ore_to_extract=total_ore_to_extract,
                         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+                        mean_ore_fraction=gen.mean_fraction,
+                        std_dev_ore_fraction=gen.std_dev,
+                        prob_new_facies=prob_new_facies,
+                        variation_same_facies=variation_same_facies,
+                        initial_parcel_mass=min_ore_mass,
                     )
                 )
             faces = created_faces
         else:
-            if face_mean_fractions is not None:
+            if face_mean_fractions:
                 means = list(face_mean_fractions)
                 num_faces = len(means)
             elif num_faces == 1:
@@ -97,18 +103,23 @@ def build_mining_simulation(
                 )
                 created_faces.append(
                     MineFace(
-                        face_id=i if num_faces > 1 else None,
                         name=f"mine_face_{i}" if num_faces > 1 else "mine_face",
+                        face_id=i if num_faces > 1 else 1,
                         generator=gen,
-                        mean_ore_fraction=mean_frac,
-                        std_dev_ore_fraction=std_dev,
                         min_ore_mass=min_ore_mass,
                         max_ore_mass=max_ore_mass,
                         total_ore_to_extract=total_ore_to_extract,
                         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+                        mean_ore_fraction=mean_frac,
+                        std_dev_ore_fraction=std_dev,
+                        prob_new_facies=prob_new_facies,
+                        variation_same_facies=variation_same_facies,
+                        initial_parcel_mass=min_ore_mass,
                     )
                 )
             faces = created_faces
+    else:
+        faces = list(faces)
 
     fleet = ContinuousFleetLogistics()
 
@@ -134,7 +145,7 @@ def build_mining_simulation(
         attr_inflow=0.0,
     )
 
-    plant = MetallurgicalPlant(None, fleet, ore1_stock, ore2_stock)
+    plant = MetallurgicalPlant(stockpiles=[ore1_stock, ore2_stock])
 
     controller = controller_cls(
         faces=faces,
@@ -142,17 +153,17 @@ def build_mining_simulation(
         plant=plant,
         target_ore_stock_level=target_ore_stock_level,
         critical_ore2_level=critical_ore2_level,
+        total_ore_to_extract=total_ore_to_extract,
         duration_of_production_campaigns=duration_of_production_campaigns,
         duration_of_shutdowns=duration_of_shutdowns,
         duration_of_contingency_segments=duration_of_contingency_segments,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-        total_ore_to_extract=total_ore_to_extract,
         mode_a_ore1_milling_rate=mode_a_ore1_milling_rate,
         mode_a_ore2_milling_rate=mode_a_ore2_milling_rate,
         mode_a_contingency_ore1_milling_rate=mode_a_contingency_ore1_milling_rate,
         mode_b_ore1_milling_rate=mode_b_ore1_milling_rate,
         mode_b_ore2_milling_rate=mode_b_ore2_milling_rate,
         mode_b_contingency_ore2_milling_rate=mode_b_contingency_ore2_milling_rate,
+        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
         fleet_shift_duration=fleet_shift_duration,
         total_lhd_count=total_lhd_count,
         total_truck_count=total_truck_count,

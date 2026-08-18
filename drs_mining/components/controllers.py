@@ -1,5 +1,5 @@
 import math
-from typing import Optional, List, Dict, Union, Sequence, Tuple
+from typing import List, Dict, Mapping, Sequence
 import drs
 from .modes import MODES, RequireDecision
 from .mine_face import MineFace
@@ -8,12 +8,7 @@ from .plant import MetallurgicalPlant
 
 
 class BlendingController(drs.Module):
-    r"""Unified state container and mode/allocation bookkeeping for blending control.
-
-    Handles single-face ($N=1$) and multi-face ($N \ge 2$) operations seamlessly,
-    supporting arbitrary fleet sizes, custom mode milling rates, discrete fleet
-    distribution across faces, surging corrections, and campaign scheduling.
-    """
+    r"""Unified state container and mode/allocation bookkeeping for blending control."""
 
     _MODE_TIMER_ATTRS = {
         "MODE_A": "cumulative_time_mode_a",
@@ -35,15 +30,6 @@ class BlendingController(drs.Module):
         "SHUTDOWN": (None, None),
     }
 
-    _DEFAULT_RATES = {
-        "mode_a_ore1_milling_rate": 3600.0,
-        "mode_a_ore2_milling_rate": 2400.0,
-        "mode_a_contingency_ore1_milling_rate": 3900.0,
-        "mode_b_ore1_milling_rate": 4600.0,
-        "mode_b_ore2_milling_rate": 800.0,
-        "mode_b_contingency_ore2_milling_rate": 2500.0,
-    }
-
     _CONTINGENCY_MODES = {"MODE_A_CONTINGENCY", "MODE_B_CONTINGENCY"}
 
     _RL_ACTION_MODES = [
@@ -55,54 +41,45 @@ class BlendingController(drs.Module):
 
     def __init__(
         self,
-        faces: Optional[Union[MineFace, Sequence[MineFace]]] = None,
-        mine: Optional[MineFace] = None,
-        fleet: Optional[ContinuousFleetLogistics] = None,
-        plant: Optional[MetallurgicalPlant] = None,
-        target_ore_stock_level: float = 60000.0,
-        critical_ore2_level: float = 20400.0,
-        duration_of_production_campaigns: float = 34.0,
-        duration_of_shutdowns: float = 1.0,
-        duration_of_contingency_segments: float = 1.0,
-        ore_to_be_extracted_during_warming_period: float = 600000.0,
-        total_ore_to_extract: float = 6600000.0,
-        mode_a_ore1_milling_rate: float = 3600.0,
-        mode_a_ore2_milling_rate: float = 2400.0,
-        mode_a_contingency_ore1_milling_rate: float = 3900.0,
-        mode_b_ore1_milling_rate: float = 4600.0,
-        mode_b_ore2_milling_rate: float = 800.0,
-        mode_b_contingency_ore2_milling_rate: float = 2500.0,
-        fleet_shift_duration: float = 0.5,
-        total_lhd_count: float = 3.0,
-        total_truck_count: float = 10.0,
-        max_lhds_per_face: Union[float, Sequence[float]] = 2.0,
-        max_trucks_per_face: Union[float, Sequence[float]] = 6.0,
-        face_haul_distance: Union[float, Sequence[float]] = (1.5, 2.2),
-        face_accessibility_fraction: Union[float, Sequence[float]] = (0.93, 0.91),
-        truck_velocity: float = 15.0,
-        loader_cycle_time_hours: float = 0.0833,
-        truck_dump_time_hours: float = 0.033,
-        traffic_delay_per_truck_hours: float = 0.015,
-        fleet_mechanical_availability: float = 0.85,
-        loader_payload_tonnes: float = 15.0,
-        truck_payload_tonnes: float = 30.0,
-        development_rate_per_extra_truck: float = 50.0,
-        mode_allocations: Optional[Dict[str, List[float]]] = None,
+        faces: Sequence[MineFace],
+        fleet: ContinuousFleetLogistics,
+        plant: MetallurgicalPlant,
+        target_ore_stock_level: float,
+        critical_ore2_level: float,
+        total_ore_to_extract: float,
+        duration_of_production_campaigns: float,
+        duration_of_shutdowns: float,
+        duration_of_contingency_segments: float,
+        mode_a_ore1_milling_rate: float,
+        mode_a_ore2_milling_rate: float,
+        mode_a_contingency_ore1_milling_rate: float,
+        mode_b_ore1_milling_rate: float,
+        mode_b_ore2_milling_rate: float,
+        mode_b_contingency_ore2_milling_rate: float,
+        ore_to_be_extracted_during_warming_period: float,
+        fleet_shift_duration: float,
+        total_lhd_count: float,
+        total_truck_count: float,
+        max_lhds_per_face: Sequence[float],
+        max_trucks_per_face: Sequence[float],
+        face_haul_distance: Sequence[float],
+        face_accessibility_fraction: Sequence[float],
+        truck_velocity: float,
+        loader_cycle_time_hours: float,
+        truck_dump_time_hours: float,
+        traffic_delay_per_truck_hours: float,
+        fleet_mechanical_availability: float,
+        loader_payload_tonnes: float,
+        truck_payload_tonnes: float,
+        development_rate_per_extra_truck: float,
+        mode_allocations: Mapping[str, Sequence[float]],
     ):
         super().__init__()
-        if faces is not None:
-            if isinstance(faces, (list, tuple)):
-                self.faces = list(faces)
-            else:
-                self.faces = [faces]
-            self.mine = self.faces[0] if len(self.faces) == 1 else None
-        elif mine is not None:
-            self.mine = mine
-            self.faces = [mine]
-        else:
-            self.mine = None
-            self.faces = []
+        self.faces = list(faces) if isinstance(faces, (list, tuple)) else [faces]
+        if not self.faces:
+            raise ValueError("BlendingController requires at least one MineFace in faces.")
 
+        self.mine = self.faces[0] if len(self.faces) == 1 else None
         self.fleet = fleet
         self.plant = plant
         self.target_ore_stock_level = target_ore_stock_level
@@ -123,10 +100,16 @@ class BlendingController(drs.Module):
         self.fleet_shift_duration = fleet_shift_duration
         self.total_lhd_count = total_lhd_count
         self.total_truck_count = total_truck_count
-        self.max_lhds_per_face = max_lhds_per_face
-        self.max_trucks_per_face = max_trucks_per_face
-        self.face_haul_distance = face_haul_distance
-        self.face_accessibility_fraction = face_accessibility_fraction
+
+        n_faces = len(self.faces)
+        self.max_lhds_per_face = self._normalize_param_list(max_lhds_per_face, n_faces, 2.0)
+        self.max_trucks_per_face = self._normalize_param_list(max_trucks_per_face, n_faces, 6.0)
+        self.face_haul_distance = self._normalize_param_list(face_haul_distance, n_faces, 0.0)
+        self.face_accessibility_fraction = [
+            max(0.0, min(1.0, v))
+            for v in self._normalize_param_list(face_accessibility_fraction, n_faces, 1.0)
+        ]
+
         self.truck_velocity = truck_velocity
         self.loader_cycle_time_hours = loader_cycle_time_hours
         self.truck_dump_time_hours = truck_dump_time_hours
@@ -232,11 +215,22 @@ class BlendingController(drs.Module):
             self.face_match_factors.append(match_factor)
             self.face_truck_cycle_times.append(truck_cycle)
 
-        self._mode_allocations = mode_allocations or self._precompute_allocations()
+        self._mode_allocations = dict(mode_allocations) if mode_allocations else self._precompute_allocations()
         self.current_shift_allocations = None
         self.current_shift_mode_name = None
         self.fleet_shift_timer = drs.Timer("fleet_shift_timer", initial_value=0.0)
         self.fleet_shift_count = drs.Variable("fleet_shift_count", 0)
+
+    @staticmethod
+    def _normalize_param_list(param, count: int, default_val: float) -> List[float]:
+        if isinstance(param, (int, float)):
+            return [float(param)] * count
+        lst = [float(x) for x in param]
+        if len(lst) >= count:
+            return lst[:count]
+        if len(lst) > 0:
+            return lst + [lst[-1]] * (count - len(lst))
+        return [default_val] * count
 
     @property
     def total_duration(self) -> float:
@@ -251,9 +245,9 @@ class BlendingController(drs.Module):
             + self.cumulative_time_shutdown.value
         )
 
-    def active_duration(self, current_time: float = None) -> float:
+    def active_duration(self, current_time: float = -1.0) -> float:
         """Encapsulate state calculations for active operational duration."""
-        if current_time is None:
+        if current_time < 0.0:
             current_time = self.total_duration
         return max(0.0, current_time - self.cumulative_time_shutdown.value)
 
@@ -280,14 +274,11 @@ class BlendingController(drs.Module):
         """Compute the target extraction and stockpile outflow rates for a mode."""
         name = mode.name if hasattr(mode, "name") else str(mode)
         ore1, ore2 = self._read_rates(name)
+        eff_fleet = fleet or self.fleet
 
         if "_MINE_SURGING" in name:
             self.total_system_ore_mass.lower_threshold = self.target_ore_stock_level
-            p = (
-                fleet.stockpile2_routing_fraction.value
-                if fleet is not None
-                else 0.0
-            )
+            p = eff_fleet.stockpile2_routing_fraction.value if eff_fleet else 0.0
             if p <= 1e-4 and len(self.faces) > 0:
                 p = self.faces[0]._get_current_attr_value()
             if name == "MODE_A_MINE_SURGING":
@@ -304,31 +295,22 @@ class BlendingController(drs.Module):
         self.target_stock2_outflow_rate.value = ore2
         return extraction, ore1, ore2
 
-    def _read_rates(self, name):
+    def _read_rates(self, name: str) -> tuple:
         """Read the per-mode milling-rate pair (ore1, ore2) for ``name``."""
         ore1_attr, ore2_attr = self._RATE_MAP.get(name, (None, None))
-        ore1 = (
-            getattr(self, ore1_attr, self._DEFAULT_RATES.get(ore1_attr, 0.0))
-            if ore1_attr
-            else 0.0
-        )
-        ore2 = (
-            getattr(self, ore2_attr, self._DEFAULT_RATES.get(ore2_attr, 0.0))
-            if ore2_attr
-            else 0.0
-        )
+        ore1 = getattr(self, ore1_attr, 0.0) if ore1_attr else 0.0
+        ore2 = getattr(self, ore2_attr, 0.0) if ore2_attr else 0.0
         return ore1, ore2
 
     def _reset_mode_timers_if_fresh(self):
-        sources = self.faces
-        if sources and abs(sum(s.net_extracted_mass for s in sources)) < 1e-6:
+        if self.faces and abs(sum(s.net_extracted_mass for s in self.faces)) < 1e-6:
             for timer_name in self._MODE_TIMER_ATTRS.values():
                 getattr(self, timer_name).reset()
 
     def _next_mode(self, ore1_stock, ore2_stock):
         name = self.active_operating_mode.value.name
-        eps = getattr(self, "stockout_epsilon", 1e-9)
-        target_stock = getattr(self, "target_ore_stock_level", 60000.0)
+        eps = 1e-9
+        target_stock = self.target_ore_stock_level
 
         if self._campaign_complete():
             if name == "SHUTDOWN":
@@ -438,9 +420,8 @@ class BlendingController(drs.Module):
 
     def is_terminating_condition_met(self) -> bool:
         """True once the combined extraction of every mine source reaches the target."""
-        sources = self.faces
         return (
-            sum(s.cumulative_extracted_mass.value for s in sources)
+            sum(s.cumulative_extracted_mass.value for s in self.faces)
             >= self.total_ore_to_extract
         )
 
@@ -469,14 +450,7 @@ class BlendingController(drs.Module):
         if num_faces == 0:
             return {}
 
-        face_ore1_fracs = []
-        for f in self.faces:
-            if hasattr(f, "generator") and hasattr(f.generator, "mean_fraction"):
-                face_ore1_fracs.append(1.0 - f.generator.mean_fraction)
-            elif hasattr(f, "mean_ore_fraction"):
-                face_ore1_fracs.append(1.0 - f.mean_ore_fraction)
-            else:
-                face_ore1_fracs.append(0.5)
+        face_ore1_fracs = [1.0 - f.mean_ore_fraction for f in self.faces]
 
         modes_to_compute = {
             "MODE_A": (
@@ -574,28 +548,12 @@ class BlendingController(drs.Module):
 
         return result
 
-    def _get_allocations_for_mode(self, mode_name):
+    def _get_allocations_for_mode(self, mode_name: str) -> list:
         fracs = self._mode_allocations.get(mode_name)
         if fracs is None:
             base_key = mode_name.replace("_MINE_SURGING", "")
             fracs = self._mode_allocations.get(base_key)
         return fracs
-
-    def _face_config_value(self, name, face_index, default):
-        values = getattr(self, name, None)
-        if values is None:
-            return default
-        if isinstance(values, (int, float)):
-            return float(values)
-        if isinstance(values, (list, tuple)):
-            if face_index < len(values):
-                return values[face_index]
-            if len(values) > 0:
-                return values[-1]
-        return default
-
-    def _clamp(self, value, lower, upper):
-        return max(lower, min(upper, value))
 
     def _refresh_shift_allocation_fractions(self):
         if not self.current_shift_allocations:
@@ -605,9 +563,9 @@ class BlendingController(drs.Module):
 
         self._distribute_discrete_fleet(self.current_shift_allocations)
 
-    def _distribute_discrete_fleet(self, fracs):
-        total_lhd = int(getattr(self, "total_lhd_count", 3.0))
-        total_truck = int(getattr(self, "total_truck_count", 10.0))
+    def _distribute_discrete_fleet(self, fracs: list):
+        total_lhd = int(self.total_lhd_count)
+        total_truck = int(self.total_truck_count)
 
         num_faces = len(self.faces)
         if num_faces == 0:
@@ -615,18 +573,17 @@ class BlendingController(drs.Module):
 
         unassigned_lhds = total_lhd
         lhd_assignments = [0] * num_faces
-
         face_priorities = sorted(range(num_faces), key=lambda i: fracs[i], reverse=True)
 
         for i in face_priorities:
-            max_lhds = int(self._face_config_value("max_lhds_per_face", i, float("inf")))
+            max_lhds = int(self.max_lhds_per_face[i])
             target = math.floor(total_lhd * fracs[i])
             assigned = min(target, max_lhds, unassigned_lhds)
             lhd_assignments[i] = assigned
             unassigned_lhds -= assigned
 
         for i in face_priorities:
-            max_lhds = int(self._face_config_value("max_lhds_per_face", i, float("inf")))
+            max_lhds = int(self.max_lhds_per_face[i])
             if unassigned_lhds <= 0:
                 break
             if lhd_assignments[i] < max_lhds:
@@ -640,14 +597,14 @@ class BlendingController(drs.Module):
         truck_assignments = [0] * num_faces
 
         for i in face_priorities:
-            max_trucks = int(self._face_config_value("max_trucks_per_face", i, float("inf")))
+            max_trucks = int(self.max_trucks_per_face[i])
             target = math.floor(total_truck * fracs[i])
             assigned = min(target, max_trucks, unassigned_trucks)
             truck_assignments[i] = assigned
             unassigned_trucks -= assigned
 
         for i in face_priorities:
-            max_trucks = int(self._face_config_value("max_trucks_per_face", i, float("inf")))
+            max_trucks = int(self.max_trucks_per_face[i])
             if unassigned_trucks <= 0:
                 break
             if truck_assignments[i] < max_trucks:
@@ -657,23 +614,21 @@ class BlendingController(drs.Module):
         for i in range(num_faces):
             self.face_truck_allocations[i].value = float(truck_assignments[i])
 
-    def _face_real_extraction_rate(self, face_index, target_extraction_rate):
+    def _face_real_extraction_rate(self, face_index: int, target_extraction_rate: float) -> float:
         lhd_alloc = self.face_lhd_allocations[face_index].value
         truck_alloc = self.face_truck_allocations[face_index].value
 
-        distance = self._face_config_value("face_haul_distance", face_index, 0.0)
-        accessibility = self._clamp(
-            self._face_config_value("face_accessibility_fraction", face_index, 1.0),
-            0.0,
-            1.0,
-        )
-        mechanical_availability = getattr(self, "fleet_mechanical_availability", 0.85)
+        distance = self.face_haul_distance[face_index]
+        accessibility = self.face_accessibility_fraction[face_index]
+        mechanical_availability = self.fleet_mechanical_availability
 
         traffic_delay = self.traffic_delay_per_truck_hours * truck_alloc
-        travel_time = (2 * distance) / self.truck_velocity
+        travel_time = (2 * distance) / self.truck_velocity if self.truck_velocity > 0 else 0.0
 
-        truck_loading_time_hours = self.loader_cycle_time_hours * (
-            self.truck_payload_tonnes / self.loader_payload_tonnes
+        truck_loading_time_hours = (
+            self.loader_cycle_time_hours * (self.truck_payload_tonnes / self.loader_payload_tonnes)
+            if self.loader_payload_tonnes > 0
+            else 0.0
         )
 
         truck_cycle_time = (
@@ -703,6 +658,8 @@ class BlendingController(drs.Module):
                 (lhd_alloc / self.loader_cycle_time_hours)
                 * self.loader_payload_tonnes
                 * 24.0
+                if self.loader_cycle_time_hours > 0
+                else 0.0
             )
 
         final_real_extraction_rate = max_rate * accessibility * mechanical_availability
@@ -726,7 +683,7 @@ class BlendingController(drs.Module):
         self._refresh_shift_allocation_fractions()
         self.fleet_shift_count.value += 1
 
-    def schedule_fleet_shifts(self, mode_name):
+    def schedule_fleet_shifts(self, mode_name: str):
         """Drive the fleet-shift timer and reallocate the fleet when due."""
         self.fleet_shift_timer.rate = 1.0
         self.fleet_shift_timer.upper_threshold = self.fleet_shift_duration
@@ -737,7 +694,7 @@ class BlendingController(drs.Module):
             self.fleet_shift_timer.reset()
             self._reallocate_fleet_for_shift()
 
-    def drive_faces(self, mine_target):
+    def drive_faces(self, mine_target: float):
         """Split ``mine_target`` across the faces and drive each face's rate."""
         self.total_extra_trucks.value = 0.0
         fracs = self.current_shift_allocations

@@ -114,16 +114,32 @@ def build_multi_face_network(
         variation_same_facies=variation_same_facies,
     )
     face1 = MineFace(
+        name="mine_face_1",
         face_id=1,
         generator=gen1,
+        min_ore_mass=30000.0,
+        max_ore_mass=50000.0,
         total_ore_to_extract=total_ore_to_extract,
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        mean_ore_fraction=0.15,
+        std_dev_ore_fraction=0.075,
+        prob_new_facies=prob_new_facies,
+        variation_same_facies=variation_same_facies,
+        initial_parcel_mass=30000.0,
     )
     face2 = MineFace(
+        name="mine_face_2",
         face_id=2,
         generator=gen2,
+        min_ore_mass=30000.0,
+        max_ore_mass=50000.0,
         total_ore_to_extract=total_ore_to_extract,
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        mean_ore_fraction=0.45,
+        std_dev_ore_fraction=0.025,
+        prob_new_facies=prob_new_facies,
+        variation_same_facies=variation_same_facies,
+        initial_parcel_mass=30000.0,
     )
     fleet = ContinuousFleetLogistics()
 
@@ -151,7 +167,7 @@ def build_multi_face_network(
     )
 
     plant = MetallurgicalPlant(
-        None, fleet, ore1_stock, ore2_stock, max_rate=plant_max_rate
+        stockpiles=[ore1_stock, ore2_stock], max_rate=plant_max_rate
     )
     controller = BlendingController(
         faces=[face1, face2],
@@ -159,18 +175,17 @@ def build_multi_face_network(
         plant=plant,
         target_ore_stock_level=target_ore_stock_level,
         critical_ore2_level=critical_ore2_level,
+        total_ore_to_extract=total_ore_to_extract,
         duration_of_production_campaigns=duration_of_production_campaigns,
         duration_of_shutdowns=duration_of_shutdowns,
         duration_of_contingency_segments=duration_of_contingency_segments,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-
-        total_ore_to_extract=total_ore_to_extract,
         mode_a_ore1_milling_rate=mode_a_ore1_milling_rate,
         mode_a_ore2_milling_rate=mode_a_ore2_milling_rate,
         mode_a_contingency_ore1_milling_rate=mode_a_contingency_ore1_milling_rate,
         mode_b_ore1_milling_rate=mode_b_ore1_milling_rate,
         mode_b_ore2_milling_rate=mode_b_ore2_milling_rate,
         mode_b_contingency_ore2_milling_rate=mode_b_contingency_ore2_milling_rate,
+        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
         fleet_shift_duration=fleet_shift_duration,
         total_lhd_count=total_lhd_count,
         total_truck_count=total_truck_count,
@@ -186,6 +201,7 @@ def build_multi_face_network(
         loader_payload_tonnes=loader_payload_tonnes,
         truck_payload_tonnes=truck_payload_tonnes,
         development_rate_per_extra_truck=development_rate_per_extra_truck,
+        mode_allocations={},
     )
 
     return [face1, face2], fleet, plant, controller, ore1_stock, ore2_stock

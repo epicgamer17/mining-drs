@@ -9,7 +9,14 @@ from drs_mining.components.dispatch import ShelswellDispatchController
 
 
 def test_truck_discrete_state():
-    truck = Truck(truck_id="T01", truck_type="AD30")
+    speeds = {"surface": {"empty": 17.4, "loaded": 13.4}}
+    truck = Truck(
+        truck_id="T01",
+        truck_type="AD30",
+        ore_payload_cap=26.1,
+        waste_payload_cap=24.6,
+        speeds=speeds,
+    )
     assert truck.truck_id == "T01"
     assert truck.state == TruckState.PARKED
     assert truck.ore_payload_cap == 26.1
@@ -25,13 +32,16 @@ def test_truck_discrete_state():
 
 
 def test_road_availability_timer():
-    module = drs.Module()
-    engine = drs.DRSEngine()
-    engine.register(module)
-    road = DRSRoadSegment(engine, "test_segment", length_m=100.0, segment_type="decline")
+    road = DRSRoadSegment("test_segment", length_m=100.0, segment_type="decline")
 
     assert road.is_available()
-    truck = Truck(truck_id="T01")
+    truck = Truck(
+        truck_id="T01",
+        truck_type="AD30",
+        ore_payload_cap=26.1,
+        waste_payload_cap=24.6,
+        speeds={"decline": {"empty": 15.1, "loaded": 11.2}},
+    )
 
     travel_time_s = road.occupy_segment(truck)
     assert travel_time_s > 0.0
@@ -43,11 +53,35 @@ def test_road_availability_timer():
 
 
 def test_loading_and_dumping_bays():
-    module = drs.Module()
-    engine = drs.DRSEngine()
-    engine.register(module)
-    bay = DRSLoadingBay(engine, "L1_ORE", "ORE", 1, initial_muck=1000.0)
-    truck = Truck(truck_id="T01")
+    lhd = LHD(
+        lhd_id="LHD_L1",
+        level_index=1,
+        bucket_ore_cap=14.0,
+        bucket_waste_cap=12.5,
+        load_spot_min=0.46,
+        load_min=0.88,
+        dump_min=0.73,
+        tram_dist_m=35.0,
+        speed_loaded_kph=5.89,
+        speed_empty_kph=6.78,
+    )
+    bay = DRSLoadingBay(
+        bay_id="L1_ORE",
+        bay_type="ORE",
+        level_index=1,
+        initial_muck=1000.0,
+        truck_spot_min=0.82,
+        acquisition_delay_min=1.5,
+        bucket_passes=2.0,
+        lhd=lhd,
+    )
+    truck = Truck(
+        truck_id="T01",
+        truck_type="AD30",
+        ore_payload_cap=26.1,
+        waste_payload_cap=24.6,
+        speeds={"surface": {"empty": 17.4, "loaded": 13.4}},
+    )
 
     started = bay.start_loading(truck)
     assert started
@@ -61,22 +95,46 @@ def test_loading_and_dumping_bays():
     assert bay.active_truck is None
 
     # Test dumping bay
-    dump_bay = DRSDumpingBay(engine, "ROM_PAD", "ORE", "SURFACE_ROM")
+    dump_bay = DRSDumpingBay(
+        bay_id="ROM_PAD",
+        bay_type="ORE",
+        location_name="SURFACE_ROM",
+        dump_spot_min=0.57,
+        bed_raise_dump_min=0.88,
+    )
+
     dump_started = dump_bay.start_dumping(truck)
     assert dump_started
     assert truck.state == TruckState.DUMPING
 
     dump_bay.update_continuous_step(100.0)
     assert dump_bay.dumped_total.value > 0.0
-    assert truck.state == TruckState.PARKED
+    assert truck.state == TruckState.TRAVEL_EMPTY
 
 
 def test_dispatch_controller():
-    truck = Truck(truck_id="T01")
-    bay1 = DRSLoadingBay(None, "L1_ORE", "ORE", 1, initial_muck=500.0)
-    bay2 = DRSLoadingBay(None, "L2_ORE", "ORE", 2, initial_muck=2000.0)
+    truck = Truck(
+        truck_id="T01",
+        truck_type="AD30",
+        ore_payload_cap=26.1,
+        waste_payload_cap=24.6,
+        speeds={"surface": {"empty": 17.4, "loaded": 13.4}},
+    )
+    lhd1 = LHD("LHD_L1", 1, 14.0, 12.5, 0.46, 0.88, 0.73, 35.0, 5.89, 6.78)
+    lhd2 = LHD("LHD_L2", 2, 14.0, 12.5, 0.46, 0.88, 0.73, 35.0, 5.89, 6.78)
+    bay1 = DRSLoadingBay("L1_ORE", "ORE", 1, 500.0, 0.82, 1.5, 2.0, lhd1)
+    bay2 = DRSLoadingBay("L2_ORE", "ORE", 2, 2000.0, 0.82, 1.5, 2.0, lhd2)
 
-    controller = ShelswellDispatchController([truck], [bay1, bay2])
+    controller = ShelswellDispatchController(
+        trucks=[truck],
+        loading_bays=[bay1, bay2],
+        roads={},
+        waste_trip_interval=0,
+        refuel_threshold_pct=15.0,
+        fuel_depot_location="SURFACE_FUEL_DEPOT",
+        parking_location="SURFACE_PARKING",
+        dispatch_strategy="highest_muck",
+    )
 
     # Normal dispatch: should select bay2 with highest unclaimed muck
     controller.assign_next_destination(truck)

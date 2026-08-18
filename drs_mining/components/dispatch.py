@@ -1,30 +1,26 @@
-from typing import List, Dict, Optional
+from typing import List, Mapping
 from .fleet import Truck, TruckState
 from .bays import DRSLoadingBay
+from .topology import DRSRoadSegment
 
 
 class ShelswellDispatchController:
-    """Implements Shelswell's operational dispatch rules cleanly in Python:
-    
-    1. Unclaimed Tonnes Rule: Dispatch trucks to the level loadout with highest remaining tonnage.
-    2. Refueling & Breakdown Routing: Intercept trucks when fuel_level_pct < 15% to surface fuel depot.
-    3. Payload Schedule Ratio: Distribute haulage target types matching ore to waste ratio (5.5 : 1).
-    """
+    """Implements Shelswell's operational dispatch rules cleanly in Python."""
 
     def __init__(
         self,
         trucks: List[Truck],
         loading_bays: List[DRSLoadingBay],
-        roads: Optional[Dict] = None,
-        waste_trip_interval: int = 13,
-        refuel_threshold_pct: float = 15.0,
-        fuel_depot_location: str = "SURFACE_FUEL_DEPOT",
-        parking_location: str = "SURFACE_PARKING",
-        dispatch_strategy: str = "highest_muck",
+        roads: Mapping[str, DRSRoadSegment],
+        waste_trip_interval: int,
+        refuel_threshold_pct: float,
+        fuel_depot_location: str,
+        parking_location: str,
+        dispatch_strategy: str,
     ):
         self.trucks = trucks
         self.loading_bays = loading_bays
-        self.roads = roads or {}
+        self.roads = dict(roads)
         self.waste_trip_interval = waste_trip_interval
         self.refuel_threshold_pct = refuel_threshold_pct
         self.fuel_depot_location = fuel_depot_location
@@ -58,18 +54,15 @@ class ShelswellDispatchController:
             return
 
         if self.dispatch_strategy == "highest_muck":
-            bays_with_muck = [b for b in valid_bays if b.muck_level.value > 0]
-            if bays_with_muck:
-                best_bay = max(bays_with_muck, key=lambda b: b.muck_level.value)
-            else:
-                best_bay = max(valid_bays, key=lambda b: b.muck_level.value)
+            target_bay = max(valid_bays, key=lambda b: b.muck_level.value)
         elif self.dispatch_strategy == "round_robin":
-            best_bay = valid_bays[self.dispatch_counter % len(valid_bays)]
+            idx = (self.dispatch_counter - 1) % len(valid_bays)
+            target_bay = valid_bays[idx]
+        elif self.dispatch_strategy == "shallowest_first":
+            target_bay = min(valid_bays, key=lambda b: b.level_index)
         else:
-            best_bay = valid_bays[0]
+            target_bay = valid_bays[0]
 
-        truck.target_bay_id = best_bay.bay_id
-        truck.target_level = best_bay.level_index
+        truck.target_bay_id = target_bay.bay_id
+        truck.target_level = target_bay.level_index
         truck.state = TruckState.TRAVEL_EMPTY
-        truck.current_location = self.parking_location
-

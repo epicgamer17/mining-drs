@@ -40,11 +40,12 @@ class MiningRLEnv(gym.Env):
         sparse_reward_stock_penalty_weight: float = 0.05,
         stockpile_scaling_factor: float = 1000.0,
         time_scaling_factor: float = 1000.0,
-        max_steps: Optional[int] = None,
+        max_steps: int = 1000,
         enable_telemetry: bool = False,
         reward_type: str = "sparse",
         **kwargs,
     ):
+
         super().__init__()
         self.target_ore_stock_level = target_ore_stock_level
         self.total_ore_to_extract = total_ore_to_extract
@@ -242,8 +243,9 @@ class MiningRLEnv(gym.Env):
 
         terminated = self._is_terminating_condition_met()
         truncated = False
-        if self.max_steps is not None and self.current_step >= self.max_steps:
+        if self.max_steps > 0 and self.current_step >= self.max_steps:
             truncated = True
+
 
         current_time = self._get_current_time()
         current_extraction = self.mine.cumulative_extracted_mass.value
