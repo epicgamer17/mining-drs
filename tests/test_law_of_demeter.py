@@ -1,7 +1,5 @@
-import pytest
 from drs_mining.components.mine_face import ConcentratorMineFace
-from drs_mining.components.controllers import ConcentratorController
-from drs_mining.components.models import ConcentratorModel
+from drs_mining.components.factories import build_concentrator_simulation
 
 
 def test_mine_face_net_extracted_mass():
@@ -14,8 +12,7 @@ def test_mine_face_net_extracted_mass():
 
 
 def test_controller_durations():
-    sim = ConcentratorModel()
-    controller = sim.controller
+    _, _, _, controller, _, _ = build_concentrator_simulation()
 
     controller.cumulative_time_mode_a.value = 10.0
     controller.cumulative_time_mode_b.value = 5.0
@@ -27,16 +24,18 @@ def test_controller_durations():
     assert controller.active_duration(10.0) == 8.0
 
 
-def test_model_delegation_properties():
-    sim = ConcentratorModel()
-    sim.ore1_stock.current_mass.value = 1000.0
-    sim.ore2_stock.current_mass.value = 2000.0
-    sim.fleet.stockpile2_routing_fraction.value = 0.35
-    sim.controller.target_mine_mass_rate.value = 5000.0
+def test_flat_build_wiring():
+    mine, fleet, plant, controller, ore1_stock, ore2_stock = (
+        build_concentrator_simulation()
+    )
 
-    assert sim.ore1_mass == 1000.0
-    assert sim.ore2_mass == 2000.0
-    assert sim.total_stockpile_mass == 3000.0
-    assert sim.stockpile2_routing_fraction == 0.35
-    assert sim.target_mine_mass_rate == 5000.0
+    ore1_stock.current_mass.value = 1000.0
+    ore2_stock.current_mass.value = 2000.0
+    fleet.stockpile2_routing_fraction.value = 0.35
+    controller.target_mine_mass_rate.value = 5000.0
 
+    assert ore1_stock.current_mass.value == 1000.0
+    assert ore2_stock.current_mass.value == 2000.0
+    assert ore1_stock.current_mass.value + ore2_stock.current_mass.value == 3000.0
+    assert fleet.stockpile2_routing_fraction.value == 0.35
+    assert controller.target_mine_mass_rate.value == 5000.0

@@ -1,6 +1,5 @@
 import gymnasium as gym
 from .controllers import RL_MineController
-from .models import RL_ConcentratorModel
 from .envs import MiningRLEnv
 
 try:
@@ -13,6 +12,5 @@ except Exception:
 
 __all__ = [
     "RL_MineController",
-    "RL_ConcentratorModel",
     "MiningRLEnv",
 ]

@@ -5,9 +5,6 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 from drs_mining.components import (
     Storage,
     Processor,
-    BaseBlendingModel,
-    ConcentratorModel,
-    ActiveFleetConcentratorModel,
     MultiFaceConcentratorController,
     BaseMineFace,
     ContinuousMineFace,
@@ -24,6 +21,8 @@ from drs_mining.components import (
     DRSDumpingBay,
     load_topology_dict,
     build_simulation_from_dict,
+    build_concentrator_simulation,
+    build_multi_face_simulation,
 )
 from drs_mining.controllers.dispatch import ShelswellDispatchController
 from drs_mining.simulation import ShelswellHybridSimulation
@@ -31,9 +30,6 @@ from drs_mining.simulation import ShelswellHybridSimulation
 __all__ = [
     "Storage",
     "Processor",
-    "BaseBlendingModel",
-    "ConcentratorModel",
-    "ActiveFleetConcentratorModel",
     "MultiFaceConcentratorController",
     "BaseMineFace",
     "ContinuousMineFace",
@@ -50,6 +46,8 @@ __all__ = [
     "DRSDumpingBay",
     "load_topology_dict",
     "build_simulation_from_dict",
+    "build_concentrator_simulation",
+    "build_multi_face_simulation",
     "ShelswellDispatchController",
     "ShelswellHybridSimulation",
 ]

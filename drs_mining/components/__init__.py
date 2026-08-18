@@ -11,20 +11,16 @@ from .controllers import (
     ConcentratorController,
     MultiFaceConcentratorController,
 )
-from .models import (
-    ActiveFleetConcentratorModel,
-    BaseBlendingModel,
-    ConcentratorModel,
+from .factories import (
+    build_concentrator_simulation,
+    build_multi_face_simulation,
 )
 from .stockpiles import Stockpile
 
 __all__ = [
     "Storage",
     "Processor",
-    "BaseBlendingModel",
     "BaseBlendingController",
-    "ConcentratorModel",
-    "ActiveFleetConcentratorModel",
     "MultiFaceConcentratorController",
     "BaseMineFace",
     "ContinuousMineFace",
@@ -41,5 +37,7 @@ __all__ = [
     "DRSDumpingBay",
     "load_topology_dict",
     "build_simulation_from_dict",
+    "build_concentrator_simulation",
+    "build_multi_face_simulation",
 ]
 

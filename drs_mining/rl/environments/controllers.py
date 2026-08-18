@@ -2,10 +2,10 @@ from drs_mining.components.controllers import ConcentratorController
 
 
 class RL_MineController(ConcentratorController):
-    """State container that exposes pending_rl_action to the control policy.
+    """State container that exposes pending_rl_action to the operating policy.
 
-    The top-level policy (drs_mining.control) reads pending_rl_action when a
-    campaign decision is required and raises RequireDecision to yield to the
+    The top-level policy (MiningRLEnv._step_policy) reads pending_rl_action when
+    a campaign decision is required and raises RequireDecision to yield to the
     RL agent otherwise.
     """
 

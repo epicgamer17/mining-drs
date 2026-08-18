@@ -78,10 +78,15 @@ def build_simulation_from_dict(
     enable_telemetry: bool = False,
     **kwargs,
 ):
-    """Builds a simulation model directly from a native Python topology dictionary/list
+    """Builds a simulation from a native Python topology dictionary/list
     or JSON filepath without intermediate Config objects.
+
+    Returns:
+        tuple: ``(mine, fleet, plant, controller, ore1_stock, ore2_stock)``,
+        or ``([face1, face2], fleet, plant, controller, ore1_stock, ore2_stock)``
+        for multi-face topologies.
     """
-    from .models import ConcentratorModel, ActiveFleetConcentratorModel
+    from .factories import build_concentrator_simulation, build_multi_face_simulation
 
     data = load_topology_dict(topology)
 
@@ -99,6 +104,6 @@ def build_simulation_from_dict(
     params = {**attrs, **kwargs}
     is_multi_face = params.pop("multi_face", False)
     if is_multi_face:
-        return ActiveFleetConcentratorModel(enable_telemetry=enable_telemetry, **params)
+        return build_multi_face_simulation(**params)
     else:
-        return ConcentratorModel(enable_telemetry=enable_telemetry, **params)
+        return build_concentrator_simulation(**params)

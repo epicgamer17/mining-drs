@@ -81,13 +81,10 @@ def evaluate_rl_throughput(model, env, seed, device):
                 [terminated or truncated], dtype=torch.float32, device=device
             )
 
-    # Calculate throughput from the underlying sim
-    sim = env.sim
-    config = env.config
-
-    active_time = sim.controller.active_duration()
+    # Calculate throughput from the underlying simulation
+    active_time = env.controller.active_duration()
     if active_time > 0:
-        return sim.mine.net_extracted_mass / active_time
+        return env.mine.net_extracted_mass / active_time
     return 0.0
 
 
@@ -532,7 +529,7 @@ def generate_rl_dashboard(
                 [terminated or truncated], dtype=torch.float32, device=device
             )
 
-    result = env.engine.run(until=env.config.replication_length)
+    result = env.engine.run(until=env.replication_length)
 
     df = result.history
 

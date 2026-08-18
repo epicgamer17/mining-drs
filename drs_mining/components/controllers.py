@@ -15,8 +15,8 @@ class BaseBlendingController(drs.Module):
     rate computation exposed through ``get_target_rates``, and (for the
     multi-face variant) fleet-shift scheduling and face drive allocation.
     Policy-level decisions (target extraction rates, fleet shift allocation,
-    recovery of the RL action) live in the top-level control policy
-    (drs_mining.control).
+    recovery of the RL action) live in the top-level operating policy
+    (e.g. MiningRLEnv._step_policy).
     """
 
     _MODE_TIMER_ATTRS = {
