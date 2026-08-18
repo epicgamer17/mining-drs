@@ -1,7 +1,7 @@
 from typing import List, Mapping
 from .fleet import Truck, TruckState
-from .bays import DRSLoadingBay
-from .topology import DRSRoadSegment
+from .bays import LoadingBay
+from .topology import RoadSegment
 
 
 class ShelswellDispatchController:
@@ -10,8 +10,8 @@ class ShelswellDispatchController:
     def __init__(
         self,
         trucks: List[Truck],
-        loading_bays: List[DRSLoadingBay],
-        roads: Mapping[str, DRSRoadSegment],
+        loading_bays: List[LoadingBay],
+        roads: Mapping[str, RoadSegment],
         waste_trip_interval: int,
         refuel_threshold_pct: float,
         fuel_depot_location: str,

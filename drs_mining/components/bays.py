@@ -3,7 +3,7 @@ import drs
 from .fleet import Truck, TruckState, LHD
 
 
-class DRSLoadingBay:
+class LoadingBay:
     """Bridges LHD/Truck load cycles to DRS Stockpile/Muck Bay Levels and Flow Rates."""
 
     def __init__(
@@ -81,7 +81,7 @@ class DRSLoadingBay:
                 self.load_rate.value = 0.0
 
 
-class DRSDumpingBay:
+class DumpingBay:
     """Bridges surface truck dumping to DRS Continuous Accumulators."""
 
     def __init__(

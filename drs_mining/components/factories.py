@@ -1,12 +1,125 @@
-"""Unified flat, tuple-returning simulation builder for mining blending operations."""
+"""Unified factory functions and simulation builders for mining operations."""
 
-from typing import Sequence, Mapping, Union
+import json
+import math
+from typing import Sequence, Mapping, Union, List, Optional
 from .stockpiles import Stockpile
 from .mine_face import MineFace
-from .fleet import ContinuousFleetLogistics
+from .fleet import ContinuousFleetLogistics, Truck, LHD
 from .plant import MetallurgicalPlant
 from .controllers import BlendingController
 from .generators import StochasticFaciesGenerator
+
+
+def create_stockpiles(configs: Sequence[Mapping]) -> List[Stockpile]:
+    """Factory helper to construct a list of Stockpiles from config dicts."""
+    stockpiles = []
+    for cfg in configs:
+        stockpiles.append(
+            Stockpile(
+                name=cfg["name"],
+                expected_attributes=cfg.get("expected_attributes", ()),
+                initial_mass=cfg.get("initial_mass", 0.0),
+                initial_attributes=cfg.get("initial_attributes", {}),
+                capacity=cfg.get("capacity", math.inf),
+                attr_inflow=cfg.get("attr_inflow", 1.0),
+            )
+        )
+    return stockpiles
+
+
+def load_topology_dict(topology: Union[dict, list, str, bytes]) -> Union[dict, list]:
+    """Loads native Python dictionary/list topology representation.
+
+    Args:
+        topology: Path to JSON file, raw JSON string/bytes, or an already-loaded dict/list.
+
+    Returns:
+        The loaded topology dict/list structure.
+    """
+    if isinstance(topology, (dict, list)):
+        return topology
+    elif isinstance(topology, bytes):
+        return json.loads(topology.decode("utf-8"))
+    elif isinstance(topology, str):
+        trimmed = topology.strip()
+        if (trimmed.startswith("{") and trimmed.endswith("}")) or (
+            trimmed.startswith("[") and trimmed.endswith("]")
+        ):
+            return json.loads(trimmed)
+        else:
+            with open(topology, "r", encoding="utf-8") as f:
+                return json.load(f)
+    else:
+        raise TypeError(
+            f"Unsupported topology type: {type(topology)}. Expected dict, list, str (path or JSON), or bytes."
+        )
+
+
+def create_truck_fleet(
+    count: int,
+    truck_type: str,
+    ore_payload_cap: float,
+    waste_payload_cap: float,
+    speeds: Mapping,
+    prefix: str = "T",
+    fuel_burn_rate_pct_per_sec: float = 0.005,
+    **kwargs,
+) -> List[Truck]:
+    """Creates a fleet of Truck dataclasses with given configuration."""
+    fleet = []
+    for i in range(1, count + 1):
+        truck_id = f"{prefix}{i:02d}" if prefix else str(i)
+        t = Truck(
+            truck_id=truck_id,
+            truck_type=truck_type,
+            ore_payload_cap=ore_payload_cap,
+            waste_payload_cap=waste_payload_cap,
+            speeds=dict(speeds),
+            fuel_burn_rate_pct_per_sec=fuel_burn_rate_pct_per_sec,
+            **kwargs,
+        )
+        fleet.append(t)
+    return fleet
+
+
+def create_lhd_fleet(
+    levels: Sequence[int],
+    bucket_ore_cap: float,
+    bucket_waste_cap: float,
+    load_spot_min: float,
+    load_min: float,
+    dump_min: float,
+    tram_dist_m: float,
+    speed_loaded_kph: float,
+    speed_empty_kph: float,
+    count_per_level: int = 1,
+    prefix: str = "LHD",
+    **kwargs,
+) -> List[LHD]:
+    """Creates a fleet of LHD loaders assigned to specific mine levels."""
+    level_list = list(levels) if isinstance(levels, (list, tuple, range)) else list(range(1, int(levels) + 1))
+    lhds = []
+    for lvl in level_list:
+        for idx in range(1, count_per_level + 1):
+            suffix = f"_{idx}" if count_per_level > 1 else ""
+            lhd_id = f"{prefix}_L{lvl}{suffix}"
+            lhds.append(
+                LHD(
+                    lhd_id=lhd_id,
+                    level_index=lvl,
+                    bucket_ore_cap=bucket_ore_cap,
+                    bucket_waste_cap=bucket_waste_cap,
+                    load_spot_min=load_spot_min,
+                    load_min=load_min,
+                    dump_min=dump_min,
+                    tram_dist_m=tram_dist_m,
+                    speed_loaded_kph=speed_loaded_kph,
+                    speed_empty_kph=speed_empty_kph,
+                    **kwargs,
+                )
+            )
+    return lhds
 
 
 def build_mining_simulation(

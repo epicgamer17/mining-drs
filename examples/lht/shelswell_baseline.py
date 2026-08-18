@@ -28,9 +28,10 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
 import drs
-from drs_mining.components.fleet import Truck, TruckState
-from drs_mining.components.topology import DRSRoadSegment, load_topology_dict
-from drs_mining.components.bays import DRSLoadingBay, DRSDumpingBay
+from drs_mining.components.fleet import Truck, TruckState, LHD
+from drs_mining.components.topology import RoadSegment
+from drs_mining.components.factories import load_topology_dict
+from drs_mining.components.bays import LoadingBay, DumpingBay
 from drs_mining.components.dispatch import ShelswellDispatchController
 
 
@@ -59,13 +60,13 @@ def build_shelswell_simulation(
     engine = drs.DRSEngine()
 
     # Mine topology & availability timers
-    decline = DRSRoadSegment("decline_2100m", 2100.0, "decline")
+    decline = RoadSegment("decline_2100m", 2100.0, "decline")
     ramp_levels = [
-        DRSRoadSegment(f"ramp_L{i}", 300.0, "ramp")
+        RoadSegment(f"ramp_L{i}", 300.0, "ramp")
         for i in range(1, 8)
     ]
-    surface_rom_road = DRSRoadSegment("surf_rom", 300.0, "surface")
-    surface_waste_road = DRSRoadSegment("surf_waste", 440.0, "surface")
+    surface_rom_road = RoadSegment("surf_rom", 300.0, "surface")
+    surface_waste_road = RoadSegment("surf_waste", 440.0, "surface")
 
     # Loading & dumping bays (unconstrained upstream muck supply per paper spec)
     loading_bays = []
@@ -83,7 +84,7 @@ def build_shelswell_simulation(
             speed_empty_kph=6.78,
         )
         loading_bays.append(
-            DRSLoadingBay(
+            LoadingBay(
                 bay_id=f"L{i}_ORE",
                 bay_type="ORE",
                 level_index=i,
@@ -95,7 +96,7 @@ def build_shelswell_simulation(
             )
         )
         loading_bays.append(
-            DRSLoadingBay(
+            LoadingBay(
                 bay_id=f"L{i}_WASTE",
                 bay_type="WASTE",
                 level_index=i,
@@ -107,14 +108,14 @@ def build_shelswell_simulation(
             )
         )
 
-    rom_dump_bay = DRSDumpingBay(
+    rom_dump_bay = DumpingBay(
         bay_id="ROM_PAD",
         bay_type="ORE",
         location_name="SURFACE_ROM",
         dump_spot_min=0.57,
         bed_raise_dump_min=0.88,
     )
-    waste_dump_bay = DRSDumpingBay(
+    waste_dump_bay = DumpingBay(
         bay_id="WASTE_DUMP",
         bay_type="WASTE",
         location_name="SURFACE_WASTE_DUMP",

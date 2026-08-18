@@ -94,19 +94,3 @@ class Stockpile(Storage):
     def is_terminating_condition_met(self) -> bool:
         return False
 
-
-def create_stockpiles(configs: Sequence[Mapping]) -> List[Stockpile]:
-    """Factory helper to construct a list of Stockpiles from config dicts."""
-    stockpiles = []
-    for cfg in configs:
-        stockpiles.append(
-            Stockpile(
-                name=cfg["name"],
-                expected_attributes=cfg.get("expected_attributes", ()),
-                initial_mass=cfg.get("initial_mass", 0.0),
-                initial_attributes=cfg.get("initial_attributes", {}),
-                capacity=cfg.get("capacity", math.inf),
-                attr_inflow=cfg.get("attr_inflow", 1.0),
-            )
-        )
-    return stockpiles

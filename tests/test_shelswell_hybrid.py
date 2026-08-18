@@ -3,8 +3,8 @@ import math
 import drs
 
 from drs_mining.components.fleet import Truck, TruckState, LHD
-from drs_mining.components.topology import DRSRoadSegment
-from drs_mining.components.bays import DRSLoadingBay, DRSDumpingBay
+from drs_mining.components.topology import RoadSegment
+from drs_mining.components.bays import LoadingBay, DumpingBay
 from drs_mining.components.dispatch import ShelswellDispatchController
 
 
@@ -32,7 +32,7 @@ def test_truck_discrete_state():
 
 
 def test_road_availability_timer():
-    road = DRSRoadSegment("test_segment", length_m=100.0, segment_type="decline")
+    road = RoadSegment("test_segment", length_m=100.0, segment_type="decline")
 
     assert road.is_available()
     truck = Truck(
@@ -65,7 +65,7 @@ def test_loading_and_dumping_bays():
         speed_loaded_kph=5.89,
         speed_empty_kph=6.78,
     )
-    bay = DRSLoadingBay(
+    bay = LoadingBay(
         bay_id="L1_ORE",
         bay_type="ORE",
         level_index=1,
@@ -95,7 +95,7 @@ def test_loading_and_dumping_bays():
     assert bay.active_truck is None
 
     # Test dumping bay
-    dump_bay = DRSDumpingBay(
+    dump_bay = DumpingBay(
         bay_id="ROM_PAD",
         bay_type="ORE",
         location_name="SURFACE_ROM",
@@ -122,8 +122,8 @@ def test_dispatch_controller():
     )
     lhd1 = LHD("LHD_L1", 1, 14.0, 12.5, 0.46, 0.88, 0.73, 35.0, 5.89, 6.78)
     lhd2 = LHD("LHD_L2", 2, 14.0, 12.5, 0.46, 0.88, 0.73, 35.0, 5.89, 6.78)
-    bay1 = DRSLoadingBay("L1_ORE", "ORE", 1, 500.0, 0.82, 1.5, 2.0, lhd1)
-    bay2 = DRSLoadingBay("L2_ORE", "ORE", 2, 2000.0, 0.82, 1.5, 2.0, lhd2)
+    bay1 = LoadingBay("L1_ORE", "ORE", 1, 500.0, 0.82, 1.5, 2.0, lhd1)
+    bay2 = LoadingBay("L2_ORE", "ORE", 2, 2000.0, 0.82, 1.5, 2.0, lhd2)
 
     controller = ShelswellDispatchController(
         trucks=[truck],

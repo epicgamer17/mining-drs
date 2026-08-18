@@ -6,17 +6,21 @@ from .fleet import (
     TruckState,
     Truck,
     LHD,
-    create_truck_fleet,
-    create_lhd_fleet,
 )
-from .topology import DRSRoadSegment, load_topology_dict
-from .bays import DRSLoadingBay, DRSDumpingBay
+from .topology import RoadSegment
+from .bays import LoadingBay, DumpingBay
 from .mine_face import MineFace
 from .plant import MetallurgicalPlant
 from .controllers import BlendingController
-from .factories import build_mining_simulation
-from .stockpiles import Stockpile, create_stockpiles
+from .stockpiles import Stockpile
 from .dispatch import ShelswellDispatchController
+from .factories import (
+    build_mining_simulation,
+    create_stockpiles,
+    load_topology_dict,
+    create_truck_fleet,
+    create_lhd_fleet,
+)
 
 __all__ = [
     "Storage",
@@ -32,9 +36,9 @@ __all__ = [
     "LHD",
     "create_truck_fleet",
     "create_lhd_fleet",
-    "DRSRoadSegment",
-    "DRSLoadingBay",
-    "DRSDumpingBay",
+    "RoadSegment",
+    "LoadingBay",
+    "DumpingBay",
     "load_topology_dict",
     "build_mining_simulation",
     "StochasticFaciesGenerator",

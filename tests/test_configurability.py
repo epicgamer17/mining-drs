@@ -9,8 +9,8 @@ from drs_mining import (
     create_lhd_fleet,
     Stockpile,
     create_stockpiles,
-    DRSLoadingBay,
-    DRSDumpingBay,
+    LoadingBay,
+    DumpingBay,
     ShelswellDispatchController,
     build_mining_simulation,
     MineFace,
@@ -56,15 +56,25 @@ def test_create_truck_and_lhd_fleets():
 
 def test_create_stockpiles_factory():
     configs = [
-        {"name": "Ore1", "initial_mass": 1000.0, "attr_inflow": 1.0},
-        {"name": "Ore2", "initial_mass": 2000.0, "attr_inflow": 0.0},
-        {"name": "Waste", "initial_mass": 500.0, "attr_inflow": 0.0},
+        {
+            "name": "ROM_A",
+            "expected_attributes": ["cu_grade"],
+            "initial_mass": 1000.0,
+            "initial_attributes": {"cu_grade": 25.0},
+        },
+        {
+            "name": "ROM_B",
+            "expected_attributes": ["cu_grade"],
+            "initial_mass": 2000.0,
+            "initial_attributes": {"cu_grade": 40.0},
+        },
     ]
     stocks = create_stockpiles(configs)
-    assert len(stocks) == 3
-    assert stocks[0].name == "Ore1"
-    assert stocks[0].level == 1000.0
-    assert stocks[2].name == "Waste"
+    assert len(stocks) == 2
+    assert stocks[0].name == "ROM_A"
+    assert stocks[0].current_mass.value == 1000.0
+    assert stocks[1].name == "ROM_B"
+    assert stocks[1].current_mass.value == 2000.0
 
 
 def test_configurable_loading_and_dumping_bays():
@@ -76,11 +86,11 @@ def test_configurable_loading_and_dumping_bays():
         load_spot_min=0.4,
         load_min=0.8,
         dump_min=0.7,
-        tram_dist_m=20.0,
+        tram_dist_m=30.0,
         speed_loaded_kph=6.0,
         speed_empty_kph=7.0,
     )
-    bay = DRSLoadingBay(
+    bay = LoadingBay(
         bay_id="L1_ORE",
         bay_type="ORE",
         level_index=1,
@@ -107,7 +117,7 @@ def test_configurable_loading_and_dumping_bays():
     assert truck.state == TruckState.LOADING
     assert bay.total_load_duration_sec == duration
 
-    dump_bay = DRSDumpingBay(
+    dump_bay = DumpingBay(
         bay_id="ROM",
         bay_type="ORE",
         location_name="SURFACE_ROM",
@@ -129,7 +139,7 @@ def test_configurable_dispatch_controller():
     )
     lhd1 = LHD("LHD1", 1, 14.0, 12.5, 0.4, 0.8, 0.7, 30.0, 6.0, 7.0)
     lhd2 = LHD("LHD2", 2, 14.0, 12.5, 0.4, 0.8, 0.7, 30.0, 6.0, 7.0)
-    bay1 = DRSLoadingBay(
+    bay1 = LoadingBay(
         bay_id="L1_ORE",
         bay_type="ORE",
         level_index=1,
@@ -139,7 +149,7 @@ def test_configurable_dispatch_controller():
         bucket_passes=2.0,
         lhd=lhd1,
     )
-    bay2 = DRSLoadingBay(
+    bay2 = LoadingBay(
         bay_id="L2_ORE",
         bay_type="ORE",
         level_index=2,
