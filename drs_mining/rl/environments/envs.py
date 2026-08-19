@@ -227,9 +227,7 @@ class MiningRLEnv(gym.Env):
     def _calculate_sparse_reward(self, dt: float) -> float:
         reward_time_penalty = -(dt / self.sparse_reward_time_penalty_scale)
         stock_penalty_weight = self.sparse_reward_stock_penalty_weight
-        total_stock = (
-            self.ore1_stock.current_mass.value + self.ore2_stock.current_mass.value
-        )
+        total_stock = self.ore1_stock.level + self.ore2_stock.level
         overstock = max(0.0, total_stock - self.target_ore_stock_level)
         overstock_scaled = overstock / self.stockpile_scaling_factor
         return reward_time_penalty - (stock_penalty_weight * overstock_scaled)
@@ -237,9 +235,7 @@ class MiningRLEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        total_stock = (
-            self.ore1_stock.current_mass.value + self.ore2_stock.current_mass.value
-        )
+        total_stock = self.ore1_stock.level + self.ore2_stock.level
         if action == 0 and total_stock > self.target_ore_stock_level:
             action = 2  # Mode A Mine Surging
         elif action == 1 and total_stock > self.target_ore_stock_level:
@@ -275,8 +271,8 @@ class MiningRLEnv(gym.Env):
 
     def _get_obs(self):
         target = self.target_ore_stock_level
-        ore1_mass = self.ore1_stock.current_mass.value
-        ore2_mass = self.ore2_stock.current_mass.value
+        ore1_mass = self.ore1_stock.level
+        ore2_mass = self.ore2_stock.level
 
         return np.array(
             [

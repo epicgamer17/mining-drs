@@ -3,8 +3,7 @@ import drs
 from .fleet import Truck, TruckState, LHD
 
 
-# TODO: not a drs.Module should it be?
-class LoadingBay:
+class LoadingBay(drs.Module):
     """Bridges LHD/Truck load cycles to DRS Stockpile/Muck Bay Levels and Flow Rates."""
 
     def __init__(
@@ -18,6 +17,7 @@ class LoadingBay:
         bucket_passes: float,
         lhd: LHD,
     ):
+        super().__init__()
         self.bay_id = bay_id
         self.bay_type = bay_type  # "ORE" or "WASTE"
         self.level_index = level_index
@@ -32,6 +32,7 @@ class LoadingBay:
             f"muck_level_L{level_index}_{bay_type}",
             initial_value=initial_muck,
         )
+        self.muck_level.lower_threshold = 0.0
         self.load_rate = drs.Variable(
             f"load_rate_L{level_index}_{bay_type}",
             initial_value=0.0,
@@ -67,25 +68,29 @@ class LoadingBay:
         self.total_load_duration_sec = total_load_time_sec
 
         # Set continuous DRS flow rate (Tonnes / Sec)
-        self.load_rate.value = payload_cap / total_load_time_sec
+        rate_val = payload_cap / total_load_time_sec
+        self.load_rate.value = rate_val
+        self.muck_level.rate = -rate_val
         return True
 
     def update_continuous_step(self, dt: float):
-        """Integrates muck removal and truck loading continuously."""
+        """Integrates muck removal and truck loading continuously using DRS rate dynamics."""
         if self.active_truck is not None:
-            tonnes_moved = min(self.load_rate.value * dt, self.muck_level.value)
-            self.muck_level.value = max(0.0, self.muck_level.value - tonnes_moved)
+            prev_muck = self.muck_level.value
+            effective_dt = min(dt, self.load_time_remaining) if self.load_time_remaining > 0 else dt
+            self.muck_level.step(effective_dt)
+            tonnes_moved = max(0.0, prev_muck - self.muck_level.value)
             self.active_truck.current_payload += tonnes_moved
 
             self.load_time_remaining -= dt
-            if self.load_time_remaining <= 0.0:
+            if self.load_time_remaining <= 0.0 or self.muck_level.value <= 0.0:
                 self.active_truck.state = TruckState.TRAVEL_LOADED
                 self.active_truck = None
                 self.load_rate.value = 0.0
+                self.muck_level.rate = 0.0
 
 
-# TODO: not a drs.Module should it be?
-class DumpingBay:
+class DumpingBay(drs.Module):
     """Bridges surface truck dumping to DRS Continuous Accumulators."""
 
     def __init__(
@@ -96,6 +101,7 @@ class DumpingBay:
         dump_spot_min: float,
         bed_raise_dump_min: float,
     ):
+        super().__init__()
         self.bay_id = bay_id
         self.bay_type = bay_type  # "ORE" or "WASTE"
         self.location_name = location_name
@@ -125,16 +131,18 @@ class DumpingBay:
         self.dump_time_remaining = total_dump_time_sec
 
         # Flow into surface stockpile accumulator (Tonnes / Sec)
-        self.dump_rate.value = truck.current_payload / total_dump_time_sec
+        rate_val = truck.current_payload / total_dump_time_sec
+        self.dump_rate.value = rate_val
+        self.dumped_total.rate = rate_val
         return True
 
     def update_continuous_step(self, dt: float):
-        """Integrates continuous dumping and flow rate resets."""
+        """Integrates continuous dumping and flow rate resets using DRS rate dynamics."""
         if self.active_truck is not None:
-            tonnes_dumped = min(
-                self.dump_rate.value * dt, self.active_truck.current_payload
-            )
-            self.dumped_total.value += tonnes_dumped
+            prev_dumped = self.dumped_total.value
+            effective_dt = min(dt, self.dump_time_remaining) if self.dump_time_remaining > 0 else dt
+            self.dumped_total.step(effective_dt)
+            tonnes_dumped = min(self.dumped_total.value - prev_dumped, self.active_truck.current_payload)
             self.active_truck.current_payload = max(
                 0.0, self.active_truck.current_payload - tonnes_dumped
             )
@@ -145,3 +153,4 @@ class DumpingBay:
                 self.active_truck.state = TruckState.TRAVEL_EMPTY
                 self.active_truck = None
                 self.dump_rate.value = 0.0
+                self.dumped_total.rate = 0.0

@@ -181,7 +181,7 @@ class MetallurgicalPlant(Processor):
 
         self.total_system_ore_mass.value = ore1_level + ore2_level
         self.total_system_ore_mass.rate = (
-            self.ore1_stock.current_mass.rate + self.ore2_stock.current_mass.rate
+            self.ore1_stock.rate + self.ore2_stock.rate
         )
 
         self.target_stock1_outflow_rate.value = ore1_rate
@@ -269,8 +269,5 @@ class MetallurgicalPlant(Processor):
 
     def process(self, mass_rate: float) -> None:
         """Draw ``mass_rate`` into the plant for one engine step."""
-        self.target_rate = mass_rate
+        self.rate = mass_rate
         self.cumulative_milled_mass.rate = self.actual_rate
-
-    def is_terminating_condition_met(self) -> bool:
-        return False

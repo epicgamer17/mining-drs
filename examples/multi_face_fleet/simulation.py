@@ -249,9 +249,9 @@ def build_telemetry(engine, network):
         )
 
     def _ore2_ratio(t, m, s, _):
-        return ore2_stock.current_mass.value / max(
+        return ore2_stock.level / max(
             1e-6,
-            ore1_stock.current_mass.value + ore2_stock.current_mass.value,
+            ore1_stock.level + ore2_stock.level,
         )
 
     def _mixed_achieved(t, m, s, _):

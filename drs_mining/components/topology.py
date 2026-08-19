@@ -4,8 +4,7 @@ import drs
 from .fleet import Truck
 
 
-# TODO: not a module? why?
-class RoadSegment:
+class RoadSegment(drs.Module):
     """Represents a discrete single-lane haulage road corridor with timer decay."""
 
     def __init__(
@@ -14,6 +13,7 @@ class RoadSegment:
         length_m: float,
         segment_type: str,
     ):
+        super().__init__()
         self.segment_id = segment_id
         self.length_m = length_m
         self.segment_type = segment_type  # "decline", "ramp", "surface", "level"
@@ -21,6 +21,7 @@ class RoadSegment:
         self.time_until_free = drs.Timer(
             f"road_{segment_id}_t_free", initial_value=0.0, rate=-1.0
         )
+        self.time_until_free.lower_threshold = 0.0
         self.decay_rate = drs.Variable(f"road_{segment_id}_decay", initial_value=-1.0)
 
         self.occupying_truck: Optional[Truck] = None
@@ -34,12 +35,14 @@ class RoadSegment:
         speed_mps = truck.get_speed_mps(self.segment_type)
         travel_time_s = self.length_m / speed_mps
         self.time_until_free.value = travel_time_s
+        self.time_until_free.rate = -1.0
         self.occupying_truck = truck
         return travel_time_s
 
     def update_continuous_step(self, dt: float):
-        """Integrates continuous timer decay."""
+        """Integrates continuous timer decay using DRS Timer stepping."""
         if self.time_until_free.value > 0.0:
-            self.time_until_free.value = max(0.0, self.time_until_free.value - dt)
+            self.time_until_free.step(dt)
             if self.time_until_free.value <= 0.0:
                 self.occupying_truck = None
+                self.time_until_free.rate = 0.0
