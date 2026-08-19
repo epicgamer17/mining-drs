@@ -12,16 +12,16 @@ class ShelswellDispatchController:
         self,
         trucks: List[Truck],
         loading_bays: List[LoadingBay],
-        roads: Mapping[str, RoadSegment],
-        waste_trip_interval: int,
-        refuel_threshold_pct: float,
-        fuel_depot_location: str,
-        parking_location: str,
-        dispatch_strategy: str,
+        roads: Mapping[str, RoadSegment] = None,
+        waste_trip_interval: int = 13,
+        refuel_threshold_pct: float = 15.0,
+        fuel_depot_location: str = "SURFACE_FUEL_DEPOT",
+        parking_location: str = "SURFACE_PARKING",
+        dispatch_strategy: str = "highest_muck",
     ):
         self.trucks = trucks
         self.loading_bays = loading_bays
-        self.roads = dict(roads)
+        self.roads = dict(roads or {})
         self.waste_trip_interval = waste_trip_interval
         self.refuel_threshold_pct = refuel_threshold_pct
         self.fuel_depot_location = fuel_depot_location

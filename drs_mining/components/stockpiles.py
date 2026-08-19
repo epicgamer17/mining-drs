@@ -36,11 +36,9 @@ class Stockpile(Storage):
 
         attrs = dict(initial_attributes)
         for attr in self.expected_attributes:
-            setattr(
-                self,
-                attr,
-                drs.Level(f"{name}_{attr}", initial_value=attrs.get(attr, 0.0)),
-            )
+            attr_lvl = drs.Level(f"{name}_{attr}", initial_value=attrs.get(attr, 0.0))
+            attr_lvl.lower_threshold = 0.0
+            setattr(self, attr, attr_lvl)
 
     def current_concentration(self, attr: str) -> float:
         """Calculates current concentration (e.g. grade) of an attribute.
@@ -86,12 +84,6 @@ class Stockpile(Storage):
                     inflow_rate * attr_inflow
                     - actual_outflow * self.current_concentration(attr)
                 )
-
-        if net < 0:
-            for attr in self.expected_attributes:
-                attr_level = getattr(self, attr, None)
-                if attr_level is not None:
-                    attr_level.lower_threshold = 0.0
 
         self.actual_outflow_rate.value = actual_outflow
         return actual_outflow

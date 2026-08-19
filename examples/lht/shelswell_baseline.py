@@ -273,7 +273,7 @@ def step_simulation(state: dict, dt_step: float):
     state["ore_hauled"].value = rom_dump_bay.dumped_total.value
     state["waste_hauled"].value = waste_dump_bay.dumped_total.value
     state["global_time"].rate = 1.0
-    state["global_time"]._update(dt_step / 86400.0)
+    state["global_time"].step(dt_step / 86400.0)
 
 
 def run_haulage_simulation(
@@ -297,7 +297,7 @@ def run_haulage_simulation(
         )
 
         if is_shift_gap:
-            state["global_time"]._update(step_dt / 86400.0)
+            state["global_time"].step(step_dt / 86400.0)
             current_sec += step_dt
             pbar.update(int(step_dt))
             continue

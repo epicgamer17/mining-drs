@@ -35,7 +35,7 @@ class RoadSegment(drs.Module):
         speed_mps = truck.get_speed_mps(self.segment_type)
         travel_time_s = self.length_m / speed_mps
         self.time_until_free.value = travel_time_s
-        self.time_until_free.rate = -1.0
+        self.time_until_free.rate = (-1.0, 0.0, float("inf"))
         self.occupying_truck = truck
         return travel_time_s
 

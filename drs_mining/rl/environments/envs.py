@@ -94,11 +94,9 @@ class MiningRLEnv(gym.Env):
         self.current_step = 0
 
     def _get_current_time(self):
-        """Helper to safely calculate total elapsed simulation days."""
+        """Helper to calculate total elapsed simulation days directly from engine clock."""
         if hasattr(self, "engine") and self.engine is not None:
             return self.engine.current_time
-        if hasattr(self, "plant") and self.plant is not None:
-            return self.plant.total_duration
         return 0.0
 
     def _setup_simulation(self):

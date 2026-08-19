@@ -260,9 +260,10 @@ class MetallurgicalPlant(Processor):
             getattr(self, timer_attr).rate = 1.0
 
         if name in self._CONTINGENCY_MODES:
-            self.current_contingency_duration.rate = 1.0
-            self.current_contingency_duration.upper_threshold = (
-                self.duration_of_contingency_segments
+            self.current_contingency_duration.rate = (
+                1.0,
+                -math.inf,
+                self.duration_of_contingency_segments,
             )
         else:
             self.current_contingency_duration.rate = 0.0

@@ -70,7 +70,7 @@ class LoadingBay(drs.Module):
         # Set continuous DRS flow rate (Tonnes / Sec)
         rate_val = payload_cap / total_load_time_sec
         self.load_rate.value = rate_val
-        self.muck_level.rate = -rate_val
+        self.muck_level.rate = (-rate_val, 0.0, float("inf"))
         return True
 
     def update_continuous_step(self, dt: float):
@@ -133,7 +133,7 @@ class DumpingBay(drs.Module):
         # Flow into surface stockpile accumulator (Tonnes / Sec)
         rate_val = truck.current_payload / total_dump_time_sec
         self.dump_rate.value = rate_val
-        self.dumped_total.rate = rate_val
+        self.dumped_total.rate = (rate_val, -float("inf"), float("inf"))
         return True
 
     def update_continuous_step(self, dt: float):

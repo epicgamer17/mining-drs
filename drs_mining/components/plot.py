@@ -6,6 +6,7 @@ import seaborn as sns
 from drs.plot import (
     Dashboard,
     _get_ax,
+    apply_plot_style,
     plot_dual_axis_step,
     plot_safety_margin,
     plot_time_series,
@@ -69,9 +70,7 @@ def plot_ore_with_modes(
         )
         ax.axvspan(t_start, t_end, alpha=alpha_val, color=mode_colors[mode])
 
-    from drs.plot import plot_time_series
-
-    ore_line_colors = ["black", "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#8c564b"]
+        ore_line_colors = ["black", "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#8c564b"]
     plot_time_series(
         df,
         y_columns=ore_cols,
