@@ -24,9 +24,7 @@ class OperatingModeController(drs.Module):
         self.target_ore_stock_level = target_ore_stock_level
         self.total_ore_to_extract = total_ore_to_extract
 
-        self.active_campaign_mode = drs.Variable(
-            "active_campaign_mode", initial_mode
-        )
+        self.active_campaign_mode = drs.Variable("active_campaign_mode", initial_mode)
         self.active_operating_mode = self.active_campaign_mode
 
         self.current_campaign_duration = drs.Timer(
@@ -62,7 +60,9 @@ class OperatingModeController(drs.Module):
                     raise RequireDecision()
 
                 self.current_campaign_duration.reset()
-                next_mode = self._choose_next_campaign_mode(ore2_stock_level, total_stock_level)
+                next_mode = self._choose_next_campaign_mode(
+                    ore2_stock_level, total_stock_level
+                )
                 self.active_campaign_mode.value = next_mode
             else:
                 self.current_campaign_duration.reset()
@@ -136,12 +136,20 @@ class FleetController(drs.Module):
         self.total_truck_count = total_truck_count
 
         n_faces = len(self.faces)
-        self.max_lhds_per_face = self._normalize_param_list(max_lhds_per_face, n_faces, 2.0)
-        self.max_trucks_per_face = self._normalize_param_list(max_trucks_per_face, n_faces, 6.0)
-        self.face_haul_distance = self._normalize_param_list(face_haul_distance, n_faces, 0.0)
+        self.max_lhds_per_face = self._normalize_param_list(
+            max_lhds_per_face, n_faces, 2.0
+        )
+        self.max_trucks_per_face = self._normalize_param_list(
+            max_trucks_per_face, n_faces, 6.0
+        )
+        self.face_haul_distance = self._normalize_param_list(
+            face_haul_distance, n_faces, 0.0
+        )
         self.face_accessibility_fraction = [
             max(0.0, min(1.0, v))
-            for v in self._normalize_param_list(face_accessibility_fraction, n_faces, 1.0)
+            for v in self._normalize_param_list(
+                face_accessibility_fraction, n_faces, 1.0
+            )
         ]
 
         self.truck_velocity = truck_velocity
@@ -228,23 +236,22 @@ class FleetController(drs.Module):
             return lst + [lst[-1]] * (count - len(lst))
         return [default_val] * count
 
-    def _precompute_allocations(
-        self, mode_rates: Optional[Mapping[str, Tuple[float, float]]] = None
+    @staticmethod
+    def _allocations_for_ore_fracs(
+        face_ore1_fracs: Sequence[float],
+        modes_to_compute: Mapping[str, Tuple[float, float]],
     ) -> Dict[str, List[float]]:
-        num_faces = len(self.faces)
-        if num_faces == 0:
-            return {}
+        """Solve per-mode face-allocation fractions for a given set of faces.
 
-        face_ore1_fracs = [1.0 - f.mean_ore_fraction for f in self.faces]
-
-        default_rates = {
-            "MODE_A": (540.0 * 24.0, 60.0 * 24.0),
-            "MODE_A_CONTINGENCY": (500.0 * 24.0, 0.0),
-            "MODE_B": (300.0 * 24.0, 300.0 * 24.0),
-            "MODE_B_CONTINGENCY": (0.0, 450.0 * 24.0),
-        }
-        modes_to_compute = dict(mode_rates) if mode_rates else default_rates
+        For two faces this is the exact Appendix-A blending solution (face with the
+        highest Ore-1 fraction carries the richest feed); for N >= 3 a ratio-matched
+        alpha blend across faces above/below the target Ore-1 ratio.
+        """
+        num_faces = len(face_ore1_fracs)
         result = {}
+
+        if num_faces == 0:
+            return result
 
         if num_faces == 1:
             for mode_name in modes_to_compute:
@@ -285,8 +292,12 @@ class FleetController(drs.Module):
                 continue
             target_ore1_ratio = ore1 / total
 
-            below = [i for i in range(num_faces) if face_ore1_fracs[i] <= target_ore1_ratio]
-            above = [i for i in range(num_faces) if face_ore1_fracs[i] > target_ore1_ratio]
+            below = [
+                i for i in range(num_faces) if face_ore1_fracs[i] <= target_ore1_ratio
+            ]
+            above = [
+                i for i in range(num_faces) if face_ore1_fracs[i] > target_ore1_ratio
+            ]
 
             if not below:
                 fracs = [0.0] * num_faces
@@ -321,6 +332,20 @@ class FleetController(drs.Module):
         result["MODE_B_MINE_SURGING"] = surging_b
 
         return result
+
+    def _precompute_allocations(
+        self, mode_rates: Optional[Mapping[str, Tuple[float, float]]] = None
+    ) -> Dict[str, List[float]]:
+        face_ore1_fracs = [1.0 - f.mean_ore_fraction for f in self.faces]
+
+        default_rates = {
+            "MODE_A": (540.0 * 24.0, 60.0 * 24.0),
+            "MODE_A_CONTINGENCY": (500.0 * 24.0, 0.0),
+            "MODE_B": (300.0 * 24.0, 300.0 * 24.0),
+            "MODE_B_CONTINGENCY": (0.0, 450.0 * 24.0),
+        }
+        self._mode_rates = dict(mode_rates) if mode_rates else default_rates
+        return self._allocations_for_ore_fracs(face_ore1_fracs, self._mode_rates)
 
     def _get_allocations_for_mode(self, mode_name: str) -> list:
         fracs = self._mode_allocations.get(mode_name)
@@ -359,6 +384,8 @@ class FleetController(drs.Module):
             max_lhds = int(self.max_lhds_per_face[i])
             if unassigned_lhds <= 0:
                 break
+            if fracs[i] <= 1e-12:
+                continue
             if lhd_assignments[i] < max_lhds:
                 lhd_assignments[i] += 1
                 unassigned_lhds -= 1
@@ -380,6 +407,8 @@ class FleetController(drs.Module):
             max_trucks = int(self.max_trucks_per_face[i])
             if unassigned_trucks <= 0:
                 break
+            if fracs[i] <= 1e-12:
+                continue
             if truck_assignments[i] < max_trucks:
                 truck_assignments[i] += 1
                 unassigned_trucks -= 1
@@ -440,9 +469,7 @@ class FleetController(drs.Module):
                 else 0.0
             )
 
-        final_real_extraction_rate = (
-            max_rate * accessibility * mechanical_availability
-        )
+        final_real_extraction_rate = max_rate * accessibility * mechanical_availability
 
         if (
             final_real_extraction_rate > target_extraction_rate
@@ -469,13 +496,51 @@ class FleetController(drs.Module):
             self.fleet_shift_count.value += 1
 
     def allocate(
-        self, mine_target: float, mode: Union[OperatingMode, str]
+        self,
+        mine_target: float,
+        mode: Union[OperatingMode, str],
+        active_faces: Optional[Sequence[MineFace]] = None,
     ) -> List[float]:
         """Schedules shifts, splits ``mine_target`` across faces, enforces fleet haulage limits,
         and returns the achievable extraction rates for each face.
+
+        When ``active_faces`` is provided, only those faces receive targets and
+        equipment; the per-mode allocation fractions are renormalized over the active
+        subset and locked/removed faces get zero rates.
         """
         mode_name = mode.name if hasattr(mode, "name") else str(mode)
         self._schedule_shifts(mode_name)
+
+        override = None
+        if active_faces is not None:
+            active_set = set(active_faces)
+            active_order = [f for f in self.faces if f in active_set]
+            if 0 < len(active_order) < len(self.faces):
+                # Solve the mode fractions over the active subset directly so the
+                # Ore-1/Ore-2 blend stays exact for the currently available faces.
+                subset_fracs = self._allocations_for_ore_fracs(
+                    [1.0 - f.mean_ore_fraction for f in active_order],
+                    self._mode_rates,
+                )
+                mode_fracs = subset_fracs.get(mode_name)
+                if mode_fracs is None:
+                    mode_fracs = subset_fracs.get(
+                        mode_name.replace("_MINE_SURGING", "")
+                    )
+                if mode_fracs is not None:
+                    index_of = {id(f): i for i, f in enumerate(self.faces)}
+                    override = [0.0] * len(self.faces)
+                    for j, face in enumerate(active_order):
+                        override[index_of[id(face)]] = mode_fracs[j]
+
+        if override is not None:
+            self.current_shift_allocations = override
+            self._refresh_shift_allocation_fractions()
+        else:
+            base_fracs = self._get_allocations_for_mode(mode_name)
+            if base_fracs is not None:
+                self.current_shift_allocations = list(base_fracs)
+                self._refresh_shift_allocation_fractions()
 
         self.total_extra_trucks.value = 0.0
         fracs = self.current_shift_allocations
@@ -504,4 +569,3 @@ class FleetController(drs.Module):
 
     def is_terminating_condition_met(self) -> bool:
         return False
-

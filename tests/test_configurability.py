@@ -277,6 +277,63 @@ def test_multi_face_simulation_execution_3_faces():
     assert sum(f.cumulative_extracted_mass.value for f in faces) > 0.0
 
 
+def test_allocate_active_faces_subset_preserves_blend():
+    """Locked faces must receive zero rates and the active subset must keep the
+    exact Ore-1/Ore-2 blend when only part of the face pool is available."""
+    ore2_fracs = [0.15, 0.45, 0.60, 0.30]  # -> Ore-1 fractions 0.85/0.55/0.40/0.70
+    faces = []
+    for i, frac in enumerate(ore2_fracs, 1):
+        gen = StochasticFaciesGenerator(
+            mean_fraction=frac, std_dev=0.0, prob_new_facies=0.0, variation_same_facies=0.0
+        )
+        faces.append(
+            MineFace(
+                name=f"F{i}",
+                face_id=i,
+                generator=gen,
+                min_ore_mass=1000.0,
+                max_ore_mass=2000.0,
+                total_ore_to_extract=1.0e9,
+                ore_to_be_extracted_during_warming_period=0.0,
+                mean_ore_fraction=frac,
+                std_dev_ore_fraction=0.0,
+                prob_new_facies=0.0,
+                variation_same_facies=0.0,
+                initial_parcel_mass=1000.0,
+            )
+        )
+    mode_rates = {
+        "MODE_A": (3600.0, 2400.0),
+        "MODE_A_CONTINGENCY": (3900.0, 0.0),
+        "MODE_B": (4600.0, 800.0),
+        "MODE_B_CONTINGENCY": (0.0, 2900.0),
+    }
+    fleet_ctrl = FleetController(
+        faces=faces,
+        total_truck_count=10.0,
+        total_lhd_count=3.0,
+        max_trucks_per_face=6.0,
+        max_lhds_per_face=2.0,
+        face_haul_distance=[1.5, 2.2, 2.5, 3.0],
+        face_accessibility_fraction=[0.93, 0.91, 0.91, 0.90],
+        mode_rates=mode_rates,
+    )
+
+    active = [faces[0], faces[1]]
+    rates = fleet_ctrl.allocate(6000.0, "MODE_A", active_faces=active)
+    assert math.isclose(rates[2], 0.0, abs_tol=1e-9)
+    assert math.isclose(rates[3], 0.0, abs_tol=1e-9)
+    assert rates[0] > 0.0 and rates[1] > 0.0
+    ore1 = rates[0] * 0.85 + rates[1] * 0.55
+    ore2 = rates[0] * 0.15 + rates[1] * 0.45
+    assert math.isclose(ore1 / (ore1 + ore2), 3600.0 / 6000.0, rel_tol=1e-3)
+    assert all(v.value == 0.0 for v in fleet_ctrl.face_target_extraction_rates[2:])
+
+    fleet_ctrl.allocate(6000.0, "MODE_A")
+    assert all(v.value > 0.0 for v in fleet_ctrl.face_target_extraction_rates)
+    assert fleet_ctrl.current_shift_allocations == fleet_ctrl._mode_allocations["MODE_A"]
+
+
 def test_plant_with_multiple_stockpiles():
     stocks = create_stockpiles([
         {"name": "S1", "initial_mass": 500.0},

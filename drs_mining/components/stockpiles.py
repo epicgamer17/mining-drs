@@ -1,5 +1,5 @@
 import math
-from typing import Mapping, Sequence, List
+from typing import Mapping, Sequence, List, Optional
 
 import drs
 from drs import Storage
@@ -30,7 +30,7 @@ class Stockpile(Storage):
         self.expected_attributes = list(expected_attributes)
         self.attr_inflow = float(attr_inflow)
 
-        # Bind current_mass to Storage's underlying Level for compatibility
+        # Bind current_mass and mass to Storage's underlying Level for compatibility
         self.current_mass = self._level
         self.actual_outflow_rate = drs.Variable(f"{name}_actual_outflow_rate", 0.0)
 
