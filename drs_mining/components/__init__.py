@@ -23,6 +23,19 @@ from .factories import (
     create_lhd_fleet,
 )
 
+from .planning import (
+    MiningPriority,
+    AreaReadinessTarget,
+    StrategicYearTarget,
+    strategic_target_for_year,
+    trajectory_progress_ratio,
+    select_mining_priority,
+)
+from .allocation import (
+    FaceAllocationResult,
+    solve_face_allocation_rates,
+)
+
 __all__ = [
     "Storage",
     "Processor",
@@ -49,5 +62,13 @@ __all__ = [
     "MODES",
     "OperatingMode",
     "RequireDecision",
+    "MiningPriority",
+    "AreaReadinessTarget",
+    "StrategicYearTarget",
+    "strategic_target_for_year",
+    "trajectory_progress_ratio",
+    "select_mining_priority",
     "ContinuousFleetLogistics",
+    "FaceAllocationResult",
+    "solve_face_allocation_rates",
 ]
