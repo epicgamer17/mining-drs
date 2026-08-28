@@ -1,20 +1,20 @@
-"""Shelswell (2017) Discrete Event Simulation with DRS Blending Modes & Plant Operations.
+"""Shelswell (2017) DES Haulage + Single-Face DRS Blending Modes Simulation.
 
 Combines:
-1. DES Underground Truck-Loader Haulage (Shelswell & Labrecque 2017):
-   - 7-level spiral ramp + 2100 m decline access.
-   - Shared level LHDs, AD30 haulage trucks, operator pooling, shift seat-time.
-   - Mechanical availability downtime windows, refuelling, traffic congestion.
-2. DRS Metallurgical Plant & Operating Mode Controller:
-   - Campaign supervisory controller (Mode A: 34 days, Mode B: 34 days, Shutdown: 1 day).
-   - Metallurgical plant with dual-ore blending (Mode A, Mode B, Contingency, Surging, Shutdown).
-   - Continuous surface stockpiles (Ore 1 Stockpile, Ore 2 Stockpile, Waste Stockpile).
-3. Dynamic Target-Driven Fleet Dispatch & Buffer Regulation:
-   - Daily production targets (Ore 1, Ore 2, Waste) generated dynamically from plant operating modes.
-   - Target deficit-weighted payload dispatch with Shelswell highest-unclaimed-muck routing.
-   - Rate and buffer-aware dispatch throttling maintaining total stockpile at target buffer (60,000 t).
-4. Two-Phase Lifecycle & Milestone-Based Execution:
-   - Phase 1 Warmup (600k t) + reset mode timers + Phase 2 Production (6.6 Mt).
+1. Single Mine Face with Stochastic Geological Facies (blending_modes paradigm):
+   - 1 Active mining face with StochasticFaciesGenerator (mean: 0.30, std: 0.05).
+   - Stochastic parcel progression (30,000 - 50,000 tonnes per parcel).
+   - Each parcel carries an ore fraction f representing the split into Ore 2 and Ore 1.
+2. Discrete Event Simulation (DES) Underground Haulage (Shelswell & Labrecque 2017):
+   - AD30 haulage trucks, 2 shared face LHD loaders, operator pooling, shift seat-time.
+   - 10.5 h shift calendar with 1.5 h off-shift gaps, 85% mechanical availability.
+   - Passing bay traffic congestion, surface fuel depot, surface dump station.
+3. Surface Stockpile Coupling & DRS Plant Operations:
+   - When a truck dumps at the surface hopper, its payload is split into Ore 1 and Ore 2
+     inflow rates according to the loaded parcel's ore fraction f.
+   - Dual continuous stockpiles (Ore 1 & Ore 2, buffer target: 60,000 t).
+   - Supervisory campaign controller (Mode A: 34d, Mode B: 34d, Shutdown: 1d).
+   - Metallurgical plant with dynamic mode resolution (Mode A, Mode B, Contingency, Surging).
 """
 
 from __future__ import annotations
@@ -41,13 +41,15 @@ import pandas as pd
 from drs.plot import (
     Dashboard,
     plot_time_series,
-    plot_dual_axis_step,
     plot_safety_margin,
+    plot_dual_axis_step,
 )
 from drs_mining.components.modes import MODES, OperatingMode
 from drs_mining.components.plant import MetallurgicalPlant, PlantDrawRates
 from drs_mining.components.stockpiles import Stockpile
 from drs_mining.components.controllers import OperatingModeController
+from drs_mining.components.generators import StochasticFaciesGenerator
+from drs_mining.components.mine_face import MineFace
 from drs_mining.components.plot import (
     MODE_PALETTE,
     prepare_history,
@@ -68,11 +70,11 @@ from drs_mining.components.plot import (
 DAYS_IN_YEAR = 365.0
 
 # NOTE: Statutory non-production holidays (NON_PRODUCTION_DAYS = 11 in Shelswell 2017)
-# have been disabled (set to 0) in this blending baseline. In the original Shelswell DES,
-# 11 unworked holidays cause the surface stockpile to absorb 1-day continuous mill draws
-# (dipping by 5.4k-6.0k t per holiday). Disabling holidays ensures uninterrupted fleet supply,
-# keeping the total stockpile tightly centered at the target 60,000 t buffer matching
-# blending_modes/simulation.py and shelswell_single_face/simulation.py.
+# have been disabled (set to 0) in this single-face blending baseline. In the original
+# Shelswell DES, 11 unworked holidays cause the surface stockpile to absorb 1-day
+# continuous mill draws (dipping by 5.4k-6.0k t per holiday). Disabling holidays
+# ensures uninterrupted fleet supply, keeping the total stockpile tightly centered
+# at the target 60,000 t buffer matching blending_modes/simulation.py.
 NON_PRODUCTION_DAYS = 0
 
 SHIFT_SECONDS = 12.0 * 3600.0  # 12 h calendar slot per shift
@@ -80,16 +82,15 @@ SHIFT_WORK_HOURS = 10.5  # 10.5 h shift duration
 HAULAGE_SEAT_FRACTION = 0.5417  # 54.17 % workable seat availability
 SEAT_PER_SHIFT_SEC = HAULAGE_SEAT_FRACTION * SHIFT_SECONDS  # ~6.5 h
 
-# Mine Geometry
+# Mine Geometry (Level 4 Active Face)
 DECLINE_M = 2100.0
 LEVEL_SPACING_M = 300.0
-ORE_LEVEL_DRIFT_M = 60.0  # 40 m loadout + 20 m air door
-WASTE_LEVEL_DRIFT_M = 75.0  # 55 m loadout + 20 m air door
-ROM_SURFACE_M = 300.0  # ROM pads from portal
-WASTE_SURFACE_M = 440.0  # Waste dump from portal
-N_LEVELS = 7
+FACE_LEVEL = 4  # Mine face located at Level 4
+RAMP_M = (FACE_LEVEL - 1) * LEVEL_SPACING_M  # 900 m
+LEVEL_DRIFT_M = 60.0  # 40 m loadout + 20 m air door
+SURFACE_M = 300.0  # Surface dump hopper from portal
 
-# Speeds (Table 1, kph)
+# Speeds (Shelswell Table 1, kph)
 SPEEDS = {
     "surface": {"empty": 17.4, "loaded": 13.4},
     "decline": {"empty": 15.1, "loaded": 11.2},
@@ -98,18 +99,15 @@ SPEEDS = {
 }
 
 # Payloads & Equipment Durations
-ORE_PAYLOAD = 26.1  # tonnes
-WASTE_PAYLOAD = 24.6  # tonnes
-TRUCK_LOAD_SPOT_MIN = 0.82
-LHD_ACQUISITION_MAX_MIN = 3.0
-TRUCK_LOAD_DUR_MIN = 6.69
+ORE_PAYLOAD = 26.1  # AD30 rated capacity (tonnes)
+TRUCK_LOAD_SPOT_MIN = 0.50
+LHD_ACQUISITION_MAX_MIN = 0.80
+TRUCK_LOAD_DUR_MIN = 3.50  # 2 bucket passes with high-capacity loader
 DUMP_SPOT_MIN = 0.57
 DUMP_MIN = 0.88
 
-# Surface Dump Tip Capacities
-ROM_TIP_SITES_ORE1 = 2
-ROM_TIP_SITES_ORE2 = 2
-WASTE_TIP_SITES = 2
+# Surface Dump Hopper
+SURFACE_TIP_SITES = 2
 
 # Refuelling
 FUEL_BURN_PCT_PER_SEC = 100.0 / (7.5 * 3600.0)
@@ -144,14 +142,14 @@ def _in_shift_window(t: float) -> bool:
 # ---------------------------------------------------------------------------
 class TruckPhase(Enum):
     IDLE = "idle"  # parked on surface, awaiting dispatch or shift
-    EMPTY = "empty"  # empty travel surface -> underground loadout
-    WAIT_LOAD = "wait_load"  # queued at level LHD
-    SPOT_LOAD = "spot_load"  # spotting at loadout bay
+    EMPTY = "empty"  # empty travel surface -> underground face
+    WAIT_LOAD = "wait_load"  # queued at face LHD
+    SPOT_LOAD = "spot_load"  # spotting at face loading bay
     ACQUIRE = "acquire"  # waiting for LHD
     LOADING = "loading"  # active loading
-    LOADED = "loaded"  # loaded travel level -> surface tip
-    WAIT_DUMP = "wait_dump"  # queued at surface dump station
-    DUMPING = "dumping"  # active dumping into stockpile
+    LOADED = "loaded"  # loaded travel face -> surface tip
+    WAIT_DUMP = "wait_dump"  # queued at surface dump hopper
+    DUMPING = "dumping"  # active dumping into stockpiles
     REFUELING = "refueling"  # fuel depot
 
 
@@ -191,10 +189,8 @@ class Truck:
     truck_id: str
     timer: drs.Timer
     phase: TruckPhase = TruckPhase.IDLE
-    target_loadout: int = -1
-    target_level: int = 4
-    payload_type: str = "ORE_1"  # "ORE_1", "ORE_2", or "WASTE"
     current_payload: float = 0.0
+    payload_ore_fraction: float = 0.30  # Active parcel grade captured at loading
     seat_used: float = 0.0
     fuel: float = 100.0
     refuel_threshold: float = 30.0
@@ -206,39 +202,33 @@ class Truck:
 
 
 @dataclass
-class Loadout:
-    idx: int
-    level: int
-    bay_type: str  # "ORE_1", "ORE_2", or "WASTE"
-    muck_remaining: drs.Level
-    queue: list = field(default_factory=list)
-    last_assigned_seq: int = 0
-    active: bool = True
-
-
-@dataclass
-class DumpSite:
-    name: str
-    capacity: int
+class SurfaceDumpStation:
+    name: str = "SURFACE_CRUSHER_HOPPER"
+    capacity: int = SURFACE_TIP_SITES
     in_use: int = 0
     queue: list = field(default_factory=list)
-    stockpile: Optional[Stockpile] = None
-    level_accumulator: Optional[drs.Level] = None
-    _active_rate: float = 0.0  # continuous inflow rate (t/sec) into stockpile during dumping
+    _active_ore1_rate: float = 0.0  # t/sec into Ore1Stock
+    _active_ore2_rate: float = 0.0  # t/sec into Ore2Stock
 
 
 # ---------------------------------------------------------------------------
-# Hybrid Simulation Module: Shelswell DES + DRS Blending Modes
+# Hybrid Simulation Module: Shelswell DES + Single Mine Face Blending Modes
 # ---------------------------------------------------------------------------
-class ShelswellBlendingHaulage(drs.Module):
+class ShelswellSingleFaceBlending(drs.Module):
     """Hybrid simulation combining Shelswell DES Truck-Loader Haulage with
-    Continuous DRS Stockpiles and Metallurgical Plant Operations.
+    Single-Face Stochastic Parcel Geology and DRS Blending Modes.
+
+    - Single MineFace produces geological parcels of 30k-50k tonnes.
+    - Trucks haul ore from the face; during dumping, each payload is split
+      into Ore 1 and Ore 2 stockpiles based on the active parcel's ore fraction.
+    - MetallurgicalPlant & OperatingModeController run continuously on surface stockpiles.
     """
 
     def __init__(
         self,
         num_trucks: int = 18,
         num_operators: int = 18,
+        num_lhds: int = 2,
         availability: float = 0.85,
         target_ore_stock_level: float = 60000.0,
         critical_ore2_level: float = 20400.0,
@@ -247,24 +237,29 @@ class ShelswellBlendingHaulage(drs.Module):
         duration_of_production_campaigns: float = 34.0,
         duration_of_shutdowns: float = 1.0,
         duration_of_contingency_segments: float = 1.0,
-        seed: int = 42,
-        waste_daily_target: float = 500.0,
+        mean_ore_fraction: float = 0.30,
+        std_dev_ore_fraction: float = 0.05,
+        prob_new_facies: float = 0.3,
+        variation_same_facies: float = 0.01,
+        min_ore_mass: float = 30000.0,
+        max_ore_mass: float = 50000.0,
         mode_a_ore1_milling_rate: float = 3600.0,
         mode_a_ore2_milling_rate: float = 2400.0,
         mode_a_contingency_ore1_milling_rate: float = 3900.0,
         mode_b_ore1_milling_rate: float = 4600.0,
         mode_b_ore2_milling_rate: float = 800.0,
         mode_b_contingency_ore2_milling_rate: float = 2500.0,
+        seed: int = 42,
     ):
         super().__init__()
         self.num_trucks = num_trucks
         self.num_operators = num_operators
+        self.num_lhds = num_lhds
         self.availability = availability
         self.target_ore_stock_level = target_ore_stock_level
         self.critical_ore2_level = critical_ore2_level
         self.total_ore_to_extract = total_ore_to_extract
         self.ore_to_be_extracted_during_warming_period = ore_to_be_extracted_during_warming_period
-        self.waste_daily_target = waste_daily_target
 
         self.rng = random.Random(seed)
         self.seed = seed
@@ -279,32 +274,57 @@ class ShelswellBlendingHaulage(drs.Module):
         self._shift_marker = -1
         self._holiday_today = False
 
-        # Global time tracker
+        # Global time tracker (in seconds)
         self.gt = drs.Timer("gt", 0.0, rate=1.0)
 
-        # Continuous Stockpiles (Tonnes)
-        init_ore1 = 0.70 * target_ore_stock_level
-        init_ore2 = 0.30 * target_ore_stock_level
+        # 1. Single Underground Mine Face with Stochastic Geology
+        self.facies_gen = StochasticFaciesGenerator(
+            mean_fraction=mean_ore_fraction,
+            std_dev=std_dev_ore_fraction,
+            prob_new_facies=prob_new_facies,
+            variation_same_facies=variation_same_facies,
+        )
+        self.mine_face = MineFace(
+            name="mine_face",
+            face_id=1,
+            generator=self.facies_gen,
+            min_ore_mass=min_ore_mass,
+            max_ore_mass=max_ore_mass,
+            total_ore_to_extract=total_ore_to_extract,
+            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+            mean_ore_fraction=mean_ore_fraction,
+            std_dev_ore_fraction=std_dev_ore_fraction,
+            prob_new_facies=prob_new_facies,
+            variation_same_facies=variation_same_facies,
+            initial_parcel_mass=40000.0,
+        )
+
+        # 2. Continuous Surface Stockpiles (Tonnes)
+        init_ore1 = (1.0 - mean_ore_fraction) * target_ore_stock_level  # 42,000 t
+        init_ore2 = mean_ore_fraction * target_ore_stock_level  # 18,000 t
         self.ore1_stock = Stockpile(
             name="Ore1Stock",
-            expected_attributes=["grade"],
+            expected_attributes=["contained_ore_fraction_mass"],
             initial_mass=init_ore1,
-            initial_attributes={"grade": 1.0},
+            initial_attributes={
+                "contained_ore_fraction_mass": init_ore1 * mean_ore_fraction
+            },
             attr_inflow=1.0,
         )
         self.ore2_stock = Stockpile(
             name="Ore2Stock",
-            expected_attributes=["grade"],
+            expected_attributes=["contained_ore_fraction_mass"],
             initial_mass=init_ore2,
-            initial_attributes={"grade": 1.0},
-            attr_inflow=1.0,
+            initial_attributes={
+                "contained_ore_fraction_mass": init_ore2 * mean_ore_fraction
+            },
+            attr_inflow=0.0,
         )
-        self.waste_hauled = drs.Level("waste_hauled", 0.0)
+        self.total_extracted_ore = drs.Level("total_extracted_ore", 0.0)
         self.ore1_hauled = drs.Level("ore1_hauled", 0.0)
         self.ore2_hauled = drs.Level("ore2_hauled", 0.0)
-        self.cumulative_extracted_ore = drs.Level("cumulative_extracted_ore", 0.0)
 
-        # Plant & Mode Controller (operating in continuous days/seconds)
+        # 3. Plant & Campaign Controller
         self.mode_controller = OperatingModeController(
             duration_of_production_campaigns=duration_of_production_campaigns,
             duration_of_shutdowns=duration_of_shutdowns,
@@ -324,7 +344,7 @@ class ShelswellBlendingHaulage(drs.Module):
             mode_b_contingency_ore2_milling_rate=mode_b_contingency_ore2_milling_rate,
         )
 
-        # Fleet & Operators
+        # 4. Fleet & Operators
         self.trucks: List[Truck] = []
         for i in range(1, num_trucks + 1):
             timer = drs.Timer(f"tr_{i}_act", 0.0, rate=-1.0)
@@ -335,75 +355,31 @@ class ShelswellBlendingHaulage(drs.Module):
 
         self.operators = [Operator(i) for i in range(num_operators)]
 
-        # Underground Loadouts: Ore 1, Ore 2, and Waste per level
-        self.loadouts: List[Loadout] = []
-        lo_idx = 0
-        for level in range(1, N_LEVELS + 1):
-            for bay_type in ("ORE_1", "ORE_2", "WASTE"):
-                self.loadouts.append(
-                    Loadout(
-                        idx=lo_idx,
-                        level=level,
-                        bay_type=bay_type,
-                        muck_remaining=drs.Level(f"muck_L{level}_{bay_type}", 0.0),
-                    )
-                )
-                lo_idx += 1
-
-        # Active levels: ~1 level per 2 trucks, centered at L4
-        k = max(1, int(math.ceil(num_trucks / 2.0)))
-        lvls = []
-        if k % 2 == 1:
-            lvls.append(4)
-        for d in range(1, k // 2 + 1):
-            lvls += [4 - d, 4 + d]
-        self.active_levels = set(lvls)
-        for lo in self.loadouts:
-            lo.active = lo.level in self.active_levels
-
-        # Surface Dump Sites
-        self.dump_sites = {
-            "ORE_1": DumpSite(
-                "ROM_PAD_1", ROM_TIP_SITES_ORE1, stockpile=self.ore1_stock
-            ),
-            "ORE_2": DumpSite(
-                "ROM_PAD_2", ROM_TIP_SITES_ORE2, stockpile=self.ore2_stock
-            ),
-            "WASTE": DumpSite(
-                "WASTE_STOCKPILE",
-                WASTE_TIP_SITES,
-                level_accumulator=self.waste_hauled,
-            ),
-        }
-
-        # Daily Target Tracking
-        self.daily_target_ore1 = 0.0
-        self.daily_target_ore2 = 0.0
-        self.daily_target_waste = self.waste_daily_target
-        self.daily_hauled_ore1 = 0.0
-        self.daily_hauled_ore2 = 0.0
-        self.daily_hauled_waste = 0.0
-
-        # LHD and Shared Resources
-        self._lhd_busy = {level: False for level in range(1, N_LEVELS + 1)}
+        # 5. Face Loadout & Surface Dump Station
+        self.face_queue: List[Truck] = []
+        self._lhds_busy = 0
+        self.dump_station = SurfaceDumpStation()
         self._pumps_free = N_FUEL_PUMPS
-        self._dispatch_counter = 0
+
+        # Operational metrics
+        self.daily_target_ore = 6000.0
+        self.daily_hauled_ore = 0.0
         self.trips = 0
         self._cycle_sum = 0.0
         self.traffic_delay_sum = 0.0
         self.horizon_sec = float("inf")
 
-        # Telemetry / History records
+        # History telemetry
         self.history_records: List[dict] = []
 
-    # -- DRS Hooks -----------------------------------------------------------
+    # -- DRS Engine Hooks ----------------------------------------------------
     def is_terminating_condition_met(self) -> bool:
-        if (self.ore1_hauled.value + self.ore2_hauled.value) >= self.total_ore_to_extract - 1e-6:
+        if self.mine_face.cumulative_extracted_mass.value >= self.mine_face.total_ore_to_extract - 1e-6:
             return True
         return self.gt.value >= self.horizon_sec - 1e-6
 
     def time_to_event(self) -> float:
-        """Next discrete event boundary (truck timer, shift, day, mode timer)."""
+        """Find the earliest discrete event time boundary."""
         best = DT_MAX
         for tr in self.trucks:
             v = tr.timer.value
@@ -414,7 +390,7 @@ class ShelswellBlendingHaulage(drs.Module):
         next_shift = (math.floor(t / SHIFT_SECONDS) + 1.0) * SHIFT_SECONDS
         best = min(best, next_day - t, next_shift - t)
 
-        # Operating mode / campaign timer boundaries (scaled to seconds)
+        # Campaign timer boundary (converted to seconds)
         camp_thresh = (
             self.mode_controller.duration_of_shutdowns
             if self.mode_controller.active_campaign_mode.value.name == "SHUTDOWN"
@@ -426,6 +402,7 @@ class ShelswellBlendingHaulage(drs.Module):
         if rem_camp_days > 1e-6:
             best = min(best, rem_camp_days * 86400.0)
 
+        # Contingency timer boundary
         if "_CONTINGENCY" in self.plant.active_operating_mode.value.name:
             c_thresh = self.plant.duration_of_contingency_segments
             rem_c_days = max(
@@ -437,7 +414,7 @@ class ShelswellBlendingHaulage(drs.Module):
         return max(best, 1e-6)
 
     def step(self, dt: float):
-        """Continuous integration between events."""
+        """Continuous integration between discrete event boundaries."""
         self.gt.step(dt)
         dt_days = dt / 86400.0
 
@@ -450,7 +427,7 @@ class ShelswellBlendingHaulage(drs.Module):
         if active_mode_name in self.plant._CONTINGENCY_MODES:
             self.plant.current_contingency_duration.step(dt_days)
 
-        # Step trucks
+        # Step trucks (timers, seat time, fuel)
         for tr in self.trucks:
             if tr.timer.value > 0.0:
                 tr.timer.step(dt)
@@ -462,19 +439,22 @@ class ShelswellBlendingHaulage(drs.Module):
                     op = self.operators[tr.operator]
                     op.used_seat = min(SEAT_PER_SHIFT_SEC, op.used_seat + dt)
 
-        # Continuous Stockpiles Inflow / Outflow balance
-        ore1_in_rate = self.dump_sites["ORE_1"]._active_rate  # t/sec
-        ore2_in_rate = self.dump_sites["ORE_2"]._active_rate  # t/sec
+        # Inflow rates from surface dumping
+        ore1_in_rate = self.dump_station._active_ore1_rate  # t/sec
+        ore2_in_rate = self.dump_station._active_ore2_rate  # t/sec
 
+        # Calculate plant draw rates based on campaign mode & stockpile levels
         plant_draw, _ = self.plant.get_target_rates(
             self.mode_controller.active_campaign_mode.value,
             ore1_level=self.ore1_stock.level,
             ore2_level=self.ore2_stock.level,
+            stockpile2_routing_fraction=self.mine_face.active_parcel_ore_fraction.value,
         )
 
         ore1_draw_rate_sec = plant_draw.ore1 / 86400.0
         ore2_draw_rate_sec = plant_draw.ore2 / 86400.0
 
+        # Feed stockpiles and draw into metallurgical plant
         out1 = self.ore1_stock.feed_and_draw(ore1_in_rate, ore1_draw_rate_sec)
         out2 = self.ore2_stock.feed_and_draw(ore2_in_rate, ore2_draw_rate_sec)
         self.ore1_stock.step(dt)
@@ -483,13 +463,12 @@ class ShelswellBlendingHaulage(drs.Module):
         self.plant.process(out1 + out2)
         self.plant.cumulative_milled_mass.step(dt)
 
-        # Waste accumulator step
-        self.waste_hauled.step(dt)
+        # Accumulators
+        self.total_extracted_ore.step(dt)
         self.ore1_hauled.step(dt)
         self.ore2_hauled.step(dt)
-        self.cumulative_extracted_ore.step(dt)
 
-        # Record telemetry snapshot periodically
+        # Record telemetry record
         self._record_telemetry(plant_draw)
 
     # -- Event Policy & Target Setting ----------------------------------------
@@ -512,7 +491,7 @@ class ShelswellBlendingHaulage(drs.Module):
                         changed = True
 
     def _update_operating_mode_and_targets(self):
-        """Updates campaign mode, plant operating mode, and daily haulage targets."""
+        """Updates campaign mode, plant operating mode, and extraction target."""
         # 1. Update Campaign Mode (Mode A, Mode B, Shutdown)
         camp_mode = self.mode_controller.update(
             ore2_stock_level=self.ore2_stock.level,
@@ -524,39 +503,27 @@ class ShelswellBlendingHaulage(drs.Module):
             camp_mode,
             ore1_level=self.ore1_stock.level,
             ore2_level=self.ore2_stock.level,
+            stockpile2_routing_fraction=self.mine_face.active_parcel_ore_fraction.value,
         )
 
-        # 3. Derive Daily Haulage Targets
+        # 3. Derive Daily Extraction Target
         mode_name = self.plant.active_operating_mode.value.name
         if mode_name == "SHUTDOWN":
-            self.daily_target_ore1 = 0.0
-            self.daily_target_ore2 = 0.0
-            self.daily_target_waste = self.waste_daily_target * 1.5  # boost dev during shutdown
-        elif "_CONTINGENCY" in mode_name:
-            self.daily_target_ore1 = plant_draw.ore1
-            self.daily_target_ore2 = plant_draw.ore2
-            self.daily_target_waste = self.waste_daily_target
+            self.daily_target_ore = 0.0
         elif "_MINE_SURGING" in mode_name:
-            # Surging draw down: scale targets down to allow stockpile reduction
-            self.daily_target_ore1 = plant_draw.ore1 * 0.70
-            self.daily_target_ore2 = plant_draw.ore2 * 0.70
-            self.daily_target_waste = self.waste_daily_target * 1.2
+            # Surging draw down: scale extraction down to allow stockpile reduction
+            self.daily_target_ore = plant_draw.total * 0.70
         else:
-            self.daily_target_ore1 = plant_draw.ore1
-            self.daily_target_ore2 = plant_draw.ore2
-            self.daily_target_waste = self.waste_daily_target
+            self.daily_target_ore = plant_draw.total
 
     def _calendar_update(self):
         t = self.gt.value
         day = int(t // 86400.0)
         if self._cur_day != day:
             self._cur_day = day
-            self._holiday_today = False
-            self.daily_hauled_ore1 = 0.0
-            self.daily_hauled_ore2 = 0.0
-            self.daily_hauled_waste = 0.0
+            self._holiday_today = day in self.holidays
+            self.daily_hauled_ore = 0.0
             self._update_operating_mode_and_targets()
-            self._schedule_daily_muck()
 
         marker = int(t // SHIFT_SECONDS)
         if self._shift_marker != marker:
@@ -568,23 +535,6 @@ class ShelswellBlendingHaulage(drs.Module):
             for tr in self.trucks:
                 tr.seat_used = 0.0
                 self._schedule_down_window(tr, t)
-
-    def _schedule_daily_muck(self):
-        """Replenishes underground loadouts with daily muck calls."""
-        n_act = max(1, len(self.active_levels))
-        ore1_call_per_lvl = max(1200.0, (self.daily_target_ore1 * 1.5) / n_act)
-        ore2_call_per_lvl = max(900.0, (self.daily_target_ore2 * 1.5) / n_act)
-        waste_call_per_lvl = max(400.0, (self.daily_target_waste * 1.5) / n_act)
-
-        for lo in self.loadouts:
-            if not lo.active:
-                continue
-            if lo.bay_type == "ORE_1":
-                lo.muck_remaining.value += _tri(self.rng, ore1_call_per_lvl, 0.25)
-            elif lo.bay_type == "ORE_2":
-                lo.muck_remaining.value += _tri(self.rng, ore2_call_per_lvl, 0.25)
-            else:
-                lo.muck_remaining.value += _tri(self.rng, waste_call_per_lvl, 0.40)
 
     def _schedule_down_window(self, tr: Truck, t: float):
         if self._down_dur <= 1e-6:
@@ -599,7 +549,7 @@ class ShelswellBlendingHaulage(drs.Module):
     def _in_down_window(self, tr: Truck, t: float) -> bool:
         return tr.down_start <= t < tr.down_end
 
-    # -- Dispatch Policy (Target & Buffer Driven) -----------------------------
+    # -- Dispatch Policy (Target & Buffer Aware) ------------------------------
     def _try_dispatch(self, tr: Truck) -> bool:
         t = self.gt.value
         if (
@@ -611,6 +561,7 @@ class ShelswellBlendingHaulage(drs.Module):
             self._release_operator(tr)
             return False
 
+        # Refuelling check
         if tr.fuel <= tr.refuel_threshold:
             if self._pumps_free > 0:
                 if tr.operator < 0 and not self._acquire_operator(tr):
@@ -622,106 +573,27 @@ class ShelswellBlendingHaulage(drs.Module):
             return False
 
         # Target and Buffer dispatch regulation
-        # NOTE: If the surface total stockpile is at or above target buffer (60k) and daily
-        # ore haulage is ahead of target schedule, dispatch is throttled to track mill draw.
         total_stock = self.ore1_stock.level + self.ore2_stock.level
         mode_name = self.plant.active_operating_mode.value.name
         if mode_name == "SHUTDOWN":
             self._release_operator(tr)
             return False
 
+        # Progress of current 24-hr day
         day_progress = (t % 86400.0) / 86400.0
-        expected_ore_hauled_by_now = (self.daily_target_ore1 + self.daily_target_ore2) * day_progress
-        if (
-            total_stock >= self.target_ore_stock_level
-            and (self.daily_hauled_ore1 + self.daily_hauled_ore2) > expected_ore_hauled_by_now + 100.0
-        ):
+        expected_hauled_by_now = self.daily_target_ore * day_progress
+        if total_stock >= self.target_ore_stock_level and self.daily_hauled_ore > expected_hauled_by_now + 100.0:
             self._release_operator(tr)
             return False
-
-        # Select Payload Type (ORE_1, ORE_2, WASTE) based on Daily Target Deficits
-        ptype = self._select_payload_by_target_deficit()
-        tr.payload_type = ptype
-
-        cands = [
-            lo
-            for lo in self.loadouts
-            if lo.active and lo.bay_type == ptype and lo.muck_remaining.value > 5.0
-        ]
-        if not cands:
-            # Fallback to any active muck bay with muck
-            cands = [
-                lo
-                for lo in self.loadouts
-                if lo.active and lo.muck_remaining.value > 5.0
-            ]
-            if not cands:
-                self._release_operator(tr)
-                return False
-            # Update truck payload to fallback bay type
-            target = max(
-                cands,
-                key=lambda lo: (lo.muck_remaining.value, -lo.last_assigned_seq),
-            )
-            tr.payload_type = target.bay_type
-            ptype = target.bay_type
-        else:
-            target = max(
-                cands,
-                key=lambda lo: (lo.muck_remaining.value, -lo.last_assigned_seq),
-            )
 
         if not self._acquire_operator(tr):
             self._release_operator(tr)
             return False
 
-        self._dispatch_counter += 1
-        target.last_assigned_seq = self._dispatch_counter
-        claim = ORE_PAYLOAD if "ORE" in ptype else WASTE_PAYLOAD
-        target.muck_remaining.value = max(0.0, target.muck_remaining.value - claim)
-        tr.target_loadout = target.idx
-        tr.target_level = target.level
         tr.trip_start = self.gt.value
         tr.phase = TruckPhase.EMPTY
-        tr.timer.value = self._travel_time(tr, loaded=False)
+        tr.timer.value = self._travel_time(loaded=False)
         return True
-
-    def _select_payload_by_target_deficit(self) -> str:
-        """Chooses ORE_1, ORE_2, or WASTE proportionally to remaining daily target deficit."""
-        def_ore1 = max(0.0, self.daily_target_ore1 - self.daily_hauled_ore1)
-        def_ore2 = max(0.0, self.daily_target_ore2 - self.daily_hauled_ore2)
-        def_waste = max(0.0, self.daily_target_waste - self.daily_hauled_waste)
-
-        # Proportional stockpile starvation buffer feedback
-        if self.ore2_stock.level < self.critical_ore2_level:
-            urgency2 = 1.0 + (self.critical_ore2_level - self.ore2_stock.level) / max(1.0, self.critical_ore2_level)
-            def_ore2 *= urgency2
-        if self.ore1_stock.level < 0.35 * self.target_ore_stock_level:
-            urgency1 = 1.0 + (0.35 * self.target_ore_stock_level - self.ore1_stock.level) / max(1.0, 0.35 * self.target_ore_stock_level)
-            def_ore1 *= urgency1
-
-        total_def = def_ore1 + def_ore2 + def_waste
-        if total_def > 1e-3:
-            p_ore1 = def_ore1 / total_def
-            p_ore2 = def_ore2 / total_def
-            r = self.rng.random()
-            if r < p_ore1:
-                return "ORE_1"
-            elif r < p_ore1 + p_ore2:
-                return "ORE_2"
-            else:
-                return "WASTE"
-
-        w_ore1 = max(1.0, self.daily_target_ore1)
-        w_ore2 = max(1.0, self.daily_target_ore2)
-        w_waste = max(1.0, self.daily_target_waste)
-        w_tot = w_ore1 + w_ore2 + w_waste
-        r = self.rng.random()
-        if r < w_ore1 / w_tot:
-            return "ORE_1"
-        elif r < (w_ore1 + w_ore2) / w_tot:
-            return "ORE_2"
-        return "WASTE"
 
     def _acquire_operator(self, tr: Truck) -> bool:
         if tr.operator >= 0 and not self.operators[tr.operator].free:
@@ -738,11 +610,11 @@ class ShelswellBlendingHaulage(drs.Module):
             self.operators[tr.operator].free = True
             tr.operator = -1
 
-    # -- Transitions ---------------------------------------------------------
+    # -- State Transitions ---------------------------------------------------
     def _advance(self, tr: Truck) -> bool:
         ph = tr.phase
         if ph == TruckPhase.EMPTY:
-            self._enter_loadout(tr)
+            self._enter_face_loadout(tr)
             return True
         if ph == TruckPhase.SPOT_LOAD:
             tr.phase = TruckPhase.ACQUIRE
@@ -766,41 +638,45 @@ class ShelswellBlendingHaulage(drs.Module):
             return True
         return False
 
-    def _enter_loadout(self, tr: Truck):
-        lo = self.loadouts[tr.target_loadout]
-        lvl = lo.level
-        if self._lhd_busy[lvl]:
-            lo.queue.append(tr)
+    def _enter_face_loadout(self, tr: Truck):
+        if self._lhds_busy >= self.num_lhds:
+            self.face_queue.append(tr)
             tr.phase = TruckPhase.WAIT_LOAD
             tr.timer.value = 0.0
         else:
-            self._lhd_busy[lvl] = True
+            self._lhds_busy += 1
             tr.phase = TruckPhase.SPOT_LOAD
             tr.timer.value = _tri(self.rng, TRUCK_LOAD_SPOT_MIN * 60.0, 0.25)
 
     def _finish_loading(self, tr: Truck):
-        lvl = tr.target_level
-        is_ore = "ORE" in tr.payload_type
-        payload = _tri(self.rng, ORE_PAYLOAD if is_ore else WASTE_PAYLOAD, 0.08)
+        payload = _tri(self.rng, ORE_PAYLOAD, 0.08)
         tr.current_payload = payload
 
-        self._lhd_busy[lvl] = False
-        candidates = []
-        for lo in self.loadouts:
-            if lo.level == lvl and lo.queue:
-                candidates.append(lo)
-        if candidates:
-            chosen_lo = max(candidates, key=lambda l: len(l.queue))
-            nxt = chosen_lo.queue.pop(0)
-            self._lhd_busy[lvl] = True
+        # Capture active parcel ore fraction at loading
+        tr.payload_ore_fraction = self.mine_face.active_parcel_ore_fraction.value
+
+        # Advance MineFace parcel state
+        self.mine_face.parcel_extracted_mass.value += payload
+        self.mine_face.cumulative_extracted_mass.value += payload
+        if (
+            self.mine_face.parcel_extracted_mass.value
+            >= self.mine_face.active_parcel_initial_mass.value
+        ):
+            self.mine_face._load_next_batch()
+            self.mine_face.parcel_extracted_mass.value = 0.0
+
+        self._lhds_busy -= 1
+        if self.face_queue:
+            nxt = self.face_queue.pop(0)
+            self._lhds_busy += 1
             nxt.phase = TruckPhase.SPOT_LOAD
             nxt.timer.value = _tri(self.rng, TRUCK_LOAD_SPOT_MIN * 60.0, 0.25)
 
         tr.phase = TruckPhase.LOADED
-        tr.timer.value = self._travel_time(tr, loaded=True)
+        tr.timer.value = self._travel_time(loaded=True)
 
     def _enter_dump(self, tr: Truck):
-        site = self.dump_sites[tr.payload_type]
+        site = self.dump_station
         if site.in_use < site.capacity:
             self._start_dump(site, tr)
         else:
@@ -808,7 +684,7 @@ class ShelswellBlendingHaulage(drs.Module):
             tr.phase = TruckPhase.WAIT_DUMP
             tr.timer.value = 0.0
 
-    def _start_dump(self, site: DumpSite, tr: Truck):
+    def _start_dump(self, site: SurfaceDumpStation, tr: Truck):
         dur = _tri(self.rng, DUMP_SPOT_MIN * 60.0, 0.20) + _tri(
             self.rng, DUMP_MIN * 60.0, 0.10
         )
@@ -817,31 +693,29 @@ class ShelswellBlendingHaulage(drs.Module):
         tr.timer.value = dur
         tr.dump_dur = dur
 
-        # Inject continuous feed rate into target Stockpile during dumping
-        if site.stockpile is not None:
-            rate_val = tr.current_payload / dur
-            site._active_rate += rate_val
+        # Split payload into continuous inflow rates for Ore 1 and Ore 2
+        f = tr.payload_ore_fraction
+        ore2_mass = tr.current_payload * f
+        ore1_mass = tr.current_payload * (1.0 - f)
+
+        site._active_ore1_rate += ore1_mass / dur
+        site._active_ore2_rate += ore2_mass / dur
 
     def _finish_dumping(self, tr: Truck):
-        site = self.dump_sites[tr.payload_type]
-        if site.stockpile is not None:
-            rate_val = tr.current_payload / tr.dump_dur
-            site._active_rate = max(0.0, site._active_rate - rate_val)
-        elif site.level_accumulator is not None:
-            site.level_accumulator.value += tr.current_payload
+        site = self.dump_station
+        f = tr.payload_ore_fraction
+        ore2_mass = tr.current_payload * f
+        ore1_mass = tr.current_payload * (1.0 - f)
 
+        site._active_ore1_rate = max(0.0, site._active_ore1_rate - ore1_mass / tr.dump_dur)
+        site._active_ore2_rate = max(0.0, site._active_ore2_rate - ore2_mass / tr.dump_dur)
         site.in_use -= 1
 
-        if tr.payload_type == "ORE_1":
-            self.daily_hauled_ore1 += tr.current_payload
-            self.ore1_hauled.value += tr.current_payload
-            self.cumulative_extracted_ore.value += tr.current_payload
-        elif tr.payload_type == "ORE_2":
-            self.daily_hauled_ore2 += tr.current_payload
-            self.ore2_hauled.value += tr.current_payload
-            self.cumulative_extracted_ore.value += tr.current_payload
-        else:
-            self.daily_hauled_waste += tr.current_payload
+        # Bookkeeping
+        self.daily_hauled_ore += tr.current_payload
+        self.total_extracted_ore.value += tr.current_payload
+        self.ore1_hauled.value += ore1_mass
+        self.ore2_hauled.value += ore2_mass
 
         if site.queue:
             nxt = site.queue.pop(0)
@@ -860,23 +734,17 @@ class ShelswellBlendingHaulage(drs.Module):
         tr.timer.value = 0.0
 
     # -- Travel Times & Congestion -------------------------------------------
-    def _travel_time(self, tr: Truck, loaded: bool) -> float:
-        lvl = tr.target_level
-        is_ore = "ORE" in tr.payload_type
+    def _travel_time(self, loaded: bool) -> float:
         load_key = "loaded" if loaded else "empty"
 
         def seg(dist: float, kind: str) -> float:
             return dist / (SPEEDS[kind][load_key] / 3.6)
 
-        surface_dist = ROM_SURFACE_M if is_ore else WASTE_SURFACE_M
-        ramp_dist = (lvl - 1) * LEVEL_SPACING_M
-        drift_dist = ORE_LEVEL_DRIFT_M if is_ore else WASTE_LEVEL_DRIFT_M
-
         t = (
-            seg(surface_dist, "surface")
+            seg(SURFACE_M, "surface")
             + seg(DECLINE_M, "decline")
-            + seg(ramp_dist, "ramp")
-            + seg(drift_dist, "level")
+            + seg(RAMP_M, "ramp")
+            + seg(LEVEL_DRIFT_M, "level")
         )
 
         if not loaded:
@@ -894,16 +762,14 @@ class ShelswellBlendingHaulage(drs.Module):
         active_mode = self.plant.active_operating_mode.value.name
         camp_mode = self.mode_controller.active_campaign_mode.value.name
 
-        n_waiting_load = sum(len(lo.queue) for lo in self.loadouts)
-        n_waiting_dump = sum(len(s.queue) for s in self.dump_sites.values())
+        n_waiting_load = len(self.face_queue)
+        n_waiting_dump = len(self.dump_station.queue)
         n_refueling = sum(
             1 for tr in self.trucks if tr.phase == TruckPhase.REFUELING
         )
         n_operating = sum(
             1 for tr in self.trucks if tr.phase in OPERATING_PHASES
         )
-
-        total_ore_hauled = self.ore1_hauled.value + self.ore2_hauled.value
 
         self.history_records.append(
             {
@@ -914,25 +780,21 @@ class ShelswellBlendingHaulage(drs.Module):
                 "Ore2Stock_mass": self.ore2_stock.level,
                 "total_system_ore_mass": self.ore1_stock.level
                 + self.ore2_stock.level,
+                "MassOfCurrentParcel": self.mine_face.active_parcel_initial_mass.value,
+                "active_parcel_initial_mass": self.mine_face.active_parcel_initial_mass.value,
+                "active_parcel_ore_fraction": self.mine_face.active_parcel_ore_fraction.value,
+                "CurrentParcelRoutingFraction": self.mine_face.active_parcel_ore_fraction.value * 100.0,
+                "Grade (% Ore 2)": self.mine_face.active_parcel_ore_fraction.value * 100.0,
                 "active_operating_mode": self.plant.active_operating_mode.value,
                 "active_operating_mode_name": active_mode,
                 "campaign_mode": camp_mode,
                 "current_campaign_duration": self.mode_controller.current_campaign_duration.value,
                 "current_contingency_duration": self.plant.current_contingency_duration.value,
-                "daily_target_ore1": self.daily_target_ore1,
-                "daily_target_ore2": self.daily_target_ore2,
-                "daily_target_total_ore": self.daily_target_ore1
-                + self.daily_target_ore2,
-                "daily_hauled_ore1": self.daily_hauled_ore1,
-                "daily_hauled_ore2": self.daily_hauled_ore2,
-                "daily_hauled_total_ore": self.daily_hauled_ore1
-                + self.daily_hauled_ore2,
-                "daily_target_waste": self.daily_target_waste,
-                "daily_hauled_waste": self.daily_hauled_waste,
+                "daily_target_ore": self.daily_target_ore,
+                "daily_hauled_ore": self.daily_hauled_ore,
                 "ore1_hauled_total": self.ore1_hauled.value,
                 "ore2_hauled_total": self.ore2_hauled.value,
-                "cumulative_extracted_mass": total_ore_hauled,
-                "waste_hauled_total": self.waste_hauled.value,
+                "cumulative_extracted_mass": self.mine_face.cumulative_extracted_mass.value,
                 "milled_ore1_rate": plant_draw.ore1,
                 "milled_ore2_rate": plant_draw.ore2,
                 "cumulative_milled_mass": self.plant.cumulative_milled_mass.value,
@@ -944,19 +806,11 @@ class ShelswellBlendingHaulage(drs.Module):
             }
         )
 
-    def run(self, total_days: float = 365.0) -> pd.DataFrame:
-        self.horizon_sec = total_days * 86400.0
-        engine = drs.DRSEngine(max_step_size=DT_MAX)
-        engine.register(self)
-        engine.on_step(self.on_event)
-        engine.run(until=self.horizon_sec)
-        return pd.DataFrame(self.history_records)
-
 
 # ---------------------------------------------------------------------------
 # Statistics & Visual Dashboards
 # ---------------------------------------------------------------------------
-def print_statistics(plant, sim: ShelswellBlendingHaulage):
+def print_statistics(plant, mine):
     """Print operating-mode time-shares and throughput matching blending_modes format."""
     print("\n--- Output Statistics ---")
     total_time = plant.total_duration
@@ -979,31 +833,33 @@ def print_statistics(plant, sim: ShelswellBlendingHaulage):
 
     active_time = plant.active_duration(total_time)
     if active_time > 0:
-        total_ore_processed = plant.cumulative_milled_mass.value
+        if hasattr(plant, "cumulative_milled_mass"):
+            total_ore_processed = plant.cumulative_milled_mass.value
+        else:
+            total_ore_processed = mine.cumulative_extracted_mass.value
         throughput = total_ore_processed / active_time
         print(f"Throughput: {throughput:.4f} tons/day")
     else:
         print("Active time is 0. Cannot calculate throughput.")
 
 
-def print_simulation_statistics(sim: ShelswellBlendingHaulage, df: pd.DataFrame):
+def print_simulation_statistics(sim: ShelswellSingleFaceBlending, df: pd.DataFrame):
     """Prints operational summary statistics."""
     total_days = sim.gt.value / 86400.0
-    total_ore_hauled = sim.ore1_hauled.value + sim.ore2_hauled.value
+    total_ore_hauled = sim.mine_face.cumulative_extracted_mass.value
     total_milled = sim.plant.cumulative_milled_mass.value
     active_days = sim.plant.active_duration(sim.plant.total_duration)
 
     print("\n" + "=" * 70)
-    print(" SHELSWELL DES + DRS BLENDING MODES SIMULATION RESULTS")
+    print(" SHELSWELL SINGLE-FACE DES + DRS BLENDING MODES SIMULATION RESULTS")
     print("=" * 70)
     print(f"Simulation Horizon:        {total_days:.1f} days")
     print(f"Total Trips Completed:     {sim.trips}")
     avg_cycle = (sim._cycle_sum / max(1, sim.trips)) / 60.0
     print(f"Average Truck Cycle Time:  {avg_cycle:.2f} min")
-    print(f"Total Ore 1 Hauled:        {sim.ore1_hauled.value:,.1f} t ({sim.ore1_hauled.value / max(1e-3, total_days):.1f} t/d)")
-    print(f"Total Ore 2 Hauled:        {sim.ore2_hauled.value:,.1f} t ({sim.ore2_hauled.value / max(1e-3, total_days):.1f} t/d)")
-    print(f"Total Combined Ore Hauled: {total_ore_hauled:,.1f} t ({total_ore_hauled / max(1e-3, total_days):.1f} t/d)")
-    print(f"Total Waste Hauled:        {sim.waste_hauled.value:,.1f} t ({sim.waste_hauled.value / max(1e-3, total_days):.1f} t/d)")
+    print(f"Total Ore Hauled:          {total_ore_hauled:,.1f} t ({total_ore_hauled / max(1e-3, total_days):.1f} t/d)")
+    print(f"  ↳ Ore 1 Equivalent:      {sim.ore1_hauled.value:,.1f} t ({sim.ore1_hauled.value / max(1e-3, total_days):.1f} t/d)")
+    print(f"  ↳ Ore 2 Equivalent:      {sim.ore2_hauled.value:,.1f} t ({sim.ore2_hauled.value / max(1e-3, total_days):.1f} t/d)")
     print(f"Total Ore Milled:          {total_milled:,.1f} t ({total_milled / max(1e-3, active_days):.1f} t/active-day)")
     print(f"Final Ore 1 Stockpile:     {sim.ore1_stock.level:,.1f} t")
     print(f"Final Ore 2 Stockpile:     {sim.ore2_stock.level:,.1f} t")
@@ -1027,13 +883,13 @@ def print_simulation_statistics(sim: ShelswellBlendingHaulage, df: pd.DataFrame)
     print("=" * 70 + "\n")
 
 
-def plot_shelswell_blending_dashboard(
+def plot_single_face_shelswell_dashboard(
     df: pd.DataFrame,
-    output_path: str = "plots/shelswell_blending_dashboard.png",
+    output_path: str = "plots/shelswell_single_face_dashboard.png",
     palette: dict = None,
     figsize: Tuple[int, int] = (16, 44),
 ):
-    """Builds and saves the 11-panel comprehensive diagnostics dashboard."""
+    """Builds and saves the 11-panel diagnostics dashboard."""
     palette = palette or MODE_PALETTE
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -1045,7 +901,7 @@ def plot_shelswell_blending_dashboard(
         ncols=1,
         figsize=figsize,
         sharex=False,
-        title="Shelswell (2017) DES Haulage + DRS Blending Modes Diagnostics",
+        title="Shelswell Single-Face DES + DRS Blending Modes Diagnostics",
     )
     dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 9])
 
@@ -1088,28 +944,25 @@ def plot_shelswell_blending_dashboard(
         ax=dash[1],
     )
 
-    # 2. Daily Targets vs Hauled Production (Ore 1 & Ore 2)
-    plot_time_series(
+    # 2. Current Parcel Properties: Mass (tons) and Grade (% Ore 2)
+    plot_dual_axis_step(
         df,
-        y_columns=[
-            "daily_target_ore1",
-            "daily_hauled_ore1",
-            "daily_target_ore2",
-            "daily_hauled_ore2",
-        ],
-        title="Dynamic Target Deficit-Driven Underground Haulage Rates (t/d)",
-        is_step=True,
+        y1_col="MassOfCurrentParcel",
+        y2_col="Grade (% Ore 2)",
+        y1_label="Parcel Mass (tons)",
+        y2_label="Grade (% Ore 2)",
+        title="Current Parcel Properties",
         ax=dash[2],
     )
 
-    # 3. Total Daily Ore Target vs Combined Hauled
+    # 3. Daily Targets vs Hauled Production
     plot_time_series(
         df,
         y_columns=[
-            "daily_target_total_ore",
-            "daily_hauled_total_ore",
+            "daily_target_ore",
+            "daily_hauled_ore",
         ],
-        title="Total Daily Ore Extraction Target vs Combined Haulage (t/d)",
+        title="Daily Extraction Target vs Underground Hauled Production (t/d)",
         is_step=True,
         ax=dash[3],
     )
@@ -1196,23 +1049,25 @@ def plot_shelswell_blending_dashboard(
 
 
 # ---------------------------------------------------------------------------
-# CLI & Execution
+# CLI & Runner
 # ---------------------------------------------------------------------------
-def run_shelswell_blending_simulation(
+def run_shelswell_single_face_simulation(
     total_ore_to_extract: float = 6600000.0,
     ore_to_be_extracted_during_warming_period: float = 600000.0,
     total_days: Optional[float] = None,
     num_trucks: int = 18,
     num_operators: int = 18,
+    num_lhds: int = 2,
     availability: float = 0.85,
     target_ore_stock_level: float = 60000.0,
     seed: int = 42,
     plot: bool = True,
-) -> Tuple[ShelswellBlendingHaulage, pd.DataFrame]:
-    """Builds and runs the hybrid simulation with two-phase lifecycle support."""
-    sim = ShelswellBlendingHaulage(
+) -> Tuple[ShelswellSingleFaceBlending, pd.DataFrame]:
+    """Builds and runs the single face hybrid simulation with two-phase execution."""
+    sim = ShelswellSingleFaceBlending(
         num_trucks=num_trucks,
         num_operators=num_operators,
+        num_lhds=num_lhds,
         availability=availability,
         target_ore_stock_level=target_ore_stock_level,
         total_ore_to_extract=total_ore_to_extract,
@@ -1230,26 +1085,26 @@ def run_shelswell_blending_simulation(
         engine.run(until=sim.horizon_sec)
     else:
         # Phase 1: Warmup Phase (extract initial burn-in tonnage)
-        sim.total_ore_to_extract = ore_to_be_extracted_during_warming_period
+        sim.mine_face.total_ore_to_extract = ore_to_be_extracted_during_warming_period
         engine.run(until=float("inf"))
 
         # Reset plant operating mode duration timers for production metrics
         sim.plant.reset_mode_timers()
 
         # Phase 2: Production Measurement Phase
-        sim.total_ore_to_extract = total_ore_to_extract
+        sim.mine_face.total_ore_to_extract = total_ore_to_extract
         engine.run(until=float("inf"))
 
     df = pd.DataFrame(sim.history_records)
     print_simulation_statistics(sim, df)
-    print_statistics(sim.plant, sim)
+    print_statistics(sim.plant, sim.mine_face)
 
     df_prepared = prepare_history(df)
     print_transition_log(
         df_prepared,
         critical_ore2_level=sim.critical_ore2_level,
         target_ore_stock_level=target_ore_stock_level,
-        label="Shelswell Blending",
+        label="Shelswell Single-Face Blending",
     )
     print_deficit_by_mode(
         df_prepared,
@@ -1258,13 +1113,13 @@ def run_shelswell_blending_simulation(
     )
 
     if plot and len(df_prepared) > 0:
-        plot_shelswell_blending_dashboard(df_prepared)
+        plot_single_face_shelswell_dashboard(df_prepared)
     return sim, df_prepared
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run Shelswell DES + DRS Blending Modes Hybrid Simulation"
+        description="Run Shelswell Single-Face DES + DRS Blending Modes Simulation"
     )
     parser.add_argument(
         "--total_ore_to_extract",
@@ -1288,13 +1143,19 @@ if __name__ == "__main__":
         "--trucks",
         type=int,
         default=18,
-        help="Number of AD30 haulage trucks (default: 18 for 6,000 t/d mill)",
+        help="Number of AD30 haulage trucks (default: 18 for ~6,000 t/d mill)",
     )
     parser.add_argument(
         "--operators",
         type=int,
         default=18,
         help="Number of operators per shift (default: 18)",
+    )
+    parser.add_argument(
+        "--lhds",
+        type=int,
+        default=2,
+        help="Number of LHD loaders at the single face (default: 2)",
     )
     parser.add_argument(
         "--availability",
@@ -1321,12 +1182,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    run_shelswell_blending_simulation(
+    run_shelswell_single_face_simulation(
         total_ore_to_extract=args.total_ore_to_extract,
         ore_to_be_extracted_during_warming_period=args.warmup_ore,
         total_days=args.total_days,
         num_trucks=args.trucks,
         num_operators=args.operators,
+        num_lhds=args.lhds,
         availability=args.availability,
         target_ore_stock_level=args.stockpile_target,
         seed=args.seed,
