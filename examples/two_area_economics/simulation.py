@@ -75,6 +75,7 @@ from drs_mining.components.plot import (
     plot_attributed_deficit,
     plot_deficit_disparity,
     plot_deficit_breakdown_bar,
+    plot_truck_idle_and_utilization,
     print_transition_log,
     print_deficit_by_mode,
 )
@@ -329,9 +330,9 @@ class TwoAreaEconomicSimulation(drs.Module):
         # Global time tracker
         self.gt = drs.Timer("gt", 0.0, rate=1.0)
 
-        # 1. Dual Mine Faces
+        # 1. Dual Mine Faces (Area 1 70/30: 30% Ore 2, Area 2 65/35: 35% Ore 2)
         self.gen1 = StochasticFaciesGenerator(
-            mean_fraction=0.15,
+            mean_fraction=0.30,
             std_dev=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -344,7 +345,7 @@ class TwoAreaEconomicSimulation(drs.Module):
             max_ore_mass=50000.0,
             total_ore_to_extract=total_ore_to_extract,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.15,
+            mean_ore_fraction=0.30,
             std_dev_ore_fraction=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -352,7 +353,7 @@ class TwoAreaEconomicSimulation(drs.Module):
         )
 
         self.gen2 = StochasticFaciesGenerator(
-            mean_fraction=0.45,
+            mean_fraction=0.35,
             std_dev=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -365,7 +366,7 @@ class TwoAreaEconomicSimulation(drs.Module):
             max_ore_mass=50000.0,
             total_ore_to_extract=total_ore_to_extract,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.45,
+            mean_ore_fraction=0.35,
             std_dev_ore_fraction=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -1206,6 +1207,8 @@ class TwoAreaEconomicSimulation(drs.Module):
                 + self.face2.active_parcel_ore_fraction.value
             ) / 2.0
 
+        n_idle = max(0, len(self.trucks) - (n_operating + n_refueling))
+
         self.history_records.append(
             {
                 "time": t_days,
@@ -1218,6 +1221,10 @@ class TwoAreaEconomicSimulation(drs.Module):
                 "active_operating_mode": self.plant.active_operating_mode.value,
                 "active_operating_mode_name": active_mode,
                 "campaign_mode": camp_mode,
+                "trucks_operating": n_operating,
+                "trucks_refueling": n_refueling,
+                "trucks_idle": n_idle,
+                "truck_idle_fraction": n_idle / max(1, len(self.trucks)),
                 "current_campaign_duration": self.mode_controller.current_campaign_duration.value,
                 "current_contingency_duration": self.plant.current_contingency_duration.value,
                 "strategic_year_index": self.strategic_year_index.value,
@@ -1345,9 +1352,9 @@ def plot_two_area_economic_dashboard(
     df: pd.DataFrame,
     output_path: str = "plots/two_area_economic_dashboard.png",
     palette: dict = None,
-    figsize: Tuple[int, int] = (16, 52),
+    figsize: Tuple[int, int] = (16, 56),
 ):
-    """Builds and saves the 13-panel comprehensive economic & operational diagnostics dashboard."""
+    """Builds and saves the 14-panel comprehensive economic & operational diagnostics dashboard."""
     palette = palette or MODE_PALETTE
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -1355,13 +1362,13 @@ def plot_two_area_economic_dashboard(
         df = prepare_history(df)
 
     dash = Dashboard(
-        nrows=13,
+        nrows=14,
         ncols=1,
         figsize=figsize,
         sharex=False,
         title="Two-Area Strategic Planning, Area 2 Readiness & Discounted Cash Flow Economics",
     )
-    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 11])
+    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 13])
 
     # Detect unlock
     unlock_rows = df[df["area2_ready"] == True]
@@ -1604,6 +1611,13 @@ def plot_two_area_economic_dashboard(
         ideal_rate_per_day=6000.0,
         palette=palette,
         ax=dash[12],
+    )
+
+    # 13. Fleet Utilization & Idle Time Breakdown
+    plot_truck_idle_and_utilization(
+        df,
+        title="Haul Fleet Utilization & Idle Time Breakdown",
+        ax=dash[13],
     )
 
     dash.save(output_path)

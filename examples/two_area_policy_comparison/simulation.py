@@ -61,6 +61,7 @@ from drs_mining.components.plot import (
     plot_attributed_deficit,
     plot_deficit_disparity,
     plot_deficit_breakdown_bar,
+    plot_truck_idle_and_utilization,
     print_transition_log,
     print_deficit_by_mode,
 )
@@ -289,9 +290,9 @@ class TwoAreaPolicySimulationEngine(drs.Module):
         # Global time tracker
         self.gt = drs.Timer("gt", 0.0, rate=1.0)
 
-        # 1. Dual Mine Faces
+        # 1. Dual Mine Faces (Area 1 70/30: 30% Ore 2, Area 2 65/35: 35% Ore 2)
         self.gen1 = StochasticFaciesGenerator(
-            mean_fraction=0.15,
+            mean_fraction=0.30,
             std_dev=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -304,7 +305,7 @@ class TwoAreaPolicySimulationEngine(drs.Module):
             max_ore_mass=50000.0,
             total_ore_to_extract=total_ore_to_extract,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.15,
+            mean_ore_fraction=0.30,
             std_dev_ore_fraction=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -312,7 +313,7 @@ class TwoAreaPolicySimulationEngine(drs.Module):
         )
 
         self.gen2 = StochasticFaciesGenerator(
-            mean_fraction=0.45,
+            mean_fraction=0.35,
             std_dev=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -325,7 +326,7 @@ class TwoAreaPolicySimulationEngine(drs.Module):
             max_ore_mass=50000.0,
             total_ore_to_extract=total_ore_to_extract,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.45,
+            mean_ore_fraction=0.35,
             std_dev_ore_fraction=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -1103,6 +1104,8 @@ class TwoAreaPolicySimulationEngine(drs.Module):
                 + self.face2.active_parcel_ore_fraction.value
             ) / 2.0
 
+        n_idle = max(0, len(self.trucks) - (n_operating + n_refueling))
+
         self.history_records.append(
             {
                 "time": t_days,
@@ -1115,6 +1118,10 @@ class TwoAreaPolicySimulationEngine(drs.Module):
                 "active_operating_mode": self.plant.active_operating_mode.value,
                 "active_operating_mode_name": active_mode,
                 "campaign_mode": camp_mode,
+                "trucks_operating": n_operating,
+                "trucks_refueling": n_refueling,
+                "trucks_idle": n_idle,
+                "truck_idle_fraction": n_idle / max(1, len(self.trucks)),
                 "current_campaign_duration": self.mode_controller.current_campaign_duration.value,
                 "current_contingency_duration": self.plant.current_contingency_duration.value,
                 "strategic_year_index": self.strategic_year_index.value,
@@ -1176,9 +1183,9 @@ def plot_policy_comparison_dashboard(
     df_p2: pd.DataFrame,
     output_path: str = "plots/two_area_policy_comparison.png",
     palette: dict = None,
-    figsize: Tuple[int, int] = (16, 44),
+    figsize: Tuple[int, int] = (16, 52),
 ):
-    """Builds a 10-panel comparative dashboard between Policy 1 (Myopic) and Policy 2 (Value-Oriented)."""
+    """Builds a 12-panel comparative dashboard between Policy 1 (Myopic) and Policy 2 (Value-Oriented)."""
     palette = palette or MODE_PALETTE
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -1188,16 +1195,19 @@ def plot_policy_comparison_dashboard(
         df_p2 = prepare_history(df_p2)
 
     dash = Dashboard(
-        nrows=10,
+        nrows=12,
         ncols=1,
         figsize=figsize,
         sharex=False,
         title="Policy Comparison: Policy 1 (Myopic Baseline) vs Policy 2 (Value-Oriented Control)",
     )
-    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7])
+    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
     unlock_rows_p2 = df_p2[df_p2["area2_ready"] == True]
     unlock_time_p2 = float(unlock_rows_p2["time"].iloc[0]) if not unlock_rows_p2.empty else None
+
+    unlock_rows_p1 = df_p1[df_p1["area2_ready"] == True]
+    unlock_time_p1 = float(unlock_rows_p1["time"].iloc[0]) if not unlock_rows_p1.empty else None
 
     # 0. Cumulative Operating NPV Comparison (Policy 2 vs Policy 1)
     ax0 = dash[0]
@@ -1234,7 +1244,7 @@ def plot_policy_comparison_dashboard(
             alpha=0.95,
             label=f"★ Policy 2 Area 2 Unlocked (Day {unlock_time_p2:.1f})",
         )
-        t_max = df_p2["time"].max()
+        t_max = max(df_p2["time"].max(), df_p1["time"].max())
         text_x = unlock_time_p2 + (t_max * 0.03) if (unlock_time_p2 < t_max * 0.80) else unlock_time_p2 - (t_max * 0.18)
         y_pos = float(df_p2["operating_npv_proxy"].max() / 1e6) * 0.55
         ax0.annotate(
@@ -1248,6 +1258,31 @@ def plot_policy_comparison_dashboard(
             color="#2e7d32",
             zorder=10,
         )
+
+    if unlock_time_p1 is not None:
+        ax0.axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle=":",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"★ Policy 1 Area 2 Unlocked (Day {unlock_time_p1:.1f})",
+        )
+        t_max = max(df_p2["time"].max(), df_p1["time"].max())
+        text_x_p1 = unlock_time_p1 + (t_max * 0.03) if (unlock_time_p1 < t_max * 0.80) else unlock_time_p1 - (t_max * 0.18)
+        y_pos_p1 = float(df_p1["operating_npv_proxy"].max() / 1e6) * 0.45
+        ax0.annotate(
+            f"★ POLICY 1 UNLOCKED\nDay {unlock_time_p1:.1f}",
+            xy=(unlock_time_p1, y_pos_p1),
+            xytext=(text_x_p1, y_pos_p1 * 0.85),
+            arrowprops=dict(facecolor="#c62828", edgecolor="#c62828", shrink=0.08, width=2.0, headwidth=8),
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffebee", edgecolor="#c62828", linewidth=1.8, alpha=0.95),
+            fontsize=10,
+            fontweight="bold",
+            color="#c62828",
+            zorder=10,
+        )
+
     ax0.set_title("Operating Net Present Value (NPV @ 5%): Policy 2 (Value-Oriented) vs Policy 1 (Myopic)")
     ax0.set_ylabel("Operating NPV (M$)")
     ax0.grid(True, alpha=0.3)
@@ -1281,6 +1316,15 @@ def plot_policy_comparison_dashboard(
             linewidth=2.0,
             alpha=0.85,
             label=f"★ Policy 2 Unlocked (Day {unlock_time_p2:.1f})",
+        )
+    if unlock_time_p1 is not None:
+        ax1.axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle=":",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"★ Policy 1 Unlocked (Day {unlock_time_p1:.1f})",
         )
     ax1.set_title("Area 2 Capital Development Progress: Timely Unlock vs Severe Delay")
     ax1.set_ylabel("Development (m)")
@@ -1348,6 +1392,36 @@ def plot_policy_comparison_dashboard(
         ],
         ax=dash[3],
     )
+    if unlock_time_p1 is not None:
+        dash[3].axvspan(
+            df_p1["time"].min(),
+            unlock_time_p1,
+            color="#ffebee",
+            alpha=0.35,
+            label="Policy 1: Mine 2 Locked",
+        )
+        dash[3].axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle="-.",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"★ Mine 2 Unlocked (Day {unlock_time_p1:.1f})",
+        )
+        t_max_p1 = df_p1["time"].max()
+        text_x_p1 = unlock_time_p1 + (t_max_p1 * 0.03) if (unlock_time_p1 < t_max_p1 * 0.80) else unlock_time_p1 - (t_max_p1 * 0.18)
+        dash[3].annotate(
+            f"★ MINE 2 UNLOCKED\nDay {unlock_time_p1:.1f}",
+            xy=(unlock_time_p1, 48000.0),
+            xytext=(text_x_p1, 52000.0),
+            arrowprops=dict(facecolor="#c62828", edgecolor="#c62828", shrink=0.08, width=2.0, headwidth=8),
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffebee", edgecolor="#c62828", linewidth=1.8, alpha=0.95),
+            fontsize=10,
+            fontweight="bold",
+            color="#c62828",
+            zorder=10,
+        )
+        dash[3].legend(loc="upper right", framealpha=0.90)
 
     # 4. Operating Modes Timeline: Policy 2
     plot_time_series(
@@ -1376,6 +1450,16 @@ def plot_policy_comparison_dashboard(
         is_step=True,
         ax=dash[5],
     )
+    if unlock_time_p1 is not None:
+        dash[5].axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"★ Policy 1 Unlocked (Day {unlock_time_p1:.1f})",
+        )
+        dash[5].legend(loc="upper right", framealpha=0.90)
 
     # 6. Strategic Trajectory Ratios (Policy 2)
     plot_time_series(
@@ -1431,29 +1515,68 @@ def plot_policy_comparison_dashboard(
             alpha=0.85,
             label=f"★ Policy 2 Unlocked (Day {unlock_time_p2:.1f})",
         )
+    if unlock_time_p1 is not None:
+        ax7.axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle=":",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"★ Policy 1 Unlocked (Day {unlock_time_p1:.1f})",
+        )
     ax7.set_title("Total Underground Development Metres: Policy 2 vs Policy 1")
     ax7.set_ylabel("Metres (m)")
     ax7.grid(True, alpha=0.3)
     ax7.legend(loc="upper left", framealpha=0.90)
 
-    # 8. Mode Distribution: Policy 2
+    # 8. Fleet Utilization & Idle Time: Policy 2
+    plot_truck_idle_and_utilization(
+        df_p2,
+        title="Policy 2: Haul Fleet Utilization & Idle Time Breakdown",
+        ax=dash[8],
+    )
+    if unlock_time_p2 is not None:
+        dash[8].axvline(
+            unlock_time_p2,
+            color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+
+    # 9. Fleet Utilization & Idle Time: Policy 1
+    plot_truck_idle_and_utilization(
+        df_p1,
+        title="Policy 1: Haul Fleet Utilization & Idle Time Breakdown",
+        ax=dash[9],
+    )
+    if unlock_time_p1 is not None:
+        dash[9].axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+
+    # 10. Mode Distribution: Policy 2
     plot_mode_distribution(
         df_p2,
         mode_col="active_operating_mode_name",
         time_col="time",
         title="Mode Distribution (% Time Spent - Policy 2 Value-Oriented Control)",
         palette=palette,
-        ax=dash[8],
+        ax=dash[10],
     )
 
-    # 9. Mode Distribution: Policy 1
+    # 11. Mode Distribution: Policy 1
     plot_mode_distribution(
         df_p1,
         mode_col="active_operating_mode_name",
         time_col="time",
         title="Mode Distribution (% Time Spent - Policy 1 Myopic Baseline)",
         palette=palette,
-        ax=dash[9],
+        ax=dash[11],
     )
 
     dash.save(output_path)

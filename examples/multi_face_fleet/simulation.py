@@ -82,7 +82,7 @@ def build_multi_face_network(
     Returns ``(faces, fleet, plant, mode_controller, fleet_controller, ore1_stock, ore2_stock)``.
     """
     gen1 = StochasticFaciesGenerator(
-        mean_fraction=0.15,
+        mean_fraction=0.30,
         std_dev=0.075,
         prob_new_facies=prob_new_facies,
         variation_same_facies=variation_same_facies,
@@ -95,7 +95,7 @@ def build_multi_face_network(
         max_ore_mass=50000.0,
         total_ore_to_extract=total_ore_to_extract,
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-        mean_ore_fraction=0.15,
+        mean_ore_fraction=0.30,
         std_dev_ore_fraction=0.075,
         prob_new_facies=prob_new_facies,
         variation_same_facies=variation_same_facies,
@@ -103,7 +103,7 @@ def build_multi_face_network(
     )
 
     gen2 = StochasticFaciesGenerator(
-        mean_fraction=0.45,
+        mean_fraction=0.35,
         std_dev=0.025,
         prob_new_facies=prob_new_facies,
         variation_same_facies=variation_same_facies,
@@ -116,7 +116,7 @@ def build_multi_face_network(
         max_ore_mass=50000.0,
         total_ore_to_extract=total_ore_to_extract,
         ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-        mean_ore_fraction=0.45,
+        mean_ore_fraction=0.35,
         std_dev_ore_fraction=0.025,
         prob_new_facies=prob_new_facies,
         variation_same_facies=variation_same_facies,

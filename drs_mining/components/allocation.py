@@ -24,14 +24,14 @@ class FaceAllocationResult:
 def solve_face_allocation_rates(
     target_ore1_rate: float,
     target_ore2_rate: float,
-    face1_ore1_fraction: float = 0.85,
-    face2_ore1_fraction: float = 0.55,
+    face1_ore1_fraction: float = 0.70,
+    face2_ore1_fraction: float = 0.65,
 ) -> FaceAllocationResult:
     """Analytically solves for Face 1 and Face 2 extraction rates and weights.
 
     Given:
-      f1 = face1_ore1_fraction (e.g. 0.85 Ore 1, 0.15 Ore 2)
-      f2 = face2_ore1_fraction (e.g. 0.55 Ore 1, 0.45 Ore 2)
+      f1 = face1_ore1_fraction (e.g. 0.70 Ore 1, 0.30 Ore 2)
+      f2 = face2_ore1_fraction (e.g. 0.65 Ore 1, 0.35 Ore 2)
       R1 = target_ore1_rate
       R2 = target_ore2_rate
       R_tot = R1 + R2

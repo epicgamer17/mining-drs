@@ -1,21 +1,18 @@
-"""Two-Area Strategic Planning & Counterfactual Incremental NPV Simulation.
+"""Two-Area Multi-Stope Lifecycle Simulation: Turnaround Development, Waste Rock & Hierarchical Dispatch.
 
-Runs a side-by-side comparative simulation of:
-1. Base Case (WITH Area 2 Capital Expansion):
-   - Area 1 (Face 1, Level 3, 15% Ore 2) active from Day 0.
-   - Area 2 (Face 2, Level 6, 45% Ore 2) starts locked.
-   - Trucks allocated to Area 2 advance capital development (4,000 m target).
-   - Area 2 unlocks once developed, supplying high-grade ore and stabilizing Mode A/B blending.
-   - Incurs revenue, mining costs, development capital costs, and fixed overhead.
-2. Counterfactual Baseline (WITHOUT Area 2 Capital Expansion):
-   - Area 2 is permanently disabled (no capital development costs incurred for Area 2).
-   - The entire mine operates exclusively on Area 1 (15% Ore 2).
-   - When Mode A is scheduled, Ore 2 stockpile depletes and the plant enters MODE_A_CONTINGENCY.
-   - Incurs revenue and operating costs without Area 2 expansion.
-
-Calculates the True Incremental Net Present Value (NPV):
-   Incremental NPV = NPV(WITH Area 2) - NPV(WITHOUT Area 2)
-using identical random seeds for an exact, paired counterfactual comparison.
+Implements the multi-stope operational underground environment:
+  - Area 1 (Level 3): 3 active stopes (1A, 1B, 1C) with finite reserves (1.8M tonnes total).
+  - Area 2 (Level 6): 3 deep stopes (2A, 2B, 2C) unlocked via 4,000 m capital decline development.
+  - Stope Lifecycle:
+      1. ORE_READY: Blasted ore mucked out by LHDs into 26.1t AD30 haul trucks.
+      2. DEVELOPMENT_TURNAROUND: Ore round depleted. Requires waste rock extraction / development advance (30m)
+         before the next ore round can be accessed.
+      3. EXHAUSTED: Total stope reserve depleted; stope is permanently closed.
+  - Two-Tier Hierarchical Closed-Loop Dispatch:
+      - Tier 1 (Absolute Primary Requirement): Maintain 6,000 t/d total plant feed to prevent mill starvation.
+      - Tier 2 (Secondary Blending Objective): Match analytical dispatch weights (w1, w2) for high-grade Mode A.
+      - Tier 3 (Dynamic Constrained Fallback): If preferred stope is in turnaround or LHD-busy, immediately
+        redirect haul truck to next available stope.
 """
 
 from __future__ import annotations
@@ -45,12 +42,14 @@ from drs.plot import (
     plot_dual_axis_step,
     plot_safety_margin,
 )
+from drs_mining.components.allocation import solve_face_allocation_rates
 from drs_mining.components.modes import MODES, OperatingMode
 from drs_mining.components.plant import MetallurgicalPlant, PlantDrawRates
 from drs_mining.components.stockpiles import Stockpile
 from drs_mining.components.controllers import OperatingModeController
 from drs_mining.components.generators import StochasticFaciesGenerator
-from drs_mining.components.mine_face import MineFace
+from drs_mining.components.stope import StopeFace, StopeState
+from drs_mining.components.dispatch import TwoTierHierarchicalDispatchController
 from drs_mining.components.planning import (
     AreaReadinessTarget,
     MiningPriority,
@@ -64,13 +63,7 @@ from drs_mining.components.plot import (
     prepare_history,
     plot_ore_with_modes,
     plot_mode_distribution,
-    plot_mode_dwell_times,
-    plot_attributed_deficit,
-    plot_deficit_disparity,
-    plot_deficit_breakdown_bar,
     plot_truck_idle_and_utilization,
-    print_transition_log,
-    print_deficit_by_mode,
 )
 
 
@@ -78,26 +71,20 @@ from drs_mining.components.plot import (
 # Constants & Physical Parameters
 # ---------------------------------------------------------------------------
 DAYS_IN_YEAR = 365.0
-
-# NOTE: Statutory non-production holidays (NON_PRODUCTION_DAYS = 11 in Shelswell 2017)
-# have been disabled (set to 0) in this baseline to maintain uninterrupted fleet supply
-# and keep the total stockpile tightly centered around the 60,000 t target buffer.
 NON_PRODUCTION_DAYS = 0
 
-SHIFT_SECONDS = 12.0 * 3600.0  # 12 h calendar slot per shift
-SHIFT_WORK_HOURS = 10.5  # 10.5 h shift duration
-HAULAGE_SEAT_FRACTION = 0.5417  # 54.17 % workable seat availability
-SEAT_PER_SHIFT_SEC = HAULAGE_SEAT_FRACTION * SHIFT_SECONDS  # ~6.5 h
+SHIFT_SECONDS = 12.0 * 3600.0
+SHIFT_WORK_HOURS = 10.5
+HAULAGE_SEAT_FRACTION = 0.5417
+SEAT_PER_SHIFT_SEC = HAULAGE_SEAT_FRACTION * SHIFT_SECONDS
 
-# Mine Geometry (Two Distinct Extraction Areas)
 DECLINE_M = 2100.0
 LEVEL_SPACING_M = 300.0
-AREA1_LEVEL = 3  # Area 1 / Face 1 at Level 3
-AREA2_LEVEL = 6  # Area 2 / Face 2 at Level 6
+AREA1_LEVEL = 3  # Level 3: 900 m ramp climb (~28 min cycle)
+AREA2_LEVEL = 6  # Level 6: 1,800 m ramp climb (~45 min cycle)
 LEVEL_DRIFT_M = 60.0
 SURFACE_M = 300.0
 
-# Speeds (Table 1, kph)
 SPEEDS = {
     "surface": {"empty": 17.4, "loaded": 13.4},
     "decline": {"empty": 15.1, "loaded": 11.2},
@@ -105,8 +92,7 @@ SPEEDS = {
     "level": {"empty": 7.6, "loaded": 6.6},
 }
 
-# Equipment Durations
-ORE_PAYLOAD = 26.1  # AD30 rated capacity (tonnes)
+ORE_PAYLOAD = 26.1
 TRUCK_LOAD_SPOT_MIN = 0.50
 LHD_ACQUISITION_MAX_MIN = 0.80
 TRUCK_LOAD_DUR_MIN = 3.50
@@ -114,37 +100,30 @@ DUMP_SPOT_MIN = 0.57
 DUMP_MIN = 0.88
 SURFACE_TIP_SITES = 2
 
-# Refuelling & Delays
 FUEL_BURN_PCT_PER_SEC = 100.0 / (7.5 * 3600.0)
 REFUEL_DUR_MIN = 25.0
 N_FUEL_PUMPS = 2
 BASE_PASS_BAY_DELAY_SEC = 13.0
 PER_TRUCK_PASS_BAY_DELAY_SEC = 1.0
 
-# Development Rate Calibration
 DEVELOPMENT_METRES_PER_EXTRA_TRUCK_PER_DAY = 5.0
-DT_MAX = 900.0  # max engine drift step (sec)
+DT_MAX = 900.0
 
 
 # ---------------------------------------------------------------------------
-# Sampling Helpers
+# Helpers & Enums
 # ---------------------------------------------------------------------------
 def _tri(rng: random.Random, mid: float, tol: float) -> float:
-    """Symmetric triangular distribution around ``mid`` with width ``tol``."""
     return rng.triangular(mid * (1.0 - tol), mid * (1.0 + tol), mid)
 
 
 def _in_shift_window(t: float) -> bool:
-    """Two 10.5 h shifts per day separated by two 1.5 h off-shift gaps."""
     hod = t % 86400.0
     return (0.0 <= hod < SHIFT_WORK_HOURS * 3600.0) or (
         12.0 * 3600.0 <= hod < 22.5 * 3600.0
     )
 
 
-# ---------------------------------------------------------------------------
-# Discrete State Entities
-# ---------------------------------------------------------------------------
 class TruckPhase(Enum):
     IDLE = "idle"
     EMPTY = "empty"
@@ -154,6 +133,7 @@ class TruckPhase(Enum):
     LOADING = "loading"
     LOADED = "loaded"
     WAIT_DUMP = "wait_dump"
+    SPOT_DUMP = "spot_dump"
     DUMPING = "dumping"
     REFUELING = "refueling"
 
@@ -166,10 +146,18 @@ OPERATING_PHASES = {
     TruckPhase.LOADING,
     TruckPhase.LOADED,
     TruckPhase.WAIT_DUMP,
+    TruckPhase.SPOT_DUMP,
     TruckPhase.DUMPING,
 }
 
-SEAT_PHASES = OPERATING_PHASES | {TruckPhase.REFUELING}
+SEAT_PHASES = {
+    TruckPhase.EMPTY,
+    TruckPhase.SPOT_LOAD,
+    TruckPhase.LOADING,
+    TruckPhase.LOADED,
+    TruckPhase.SPOT_DUMP,
+    TruckPhase.DUMPING,
+}
 
 DUE_PHASES = {
     TruckPhase.EMPTY,
@@ -177,6 +165,7 @@ DUE_PHASES = {
     TruckPhase.ACQUIRE,
     TruckPhase.LOADING,
     TruckPhase.LOADED,
+    TruckPhase.SPOT_DUMP,
     TruckPhase.DUMPING,
     TruckPhase.REFUELING,
 }
@@ -185,8 +174,8 @@ DUE_PHASES = {
 @dataclass
 class Operator:
     idx: int
-    free: bool = True
     used_seat: float = 0.0
+    free: bool = True
 
 
 @dataclass
@@ -194,7 +183,7 @@ class Truck:
     truck_id: str
     timer: drs.Timer
     phase: TruckPhase = TruckPhase.IDLE
-    target_face_id: int = 1
+    target_stope_id: int = 1
     target_level: int = AREA1_LEVEL
     current_payload: float = 0.0
     payload_ore_fraction: float = 0.30
@@ -219,23 +208,19 @@ class SurfaceDumpStation:
 
 
 # ---------------------------------------------------------------------------
-# Two-Area Strategic Planning & Economic Simulation Engine
+# Multi-Stope Lifecycle Simulation Engine
 # ---------------------------------------------------------------------------
-class TwoAreaCounterfactualEngine(drs.Module):
-    """Underground DES simulation module supporting Area 2 capital expansion or counterfactual exclusion."""
+class TwoAreaStopeLifecycleEngine(drs.Module):
+    """Underground DES simulation module with multi-stope lifecycles, turnaround dev & two-tier dispatch."""
 
     def __init__(
         self,
-        # NOTE: Sizing the haulage fleet to 18 AD30 trucks (18 operators) rather than
-        # a standard ~14-truck single-level fleet is specifically chosen to account for
-        # the deep Level 6 haulage cycle time penalty (+60% longer cycle, ~45 min vs ~28 min).
-        # In Mode A (40% Ore 2 demand), metallurgical mass-balance dictates that 83.3% of
-        # all ore must be hauled from deep Level 6 (Face 2). An 18-truck fleet ensures
-        # sufficient haulage throughput (~6,000 t/d) from depth without starving the mill,
-        # while non-hauling/surplus capacity is dynamically redirected into development.
+        policy_name: str = "POLICY_2_VALUE_ORIENTED",  # "POLICY_1_MYOPIC" or "POLICY_2_VALUE_ORIENTED"
+        use_two_tier_dispatch: bool = True,
+        # Sizing haulage fleet to 18 AD30 trucks for deep Level 6 cycle times (~45 min)
         num_trucks: int = 18,
         num_operators: int = 18,
-        num_lhds_per_face: int = 2,
+        num_lhds_per_stope: int = 1,
         availability: float = 0.85,
         target_ore_stock_level: float = 60000.0,
         critical_ore2_level: float = 20400.0,
@@ -249,10 +234,6 @@ class TwoAreaCounterfactualEngine(drs.Module):
         tactical_progress_tolerance: float = 0.90,
         strategic_targets: Optional[Tuple[StrategicYearTarget, ...]] = None,
         area2_readiness_target: Optional[AreaReadinessTarget] = None,
-        area2_physical_unlock_enabled: bool = True,
-        area2_counterfactual_disable: bool = False,
-        area2_redeploy_locked_face_trucks_to_development: bool = True,
-        development_priority_truck_reservation_fraction: float = 0.20,
         annual_discount_rate: float = 0.05,
         ore1_net_value_per_processed_tonne: float = 577.48,
         ore2_net_value_per_processed_tonne: float = 709.83,
@@ -268,9 +249,11 @@ class TwoAreaCounterfactualEngine(drs.Module):
         seed: int = 42,
     ):
         super().__init__()
+        self.policy_name = policy_name
+        self.use_two_tier_dispatch = use_two_tier_dispatch
         self.num_trucks = num_trucks
         self.num_operators = num_operators
-        self.num_lhds_per_face = num_lhds_per_face
+        self.num_lhds_per_stope = num_lhds_per_stope
         self.availability = availability
         self.target_ore_stock_level = target_ore_stock_level
         self.critical_ore2_level = critical_ore2_level
@@ -291,16 +274,7 @@ class TwoAreaCounterfactualEngine(drs.Module):
             required_development=4000.0,
             ready_by_day=365.0,
         )
-        self.area2_physical_unlock_enabled = area2_physical_unlock_enabled
-        self.area2_counterfactual_disable = area2_counterfactual_disable
-        self.area2_redeploy_locked_face_trucks_to_development = (
-            area2_redeploy_locked_face_trucks_to_development
-        )
-        self.development_priority_truck_reservation_fraction = (
-            development_priority_truck_reservation_fraction
-        )
 
-        # Economic Assumptions
         self.annual_discount_rate = annual_discount_rate
         self.ore1_net_value_per_processed_tonne = ore1_net_value_per_processed_tonne
         self.ore2_net_value_per_processed_tonne = ore2_net_value_per_processed_tonne
@@ -315,7 +289,6 @@ class TwoAreaCounterfactualEngine(drs.Module):
         self._down_dur = max(0.0, (1.0 - availability) * SEAT_PER_SHIFT_SEC)
 
         # Calendar setup
-        self.holidays = set()
         self._cur_day = -1
         self._shift_marker = -1
         self._holiday_today = False
@@ -323,49 +296,72 @@ class TwoAreaCounterfactualEngine(drs.Module):
         # Global time tracker
         self.gt = drs.Timer("gt", 0.0, rate=1.0)
 
-        # 1. Dual Mine Faces (Area 1 70/30: 30% Ore 2, Area 2 65/35: 35% Ore 2)
-        self.gen1 = StochasticFaciesGenerator(
-            mean_fraction=0.30,
-            std_dev=0.05,
-            prob_new_facies=0.3,
-            variation_same_facies=0.01,
-        )
-        self.face1 = MineFace(
-            name="mine_face_1",
-            face_id=1,
-            generator=self.gen1,
-            min_ore_mass=30000.0,
-            max_ore_mass=50000.0,
-            total_ore_to_extract=total_ore_to_extract,
-            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.30,
-            std_dev_ore_fraction=0.05,
-            prob_new_facies=0.3,
-            variation_same_facies=0.01,
-            initial_parcel_mass=40000.0,
-        )
+        # 1. Multi-Stope Topology: 3 Stopes in Area 1 (Level 3), 3 Stopes in Area 2 (Level 6)
+        self.stopes: List[StopeFace] = []
 
-        self.gen2 = StochasticFaciesGenerator(
-            mean_fraction=0.35,
-            std_dev=0.05,
-            prob_new_facies=0.3,
-            variation_same_facies=0.01,
+        # Area 1 Stopes (Level 3, Mean 70/30 ratio: ~30% Ore 2, Finite 600k t reserve each -> 1.8M t total)
+        # 3 stopes centered around 0.30 (e.g. 0.28, 0.30, 0.32)
+        a1_means = [0.28, 0.30, 0.32]
+        for i in range(1, 4):
+            mean_f = a1_means[i - 1]
+            gen = StochasticFaciesGenerator(
+                mean_fraction=mean_f,
+                std_dev=0.03,
+                prob_new_facies=0.3,
+                variation_same_facies=0.01,
+            )
+            stope = StopeFace(
+                name=f"stope_1{chr(64+i)}",
+                face_id=i,
+                area_id=1,
+                level_index=AREA1_LEVEL,
+                generator=gen,
+                mean_ore_fraction=mean_f,
+                std_dev_ore_fraction=0.03,
+                total_stope_reserve=600000.0,
+                min_parcel_ore_mass=25000.0,
+                max_parcel_ore_mass=40000.0,
+                waste_to_ore_ratio=0.15,
+                turnaround_dev_per_parcel_m=5.0,
+                seed=seed + i,
+            )
+            self.stopes.append(stope)
+
+        # Area 2 Stopes (Level 6, Mean 65/35 ratio: ~35% Ore 2, 1.6M t reserve each -> 4.8M t total)
+        # 3 stopes centered around 0.35 (e.g. 0.33, 0.35, 0.37)
+        a2_means = [0.33, 0.35, 0.37]
+        for i in range(4, 7):
+            mean_f = a2_means[i - 4]
+            gen = StochasticFaciesGenerator(
+                mean_fraction=mean_f,
+                std_dev=0.03,
+                prob_new_facies=0.3,
+                variation_same_facies=0.01,
+            )
+            stope = StopeFace(
+                name=f"stope_2{chr(64+i-3)}",
+                face_id=i,
+                area_id=2,
+                level_index=AREA2_LEVEL,
+                generator=gen,
+                mean_ore_fraction=mean_f,
+                std_dev_ore_fraction=0.03,
+                total_stope_reserve=1600000.0,
+                min_parcel_ore_mass=25000.0,
+                max_parcel_ore_mass=40000.0,
+                waste_to_ore_ratio=0.20,
+                turnaround_dev_per_parcel_m=5.0,
+                seed=seed + i,
+            )
+            self.stopes.append(stope)
+
+        # Two-Tier Hierarchical Dispatcher
+        self.dispatcher = TwoTierHierarchicalDispatchController(
+            stopes=self.stopes,
+            target_daily_ore_tonnes=6000.0,
+            target_stockpile_buffer_tonnes=target_ore_stock_level,
+            seed=seed,
         )
-        self.face2 = MineFace(
-            name="mine_face_2",
-            face_id=2,
-            generator=self.gen2,
-            min_ore_mass=30000.0,
-            max_ore_mass=50000.0,
-            total_ore_to_extract=total_ore_to_extract,
-            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.35,
-            std_dev_ore_fraction=0.05,
-            prob_new_facies=0.3,
-            variation_same_facies=0.01,
-            initial_parcel_mass=40000.0,
-        )
-        self.faces = [self.face1, self.face2]
 
         # 2. Continuous Surface Stockpiles
         init_ore1 = 0.70 * target_ore_stock_level
@@ -374,18 +370,14 @@ class TwoAreaCounterfactualEngine(drs.Module):
             name="Ore1Stock",
             expected_attributes=["contained_ore_fraction_mass"],
             initial_mass=init_ore1,
-            initial_attributes={
-                "contained_ore_fraction_mass": init_ore1 * 0.30
-            },
+            initial_attributes={"contained_ore_fraction_mass": init_ore1 * 0.30},
             attr_inflow=1.0,
         )
         self.ore2_stock = Stockpile(
             name="Ore2Stock",
             expected_attributes=["contained_ore_fraction_mass"],
             initial_mass=init_ore2,
-            initial_attributes={
-                "contained_ore_fraction_mass": init_ore2 * 0.30
-            },
+            initial_attributes={"contained_ore_fraction_mass": init_ore2 * 0.30},
             attr_inflow=0.0,
         )
         self.total_extracted_ore = drs.Level("total_extracted_ore", 0.0)
@@ -393,6 +385,7 @@ class TwoAreaCounterfactualEngine(drs.Module):
         self.ore2_hauled = drs.Level("ore2_hauled", 0.0)
         self.cumulative_mine_development = drs.Level("cumulative_mine_development", 0.0)
         self.area2_cumulative_development = drs.Level("area2_cumulative_development", 0.0)
+        self.stope_turnaround_development = drs.Level("stope_turnaround_development", 0.0)
 
         # 3. Plant & Campaign Mode Controller
         self.mode_controller = OperatingModeController(
@@ -425,9 +418,9 @@ class TwoAreaCounterfactualEngine(drs.Module):
 
         self.operators = [Operator(i) for i in range(num_operators)]
 
-        # 5. Face Loadouts & Surface Dump Station
-        self.face_queues = {1: [], 2: []}
-        self._face_lhds_busy = {1: 0, 2: 0}
+        # 5. Stope Queues & Surface Dump Station
+        self.stope_queues: Dict[int, List[Truck]] = {s.face_id: [] for s in self.stopes}
+        self._stope_lhds_busy: Dict[int, int] = {s.face_id: 0 for s in self.stopes}
         self.dump_station = SurfaceDumpStation()
         self._pumps_free = N_FUEL_PUMPS
 
@@ -437,18 +430,19 @@ class TwoAreaCounterfactualEngine(drs.Module):
         self.strategic_year_timer = drs.Timer("strategic_year_timer", 0.0, rate=1.0)
         self.tactical_review_timer = drs.Timer("tactical_review_timer", 0.0, rate=1.0)
         self.tactical_review_count = drs.Level("tactical_review_count", 0.0)
-        self.mining_priority = MiningPriority.BALANCED
+        self.mining_priority = (
+            MiningPriority.PRODUCTION
+            if policy_name == "POLICY_1_MYOPIC"
+            else MiningPriority.BALANCED
+        )
 
         # 7. Area 2 Readiness Variables
         self.area2_ready = False
         self.area2_ready_day = drs.Level("area2_ready_day", -1.0)
-        self.area2_deadline_missed = False
-        self.area2_currently_late = False
-        self.area2_completed_late = False
         self.area2_readiness_fraction = drs.Level("area2_readiness_fraction", 0.0)
         self.area2_readiness_trajectory_ratio = drs.Level("area2_readiness_trajectory_ratio", 1.0)
 
-        # 8. Strategic Economics State Variables
+        # 8. Economics Variables
         self.cumulative_processed_ore1 = drs.Level("cumulative_processed_ore1", 0.0)
         self.cumulative_processed_ore2 = drs.Level("cumulative_processed_ore2", 0.0)
         self.cumulative_cash_flow = drs.Level("cumulative_cash_flow", 0.0)
@@ -462,17 +456,18 @@ class TwoAreaCounterfactualEngine(drs.Module):
         self.annual_ore1_extracted = 0.0
         self.annual_ore2_extracted = 0.0
         self.annual_development_start = 0.0
-        self.development_priority_reserved_trucks = drs.Level(
-            "development_priority_reserved_trucks", 0.0
-        )
+        self.development_priority_reserved_trucks = drs.Level("development_priority_reserved_trucks", 0.0)
         self.development_rate_m_per_day = drs.Level("development_rate_m_per_day", 0.0)
 
         # Trajectory Ratios
         self.ore1_trajectory_ratio = drs.Level("ore1_trajectory_ratio", 1.0)
         self.ore2_trajectory_ratio = drs.Level("ore2_trajectory_ratio", 1.0)
-        self.development_trajectory_ratio = drs.Level(
-            "development_trajectory_ratio", 1.0
-        )
+        self.development_trajectory_ratio = drs.Level("development_trajectory_ratio", 1.0)
+
+        # Analytical Blending & Fallback Metrics
+        self.analytical_face1_weight = drs.Level("analytical_face1_weight", 1.0)
+        self.analytical_face2_weight = drs.Level("analytical_face2_weight", 0.0)
+        self.fallback_dispatch_count = drs.Level("fallback_dispatch_count", 0.0)
 
         # Operational metrics
         self.daily_target_ore = 6000.0
@@ -482,29 +477,17 @@ class TwoAreaCounterfactualEngine(drs.Module):
         self.traffic_delay_sum = 0.0
         self.horizon_sec = float("inf")
 
-        # Telemetry records
         self.history_records: List[dict] = []
+        self._last_telemetry_time = -1.0
 
     # -- Area 2 Lock / Unlock Logic ------------------------------------------
     def is_area2_locked(self) -> bool:
-        """Returns True if Area 2 is physically locked due to development readiness."""
-        if self.area2_counterfactual_disable:
-            return True
-        if not self.area2_physical_unlock_enabled:
-            return False
         required = max(0.0, float(self.area2_readiness_target.required_development))
         if required <= 1e-12:
             return False
         return not (self.strategic_planning_started and self.area2_ready)
 
     def _update_area2_readiness(self):
-        """Updates Area 2 readiness metrics, unlocks face if threshold met, and tracks deadlines."""
-        if self.area2_counterfactual_disable:
-            self.area2_ready = False
-            self.area2_readiness_fraction.value = 0.0
-            self.area2_readiness_trajectory_ratio.value = 1.0
-            return
-
         target = self.area2_readiness_target
         required = max(0.0, float(target.required_development))
         if required <= 1e-12:
@@ -530,9 +513,10 @@ class TwoAreaCounterfactualEngine(drs.Module):
         if (not self.area2_ready) and progress >= required - 1e-6:
             self.area2_ready = True
             self.area2_ready_day.value = strategic_days
-            print(f"\n >>> [PHYSICAL UNLOCK] Area 2 (Face 2) is READY and UNLOCKED on Strategic Day {strategic_days:.2f}! <<<\n")
+            print(
+                f"\n >>> [{self.policy_name} UNLOCK] Area 2 (Deep Stopes 2A, 2B, 2C) UNLOCKED on Strategic Day {strategic_days:.2f}! <<<\n"
+            )
 
-        # Deadline Tracking
         ready_by_day = target.ready_by_day
         if ready_by_day is not None and ready_by_day > 0.0:
             elapsed_fraction = max(1e-4, min(1.0, strategic_days / ready_by_day))
@@ -542,68 +526,33 @@ class TwoAreaCounterfactualEngine(drs.Module):
                 elapsed_fraction=elapsed_fraction,
             )
 
-            deadline_exceeded = strategic_days > ready_by_day
-            if not self.area2_ready:
-                if deadline_exceeded:
-                    self.area2_deadline_missed = True
-                    self.area2_currently_late = True
-                    self.area2_completed_late = False
-                else:
-                    self.area2_deadline_missed = False
-                    self.area2_currently_late = False
-                    self.area2_completed_late = False
-            else:
-                self.area2_currently_late = False
-                if float(self.area2_ready_day.value) > ready_by_day + 1e-6:
-                    self.area2_deadline_missed = True
-                    self.area2_completed_late = True
-                else:
-                    self.area2_deadline_missed = False
-                    self.area2_completed_late = False
-        else:
-            self.area2_readiness_trajectory_ratio.value = 1.0
-
     # -- Strategic Economics -------------------------------------------------
     def _update_strategic_economics(self, out1_t_sec: float, out2_t_sec: float, dt_days: float):
-        """Calculates revenue, operating costs, discounted cash flow, and operating NPV."""
         if not self.strategic_planning_started:
             self.discount_factor.value = 1.0
             self.current_cash_flow_rate.value = 0.0
             self.current_discounted_cash_flow_rate.value = 0.0
             return
 
-        # Daily Milling Outflows (t/day)
         milled_ore1_t_day = out1_t_sec * 86400.0
         milled_ore2_t_day = out2_t_sec * 86400.0
         self.cumulative_processed_ore1.value += milled_ore1_t_day * dt_days
         self.cumulative_processed_ore2.value += milled_ore2_t_day * dt_days
 
-        # Revenue Rate ($/day)
         revenue_rate = (
             milled_ore1_t_day * self.ore1_net_value_per_processed_tonne
             + milled_ore2_t_day * self.ore2_net_value_per_processed_tonne
         )
-
-        # Mining & Haulage Production Cost Rate ($/day)
         mined_ore_t_day = max(0.0, self.daily_hauled_ore)
         production_cost_rate = mined_ore_t_day * self.production_cost_per_tonne
-
-        # Underground Development Cost Rate ($/day)
-        # In the counterfactual run, Area 2 is not developed
         dev_rate_m_day = max(0.0, float(self.development_rate_m_per_day.value))
         development_cost_rate = dev_rate_m_day * self.development_cost_per_unit
-
-        # Fixed Overhead Cost Rate ($/day)
         fixed_cost_rate = self.fixed_cost_per_day
 
-        # Net Daily Cash Flow Rate ($/day)
-        cash_flow_rate = revenue_rate - (
-            production_cost_rate + development_cost_rate + fixed_cost_rate
-        )
+        cash_flow_rate = revenue_rate - (production_cost_rate + development_cost_rate + fixed_cost_rate)
         self.current_cash_flow_rate.value = cash_flow_rate
         self.cumulative_cash_flow.value += cash_flow_rate * dt_days
 
-        # Discount Factor
         strategic_days = (
             float(self.strategic_year_index.value) * self.strategic_period_days
             + float(self.strategic_year_timer.value)
@@ -611,21 +560,60 @@ class TwoAreaCounterfactualEngine(drs.Module):
         dfactor = 1.0 / ((1.0 + self.annual_discount_rate) ** (strategic_days / 365.0))
         self.discount_factor.value = dfactor
 
-        # Discounted Cash Flow ($)
         discounted_rate = cash_flow_rate * dfactor
         self.current_discounted_cash_flow_rate.value = discounted_rate
         self.cumulative_discounted_cash_flow.value += discounted_rate * dt_days
         self.operating_npv_proxy.value = self.cumulative_discounted_cash_flow.value
 
+    # -- Analytical Blending Computation -------------------------------------
+    def _compute_analytical_face_allocation(self, plant_draw: PlantDrawRates):
+        if self.is_area2_locked():
+            self.analytical_face1_weight.value = 1.0
+            self.analytical_face2_weight.value = 0.0
+            return
+
+        # Estimate average grades across active stopes in Area 1 vs Area 2
+        a1_stopes = [s for s in self.stopes if s.area_id == 1 and not s.is_exhausted]
+        a2_stopes = [s for s in self.stopes if s.area_id == 2 and not s.is_exhausted]
+
+        avg_f1 = (
+            np.mean([float(s.active_parcel_ore_fraction.value) for s in a1_stopes])
+            if a1_stopes
+            else 0.30
+        )
+        avg_f2 = (
+            np.mean([float(s.active_parcel_ore_fraction.value) for s in a2_stopes])
+            if a2_stopes
+            else 0.35
+        )
+
+        f1_ore1 = 1.0 - avg_f1
+        f2_ore1 = 1.0 - avg_f2
+
+        alloc = solve_face_allocation_rates(
+            target_ore1_rate=plant_draw.ore1,
+            target_ore2_rate=plant_draw.ore2,
+            face1_ore1_fraction=f1_ore1,
+            face2_ore1_fraction=f2_ore1,
+        )
+
+        self.analytical_face1_weight.value = alloc.face1_weight
+        self.analytical_face2_weight.value = alloc.face2_weight
+
     # -- DRS Engine Hooks ----------------------------------------------------
     def is_terminating_condition_met(self) -> bool:
-        total_extracted = sum(f.cumulative_extracted_mass.value for f in self.faces)
+        total_extracted = sum(s.cumulative_ore_extracted.value for s in self.stopes)
         if total_extracted >= self.total_ore_to_extract - 1e-6:
+            return True
+        accessible_stopes = [
+            s for s in self.stopes
+            if not s.is_exhausted and (s.area_id == 1 or not self.is_area2_locked())
+        ]
+        if not accessible_stopes:
             return True
         return self.gt.value >= self.horizon_sec - 1e-6
 
     def time_to_event(self) -> float:
-        """Find the earliest discrete event time boundary."""
         best = DT_MAX
         for tr in self.trucks:
             v = tr.timer.value
@@ -636,7 +624,6 @@ class TwoAreaCounterfactualEngine(drs.Module):
         next_shift = (math.floor(t / SHIFT_SECONDS) + 1.0) * SHIFT_SECONDS
         best = min(best, next_day - t, next_shift - t)
 
-        # Campaign timer boundary
         camp_thresh = (
             self.mode_controller.duration_of_shutdowns
             if self.mode_controller.active_campaign_mode.value.name == "SHUTDOWN"
@@ -648,30 +635,18 @@ class TwoAreaCounterfactualEngine(drs.Module):
         if rem_camp_days > 1e-6:
             best = min(best, rem_camp_days * 86400.0)
 
-        # Tactical review timer boundary
         rem_tactical_days = max(
             0.0, self.tactical_review_period_days - self.tactical_review_timer.value
         )
         if rem_tactical_days > 1e-6:
             best = min(best, rem_tactical_days * 86400.0)
 
-        # Contingency timer boundary
-        if "_CONTINGENCY" in self.plant.active_operating_mode.value.name:
-            c_thresh = self.plant.duration_of_contingency_segments
-            rem_c_days = max(
-                0.0, c_thresh - self.plant.current_contingency_duration.value
-            )
-            if rem_c_days > 1e-6:
-                best = min(best, rem_c_days * 86400.0)
-
         return max(best, 1e-6)
 
     def step(self, dt: float):
-        """Continuous integration between discrete event boundaries."""
         self.gt.step(dt)
         dt_days = dt / 86400.0
 
-        # Step timers
         self.mode_controller.current_campaign_duration.step(dt_days)
         active_mode_name = self.plant.active_operating_mode.value.name
         timer_attr = self.plant._MODE_TIMER_ATTRS.get(active_mode_name)
@@ -680,12 +655,10 @@ class TwoAreaCounterfactualEngine(drs.Module):
         if active_mode_name in self.plant._CONTINGENCY_MODES:
             self.plant.current_contingency_duration.step(dt_days)
 
-        # Step strategic & tactical timers
         if self.strategic_planning_started:
             self.strategic_year_timer.step(dt_days)
             self.tactical_review_timer.step(dt_days)
 
-        # Step trucks
         for tr in self.trucks:
             if tr.timer.value > 0.0:
                 tr.timer.step(dt)
@@ -697,18 +670,18 @@ class TwoAreaCounterfactualEngine(drs.Module):
                     op = self.operators[tr.operator]
                     op.used_seat = min(SEAT_PER_SHIFT_SEC, op.used_seat + dt)
 
-        # Inflow rates from surface dumping
         ore1_in_rate = self.dump_station._active_ore1_rate
         ore2_in_rate = self.dump_station._active_ore2_rate
 
-        # Blended routing fraction across active available faces
-        if self.is_area2_locked():
-            f_blend = self.face1.active_parcel_ore_fraction.value
+        # Estimate current stock routing fraction
+        a1_stopes = [s for s in self.stopes if s.area_id == 1 and not s.is_exhausted]
+        a2_stopes = [s for s in self.stopes if s.area_id == 2 and not s.is_exhausted]
+        if self.is_area2_locked() or not a2_stopes:
+            f_blend = float(a1_stopes[0].active_parcel_ore_fraction.value) if a1_stopes else 0.15
         else:
-            f_blend = (
-                self.face1.active_parcel_ore_fraction.value
-                + self.face2.active_parcel_ore_fraction.value
-            ) / 2.0
+            f1 = float(a1_stopes[0].active_parcel_ore_fraction.value) if a1_stopes else 0.15
+            f2 = float(a2_stopes[0].active_parcel_ore_fraction.value) if a2_stopes else 0.45
+            f_blend = (f1 + f2) / 2.0
 
         plant_draw, _ = self.plant.get_target_rates(
             self.mode_controller.active_campaign_mode.value,
@@ -716,6 +689,8 @@ class TwoAreaCounterfactualEngine(drs.Module):
             ore2_level=self.ore2_stock.level,
             stockpile2_routing_fraction=f_blend,
         )
+
+        self._compute_analytical_face_allocation(plant_draw)
 
         ore1_draw_rate_sec = plant_draw.ore1 / 86400.0
         ore2_draw_rate_sec = plant_draw.ore2 / 86400.0
@@ -728,54 +703,70 @@ class TwoAreaCounterfactualEngine(drs.Module):
         self.plant.process(out1 + out2)
         self.plant.cumulative_milled_mass.step(dt)
 
-        # Development advance step
-        reserved_trucks = float(self.development_priority_reserved_trucks.value)
-        n_operating_trucks = sum(
-            1 for tr in self.trucks if tr.phase in OPERATING_PHASES
-        )
+        # Policy-Driven Development Allocation & Stope Turnaround
+        n_operating_trucks = sum(1 for tr in self.trucks if tr.phase in OPERATING_PHASES)
         total_trucks = len(self.trucks)
         available_extra = max(0, total_trucks - n_operating_trucks)
 
-        locked_boost = (
-            (total_trucks * 0.35)
-            if (
-                self.is_area2_locked()
-                and self.area2_redeploy_locked_face_trucks_to_development
-                and not self.area2_counterfactual_disable
-            )
-            else 0.0
-        )
-        dev_trucks = max(reserved_trucks, float(available_extra)) + locked_boost
-        self.development_rate_m_per_day.value = (
-            dev_trucks * DEVELOPMENT_METRES_PER_EXTRA_TRUCK_PER_DAY
-        )
-        delta_dev = self.development_rate_m_per_day.value * dt_days
-        self.cumulative_mine_development.value += delta_dev
-
-        # Allocate development metres to Area 2 project
-        if self.is_area2_locked() and self.strategic_planning_started and not self.area2_counterfactual_disable:
+        if self.policy_name == "POLICY_1_MYOPIC":
+            dev_trucks = max(2.0, float(available_extra))
+            frac_to_area2 = 0.05
+        else:
+            reserved_trucks = float(self.development_priority_reserved_trucks.value)
+            locked_boost = (total_trucks * 0.35) if self.is_area2_locked() else 0.0
+            dev_trucks = max(reserved_trucks, float(available_extra)) + locked_boost
             prio = self.mining_priority
-            if prio == MiningPriority.DEVELOPMENT:
-                frac = 0.85
-            elif prio == MiningPriority.BALANCED:
-                frac = 0.60
+            frac_to_area2 = (
+                0.85
+                if prio == MiningPriority.DEVELOPMENT
+                else (0.60 if prio == MiningPriority.BALANCED else 0.35)
+            )
+
+        self.development_rate_m_per_day.value = dev_trucks * DEVELOPMENT_METRES_PER_EXTRA_TRUCK_PER_DAY
+        delta_dev = self.development_rate_m_per_day.value * dt_days
+
+        # Two Physical Development Types Allocation:
+        # 1. Capital Development: Area 2 Capital Decline (Ramp to Level 6)
+        # 2. Stope Turnaround Development: In-stope waste & access advance (Unlocks next parcel)
+        turnaround_stopes = [s for s in self.stopes if s.is_in_turnaround]
+
+        if self.is_area2_locked() and self.strategic_planning_started:
+            if self.policy_name == "POLICY_1_MYOPIC":
+                capital_advance = delta_dev * frac_to_area2
+                turnaround_advance = delta_dev * (1.0 - frac_to_area2)
             else:
-                frac = 0.35
-            self.area2_cumulative_development.value += delta_dev * frac
+                capital_advance = delta_dev * (frac_to_area2 if turnaround_stopes else 1.0)
+                turnaround_advance = delta_dev * (1.0 - frac_to_area2) if turnaround_stopes else 0.0
+
+            self.area2_cumulative_development.value += capital_advance
+            if turnaround_stopes and turnaround_advance > 0.0:
+                m_per_stope = turnaround_advance / len(turnaround_stopes)
+                for stope in turnaround_stopes:
+                    adv, _ = stope.advance_turnaround_development(m_per_stope)
+                    self.stope_turnaround_development.value += adv
+        else:
+            # Area 2 unlocked: all active development capacity goes to locked stopes
+            if turnaround_stopes:
+                m_per_stope = delta_dev / len(turnaround_stopes)
+                for stope in turnaround_stopes:
+                    adv, _ = stope.advance_turnaround_development(m_per_stope)
+                    self.stope_turnaround_development.value += adv
+
+        self.cumulative_mine_development.value = (
+            self.area2_cumulative_development.value + self.stope_turnaround_development.value
+        )
 
         self._update_area2_readiness()
         self._update_strategic_economics(out1, out2, dt_days)
 
-        # Accumulators
         self.total_extracted_ore.step(dt)
         self.ore1_hauled.step(dt)
         self.ore2_hauled.step(dt)
-
+        self.fallback_dispatch_count.value = float(self.dispatcher.fallback_dispatches)
         self._record_telemetry(plant_draw)
 
     # -- Event Policy & Target Setting ----------------------------------------
     def on_event(self, t: float):
-        """Engine step policy: calendar updates, strategic review, truck transitions."""
         self._calendar_update()
         self._update_strategic_tactical_review()
         self._update_operating_mode_and_targets()
@@ -794,11 +785,11 @@ class TwoAreaCounterfactualEngine(drs.Module):
                         changed = True
 
     def _update_strategic_tactical_review(self):
-        """Conducts strategic annual rollovers and monthly tactical progress reviews."""
-        t_days = self.gt.value / 86400.0
-
-        total_extracted = sum(f.cumulative_extracted_mass.value for f in self.faces)
-        if total_extracted >= self.ore_to_be_extracted_during_warming_period or self.horizon_sec < float("inf"):
+        total_extracted = sum(s.cumulative_ore_extracted.value for s in self.stopes)
+        if (
+            total_extracted >= self.ore_to_be_extracted_during_warming_period
+            or self.horizon_sec < float("inf")
+        ):
             if not self.strategic_planning_started:
                 self.strategic_planning_started = True
                 self.strategic_year_index.value = 0.0
@@ -807,35 +798,27 @@ class TwoAreaCounterfactualEngine(drs.Module):
                 self.tactical_review_count.value = 0.0
                 self.annual_ore1_extracted = 0.0
                 self.annual_ore2_extracted = 0.0
-                self.annual_development_start = float(
-                    self.cumulative_mine_development.value
-                )
+                self.annual_development_start = float(self.cumulative_mine_development.value)
 
         if not self.strategic_planning_started:
             return
 
-        # Annual Rollover Check
         if self.strategic_year_timer.value >= self.strategic_period_days - 1e-6:
             self.strategic_year_index.value += 1.0
             self.strategic_year_timer.reset()
             self.annual_ore1_extracted = 0.0
             self.annual_ore2_extracted = 0.0
-            self.annual_development_start = float(
-                self.cumulative_mine_development.value
-            )
+            self.annual_development_start = float(self.cumulative_mine_development.value)
 
-        # Compute Annual Trajectory Progress Ratios
         elapsed_year_fraction = max(
-            1e-4, min(1.0, self.strategic_year_timer.value / self.strategic_period_days)
+            1e-4,
+            min(1.0, self.strategic_year_timer.value / self.strategic_period_days),
         )
         current_target = strategic_target_for_year(
             self.strategic_targets, int(self.strategic_year_index.value)
         )
 
-        annual_dev = (
-            float(self.cumulative_mine_development.value)
-            - self.annual_development_start
-        )
+        annual_dev = float(self.cumulative_mine_development.value) - self.annual_development_start
         self.development_trajectory_ratio.value = trajectory_progress_ratio(
             actual=annual_dev,
             annual_target=current_target.min_development,
@@ -852,47 +835,48 @@ class TwoAreaCounterfactualEngine(drs.Module):
             elapsed_fraction=elapsed_year_fraction,
         )
 
-        # Monthly Tactical Review (every 30 days)
+        # Monthly Tactical Review
         if (
-            self.tactical_review_timer.value
-            >= self.tactical_review_period_days - 1e-6
+            self.tactical_review_timer.value >= self.tactical_review_period_days - 1e-6
             or self.tactical_review_count.value == 0.0
         ):
             self.tactical_review_timer.reset()
             self.tactical_review_count.value += 1.0
 
-            selected = select_mining_priority(
-                development_ratio=float(self.development_trajectory_ratio.value),
-                ore1_ratio=float(self.ore1_trajectory_ratio.value),
-                ore2_ratio=float(self.ore2_trajectory_ratio.value),
-                tolerance=self.tactical_progress_tolerance,
-                area2_readiness_trajectory_ratio=float(self.area2_readiness_trajectory_ratio.value),
-            )
-            self.mining_priority = selected
-
-            if selected == MiningPriority.DEVELOPMENT:
-                reserved = math.ceil(
-                    len(self.trucks)
-                    * self.development_priority_truck_reservation_fraction
-                )
-                self.development_priority_reserved_trucks.value = float(reserved)
-            else:
+            if self.policy_name == "POLICY_1_MYOPIC":
+                self.mining_priority = MiningPriority.PRODUCTION
                 self.development_priority_reserved_trucks.value = 0.0
+            else:
+                effective_dev_ratio = min(
+                    float(self.development_trajectory_ratio.value),
+                    float(self.area2_readiness_trajectory_ratio.value),
+                )
+                selected = select_mining_priority(
+                    development_ratio=effective_dev_ratio,
+                    ore1_ratio=float(self.ore1_trajectory_ratio.value),
+                    ore2_ratio=float(self.ore2_trajectory_ratio.value),
+                    tolerance=self.tactical_progress_tolerance,
+                )
+                self.mining_priority = selected
+                if selected == MiningPriority.DEVELOPMENT:
+                    n_res = max(1, int(round(len(self.trucks) * 0.20)))
+                    self.development_priority_reserved_trucks.value = float(n_res)
+                else:
+                    self.development_priority_reserved_trucks.value = 0.0
 
     def _update_operating_mode_and_targets(self):
-        """Updates campaign mode, plant operating mode, and extraction targets."""
         camp_mode = self.mode_controller.update(
             ore2_stock_level=self.ore2_stock.level,
             total_stock_level=self.ore1_stock.level + self.ore2_stock.level,
         )
-
-        if self.is_area2_locked():
-            f_blend = self.face1.active_parcel_ore_fraction.value
+        a1_stopes = [s for s in self.stopes if s.area_id == 1 and not s.is_exhausted]
+        a2_stopes = [s for s in self.stopes if s.area_id == 2 and not s.is_exhausted]
+        if self.is_area2_locked() or not a2_stopes:
+            f_blend = float(a1_stopes[0].active_parcel_ore_fraction.value) if a1_stopes else 0.30
         else:
-            f_blend = (
-                self.face1.active_parcel_ore_fraction.value
-                + self.face2.active_parcel_ore_fraction.value
-            ) / 2.0
+            f1 = float(a1_stopes[0].active_parcel_ore_fraction.value) if a1_stopes else 0.30
+            f2 = float(a2_stopes[0].active_parcel_ore_fraction.value) if a2_stopes else 0.35
+            f_blend = (f1 + f2) / 2.0
 
         plant_draw, _ = self.plant.get_target_rates(
             camp_mode,
@@ -942,7 +926,6 @@ class TwoAreaCounterfactualEngine(drs.Module):
     def _in_down_window(self, tr: Truck, t: float) -> bool:
         return tr.down_start <= t < tr.down_end
 
-    # -- Dispatch Policy -----------------------------------------------------
     def _try_dispatch(self, tr: Truck) -> bool:
         t = self.gt.value
         if (
@@ -964,7 +947,6 @@ class TwoAreaCounterfactualEngine(drs.Module):
                 return True
             return False
 
-        total_stock = self.ore1_stock.level + self.ore2_stock.level
         mode_name = self.plant.active_operating_mode.value.name
         if mode_name == "SHUTDOWN":
             self._release_operator(tr)
@@ -972,44 +954,53 @@ class TwoAreaCounterfactualEngine(drs.Module):
 
         reserved_trucks = int(self.development_priority_reserved_trucks.value)
         max_production_trucks = max(1, len(self.trucks) - reserved_trucks)
-        active_prod_trucks = sum(
-            1 for trk in self.trucks if trk.phase in OPERATING_PHASES
-        )
+        active_prod_trucks = sum(1 for trk in self.trucks if trk.phase in OPERATING_PHASES)
         if active_prod_trucks >= max_production_trucks:
             self._release_operator(tr)
             return False
 
+        # Two-Tier Hierarchical Dispatcher Evaluation
         day_progress = (t % 86400.0) / 86400.0
+        total_stock = self.ore1_stock.level + self.ore2_stock.level
+
+        # Pacing: when total stockpile is satisfied (>= 60,000 t), pace dispatches to match active plant draw rate
         expected_hauled_by_now = self.daily_target_ore * day_progress
-        if total_stock >= self.target_ore_stock_level and self.daily_hauled_ore > expected_hauled_by_now + 100.0:
+        if (
+            total_stock >= self.target_ore_stock_level
+            and self.daily_hauled_ore >= expected_hauled_by_now
+        ):
             self._release_operator(tr)
             return False
 
+        w2 = float(self.analytical_face2_weight.value)
+        lhd_q = {s.face_id: len(self.stope_queues[s.face_id]) for s in self.stopes}
+
+        dispatch_result = self.dispatcher.select_stope_for_truck(
+            current_total_stock=total_stock,
+            daily_hauled_so_far=self.daily_hauled_ore,
+            day_progress_fraction=day_progress,
+            analytical_w2=w2,
+            area2_locked=self.is_area2_locked(),
+            lhd_queues=lhd_q,
+            target_daily_ore_tonnes=self.daily_target_ore,
+        )
+
+        if dispatch_result is None:
+            # Stockpiles satisfied -> surplus capacity
+            self._release_operator(tr)
+            return False
+
+        selected_stope, is_fallback = dispatch_result
         if not self._acquire_operator(tr):
             self._release_operator(tr)
             return False
 
-        target_face_id = self._select_face_by_blend_need()
-        tr.target_face_id = target_face_id
-        tr.target_level = AREA1_LEVEL if target_face_id == 1 else AREA2_LEVEL
-
+        tr.target_stope_id = selected_stope.face_id
+        tr.target_level = selected_stope.level_index
         tr.trip_start = self.gt.value
         tr.phase = TruckPhase.EMPTY
         tr.timer.value = self._travel_time(tr, loaded=False)
         return True
-
-    def _select_face_by_blend_need(self) -> int:
-        if self.is_area2_locked():
-            return 1
-
-        mode_name = self.plant.active_operating_mode.value.name
-        if "MODE_A" in mode_name:
-            p_face2 = 0.65
-        elif "MODE_B" in mode_name:
-            p_face2 = 0.35
-        else:
-            p_face2 = 0.50
-        return 2 if self.rng.random() < p_face2 else 1
 
     def _acquire_operator(self, tr: Truck) -> bool:
         if tr.operator >= 0 and not self.operators[tr.operator].free:
@@ -1030,7 +1021,7 @@ class TwoAreaCounterfactualEngine(drs.Module):
     def _advance(self, tr: Truck) -> bool:
         ph = tr.phase
         if ph == TruckPhase.EMPTY:
-            self._enter_face_loadout(tr)
+            self._enter_stope_loadout(tr)
             return True
         if ph == TruckPhase.SPOT_LOAD:
             tr.phase = TruckPhase.ACQUIRE
@@ -1054,35 +1045,53 @@ class TwoAreaCounterfactualEngine(drs.Module):
             return True
         return False
 
-    def _enter_face_loadout(self, tr: Truck):
-        fid = tr.target_face_id
-        if self._face_lhds_busy[fid] >= self.num_lhds_per_face:
-            self.face_queues[fid].append(tr)
+    def _enter_stope_loadout(self, tr: Truck):
+        sid = tr.target_stope_id
+        stope = next(s for s in self.stopes if s.face_id == sid)
+
+        # Dynamic fallback if stope entered turnaround development while en-route
+        if not stope.is_ore_available:
+            alt_stopes = [s for s in self.stopes if s.area_id == stope.area_id and s.is_ore_available]
+            if not alt_stopes:
+                alt_stopes = [s for s in self.stopes if s.is_ore_available and (not self.is_area2_locked() or s.area_id == 1)]
+            if alt_stopes:
+                stope = min(alt_stopes, key=lambda s: len(self.stope_queues[s.face_id]))
+                sid = stope.face_id
+                tr.target_stope_id = sid
+                tr.target_level = stope.level_index
+
+        if self._stope_lhds_busy[sid] >= self.num_lhds_per_stope:
+            self.stope_queues[sid].append(tr)
             tr.phase = TruckPhase.WAIT_LOAD
             tr.timer.value = 0.0
         else:
-            self._face_lhds_busy[fid] += 1
+            self._stope_lhds_busy[sid] += 1
             tr.phase = TruckPhase.SPOT_LOAD
             tr.timer.value = _tri(self.rng, TRUCK_LOAD_SPOT_MIN * 60.0, 0.25)
 
     def _finish_loading(self, tr: Truck):
+        sid = tr.target_stope_id
+        stope = next(s for s in self.stopes if s.face_id == sid)
         payload = _tri(self.rng, ORE_PAYLOAD, 0.08)
-        tr.current_payload = payload
 
-        fid = tr.target_face_id
-        face = self.face1 if fid == 1 else self.face2
-        tr.payload_ore_fraction = face.active_parcel_ore_fraction.value
+        ext_t, o1_t, o2_t = stope.extract_ore(payload)
+        # If partial payload, top off from adjacent stope if available
+        if ext_t < payload - 1e-6:
+            alt_stopes = [s for s in self.stopes if s.area_id == stope.area_id and s.is_ore_available and s.face_id != stope.face_id]
+            if not alt_stopes:
+                alt_stopes = [s for s in self.stopes if s.is_ore_available and (not self.is_area2_locked() or s.area_id == 1)]
+            if alt_stopes:
+                top_stope = alt_stopes[0]
+                top_ext, _, _ = top_stope.extract_ore(payload - ext_t)
+                ext_t += top_ext
 
-        face.parcel_extracted_mass.value += payload
-        face.cumulative_extracted_mass.value += payload
-        if face.parcel_extracted_mass.value >= face.active_parcel_initial_mass.value:
-            face._load_next_batch()
-            face.parcel_extracted_mass.value = 0.0
+        tr.current_payload = ext_t
+        tr.payload_ore_fraction = float(stope.active_parcel_ore_fraction.value)
 
-        self._face_lhds_busy[fid] -= 1
-        if self.face_queues[fid]:
-            nxt = self.face_queues[fid].pop(0)
-            self._face_lhds_busy[fid] += 1
+        self._stope_lhds_busy[sid] = max(0, self._stope_lhds_busy[sid] - 1)
+        if self.stope_queues[sid]:
+            nxt = self.stope_queues[sid].pop(0)
+            self._stope_lhds_busy[sid] += 1
             nxt.phase = TruckPhase.SPOT_LOAD
             nxt.timer.value = _tri(self.rng, TRUCK_LOAD_SPOT_MIN * 60.0, 0.25)
 
@@ -1099,9 +1108,7 @@ class TwoAreaCounterfactualEngine(drs.Module):
             tr.timer.value = 0.0
 
     def _start_dump(self, site: SurfaceDumpStation, tr: Truck):
-        dur = _tri(self.rng, DUMP_SPOT_MIN * 60.0, 0.20) + _tri(
-            self.rng, DUMP_MIN * 60.0, 0.10
-        )
+        dur = _tri(self.rng, DUMP_SPOT_MIN * 60.0, 0.20) + _tri(self.rng, DUMP_MIN * 60.0, 0.10)
         site.in_use += 1
         tr.phase = TruckPhase.DUMPING
         tr.timer.value = dur
@@ -1164,416 +1171,386 @@ class TwoAreaCounterfactualEngine(drs.Module):
 
         if not loaded:
             cong = sum(1 for trk in self.trucks if trk.phase in OPERATING_PHASES)
-            delay = BASE_PASS_BAY_DELAY_SEC + PER_TRUCK_PASS_BAY_DELAY_SEC * max(
-                0, cong - 3
-            )
+            delay = BASE_PASS_BAY_DELAY_SEC + PER_TRUCK_PASS_BAY_DELAY_SEC * max(0, cong - 3)
             t += delay
             self.traffic_delay_sum += delay
         return t
 
-    # -- Telemetry & History -------------------------------------------------
+    # -- Telemetry Recording --------------------------------------------------
     def _record_telemetry(self, plant_draw: PlantDrawRates):
         t_days = self.gt.value / 86400.0
-        active_mode = self.plant.active_operating_mode.value.name
-        camp_mode = self.mode_controller.active_campaign_mode.value.name
-        mining_prio = self.mining_priority.name
+        if t_days - self._last_telemetry_time < 0.20 and t_days > 0.0:
+            return
+        self._last_telemetry_time = t_days
 
-        n_waiting_load = sum(len(q) for q in self.face_queues.values())
-        n_waiting_dump = len(self.dump_station.queue)
-        n_refueling = sum(
-            1 for tr in self.trucks if tr.phase == TruckPhase.REFUELING
-        )
-        n_operating = sum(
-            1 for tr in self.trucks if tr.phase in OPERATING_PHASES
-        )
+        act_mode = self.plant.active_operating_mode.value.name
+        cap_dev = float(self.area2_cumulative_development.value)
+        tot_dev = float(self.cumulative_mine_development.value)
 
-        total_extracted = sum(f.cumulative_extracted_mass.value for f in self.faces)
-        target = strategic_target_for_year(
-            self.strategic_targets, int(self.strategic_year_index.value)
-        )
+        a1_rem_res = sum(s.remaining_reserve for s in self.stopes if s.area_id == 1)
+        a2_rem_res = sum(s.remaining_reserve for s in self.stopes if s.area_id == 2)
+        n_turnaround = sum(1 for s in self.stopes if s.is_in_turnaround)
 
-        if self.is_area2_locked():
-            f_blend = self.face1.active_parcel_ore_fraction.value
-        else:
-            f_blend = (
-                self.face1.active_parcel_ore_fraction.value
-                + self.face2.active_parcel_ore_fraction.value
-            ) / 2.0
-
+        n_operating = sum(1 for tr in self.trucks if tr.phase in OPERATING_PHASES)
+        n_refueling = sum(1 for tr in self.trucks if tr.phase == TruckPhase.REFUELING)
         n_idle = max(0, len(self.trucks) - (n_operating + n_refueling))
+        n_dev_reserved = float(self.development_priority_reserved_trucks.value) if hasattr(self, "development_priority_reserved_trucks") else 0.0
 
-        self.history_records.append(
-            {
-                "time": t_days,
-                "ore1_stock": self.ore1_stock.level,
-                "ore2_stock": self.ore2_stock.level,
-                "Ore1Stock_mass": self.ore1_stock.level,
-                "Ore2Stock_mass": self.ore2_stock.level,
-                "total_system_ore_mass": self.ore1_stock.level
-                + self.ore2_stock.level,
-                "active_operating_mode": self.plant.active_operating_mode.value,
-                "active_operating_mode_name": active_mode,
-                "campaign_mode": camp_mode,
-                "trucks_operating": n_operating,
-                "trucks_refueling": n_refueling,
-                "trucks_idle": n_idle,
-                "truck_idle_fraction": n_idle / max(1, len(self.trucks)),
-                "current_campaign_duration": self.mode_controller.current_campaign_duration.value,
-                "current_contingency_duration": self.plant.current_contingency_duration.value,
-                "strategic_year_index": self.strategic_year_index.value,
-                "tactical_review_count": self.tactical_review_count.value,
-                "mining_priority": mining_prio,
-                "annual_target_development": target.min_development,
-                "annual_target_ore1": target.min_ore1_production,
-                "annual_target_ore2": target.min_ore2_production,
-                "development_trajectory_ratio": self.development_trajectory_ratio.value,
-                "ore1_trajectory_ratio": self.ore1_trajectory_ratio.value,
-                "ore2_trajectory_ratio": self.ore2_trajectory_ratio.value,
-                "area2_required_development": self.area2_readiness_target.required_development,
-                "area2_ready_by_day": self.area2_readiness_target.ready_by_day or 0.0,
-                "area2_development_progress": self.area2_cumulative_development.value,
-                "area2_readiness_fraction": self.area2_readiness_fraction.value,
-                "area2_readiness_trajectory_ratio": self.area2_readiness_trajectory_ratio.value,
-                "area2_ready": self.area2_ready,
-                "area2_deadline_missed": self.area2_deadline_missed,
-                "area2_currently_late": self.area2_currently_late,
-                "area2_completed_late": self.area2_completed_late,
-                "area2_ready_day": self.area2_ready_day.value,
-                "cumulative_mine_development": self.cumulative_mine_development.value,
-                "area2_cumulative_development": self.area2_cumulative_development.value,
-                "development_rate_m_per_day": self.development_rate_m_per_day.value,
-                "development_priority_reserved_trucks": self.development_priority_reserved_trucks.value,
-                "daily_target_ore": self.daily_target_ore,
-                "daily_hauled_ore": self.daily_hauled_ore,
-                "ore1_hauled_total": self.ore1_hauled.value,
-                "ore2_hauled_total": self.ore2_hauled.value,
-                "cumulative_extracted_mass": total_extracted,
-                "milled_ore1_rate": plant_draw.ore1,
-                "milled_ore2_rate": plant_draw.ore2,
-                "cumulative_milled_mass": self.plant.cumulative_milled_mass.value,
-                "discount_factor": self.discount_factor.value,
-                "current_cash_flow_rate": self.current_cash_flow_rate.value,
-                "current_discounted_cash_flow_rate": self.current_discounted_cash_flow_rate.value,
-                "cumulative_cash_flow": self.cumulative_cash_flow.value,
-                "cumulative_discounted_cash_flow": self.cumulative_discounted_cash_flow.value,
-                "operating_npv_proxy": self.operating_npv_proxy.value,
-                "face1_active_fraction": self.face1.active_parcel_ore_fraction.value,
-                "face2_active_fraction": self.face2.active_parcel_ore_fraction.value,
-                "blended_active_fraction": f_blend,
-                "MassOfCurrentParcel": self.face1.active_parcel_initial_mass.value,
-                "Grade (% Ore 2)": f_blend * 100.0,
-                "active_trucks": n_operating,
-                "trucks_waiting_load": n_waiting_load,
-                "trucks_waiting_dump": n_waiting_dump,
-                "trucks_refueling": n_refueling,
-                "traffic_delay_min": self.traffic_delay_sum / 60.0,
-            }
-        )
+        rec = {
+            "time": t_days,
+            "Ore1Stock_mass": float(self.ore1_stock.level),
+            "Ore2Stock_mass": float(self.ore2_stock.level),
+            "total_system_ore_mass": float(self.ore1_stock.level + self.ore2_stock.level),
+            "active_operating_mode": self.plant.active_operating_mode.value,
+            "active_operating_mode_name": act_mode,
+            "cumulative_milled_mass": float(self.plant.cumulative_milled_mass.value),
+            "cumulative_extracted_mass": float(self.total_extracted_ore.value),
+            "area1_remaining_reserve": a1_rem_res,
+            "area2_remaining_reserve": a2_rem_res,
+            "stopes_in_turnaround": n_turnaround,
+            "stope_turnaround_dev_m": float(self.stope_turnaround_development.value),
+            "cumulative_mine_development": tot_dev,
+            "area2_cumulative_development": cap_dev,
+            "trucks_operating": n_operating,
+            "trucks_refueling": n_refueling,
+            "trucks_idle": n_idle,
+            "trucks_dev_reserved": n_dev_reserved,
+            "truck_idle_fraction": n_idle / max(1, len(self.trucks)),
+            "area2_ready": self.area2_ready,
+            "area2_ready_day": float(self.area2_ready_day.value),
+            "mining_priority": self.mining_priority.value,
+            "analytical_face1_weight": float(self.analytical_face1_weight.value),
+            "analytical_face2_weight": float(self.analytical_face2_weight.value),
+            "fallback_dispatch_count": float(self.fallback_dispatch_count.value),
+            "operating_npv_proxy": float(self.operating_npv_proxy.value),
+            "current_discounted_cash_flow_rate": float(self.current_discounted_cash_flow_rate.value),
+            "discount_factor": float(self.discount_factor.value),
+        }
+        self.history_records.append(rec)
 
 
 # ---------------------------------------------------------------------------
-# Comparative Dashboards & Visualization
+# Dashboard Visualization
 # ---------------------------------------------------------------------------
-def plot_counterfactual_comparison_dashboard(
-    df_with: pd.DataFrame,
-    df_without: pd.DataFrame,
-    output_path: str = "plots/two_area_counterfactual_comparison.png",
+def plot_stope_lifecycle_dashboard(
+    df_p1: pd.DataFrame,
+    df_p2: pd.DataFrame,
+    output_path: str = "plots/two_area_stope_lifecycle.png",
     palette: dict = None,
-    figsize: Tuple[int, int] = (16, 52),
-):
-    """Builds a comprehensive 12-panel side-by-side comparative dashboard."""
+    figsize: Tuple[int, int] = (18, 63),
+) -> Dashboard:
+    """Renders 14-panel comprehensive multi-stope lifecycle visualization dashboard."""
     palette = palette or MODE_PALETTE
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    if "active_operating_mode_name" not in df_with.columns or "Mode A" not in df_with.columns:
-        df_with = prepare_history(df_with)
-    if "active_operating_mode_name" not in df_without.columns or "Mode A" not in df_without.columns:
-        df_without = prepare_history(df_without)
+    df_p1 = prepare_history(df_p1)
+    df_p2 = prepare_history(df_p2)
+
+    unlock_rows_p2 = df_p2[df_p2["area2_ready"] == True]
+    unlock_time_p2 = float(unlock_rows_p2["time"].iloc[0]) if not unlock_rows_p2.empty else None
+
+    unlock_rows_p1 = df_p1[df_p1["area2_ready"] == True]
+    unlock_time_p1 = float(unlock_rows_p1["time"].iloc[0]) if not unlock_rows_p1.empty else None
 
     dash = Dashboard(
-        nrows=12,
+        nrows=14,
         ncols=1,
         figsize=figsize,
         sharex=False,
-        title="Counterfactual Evaluation: WITH Area 2 Expansion vs WITHOUT Area 2 Baseline",
+        title="Multi-Stope Underground Lifecycle, Waste Rock Requirements & Two-Tier Dispatch",
     )
-    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
 
-    unlock_rows = df_with[df_with["area2_ready"] == True]
-    unlock_time = float(unlock_rows["time"].iloc[0]) if not unlock_rows.empty else None
-
-    # 0. Cumulative Operating NPV Comparison (WITH vs WITHOUT on same plot)
+    # 0. Cumulative Operating NPV Comparison
     ax0 = dash[0]
     ax0.step(
-        df_with["time"],
-        df_with["operating_npv_proxy"] / 1e6,
-        label="WITH Area 2 Capital Expansion",
-        color="#1565c0",
-        linewidth=2.2,
+        df_p2["time"],
+        df_p2["operating_npv_proxy"] / 1e6,
+        label="Policy 2: Value-Oriented + Multi-Stope Two-Tier Dispatch",
+        color="#2e7d32",
+        linewidth=2.4,
         where="post",
     )
     ax0.step(
-        df_without["time"],
-        df_without["operating_npv_proxy"] / 1e6,
-        label="WITHOUT Area 2 (Single-Area Baseline)",
+        df_p1["time"],
+        df_p1["operating_npv_proxy"] / 1e6,
+        label="Policy 1: Myopic Baseline (Suffers Area 1 Depletion Collapse)",
         color="#c62828",
         linestyle="--",
         linewidth=2.0,
         where="post",
     )
-    if unlock_time is not None:
-        ax0.axvspan(
-            df_with["time"].min(),
-            unlock_time,
-            color="#ffebee",
-            alpha=0.35,
-            label="Mine 2 Locked (Dev Phase)",
-        )
+    if unlock_time_p2 is not None:
         ax0.axvline(
-            unlock_time,
-            color="#880e4f",
+            unlock_time_p2,
+            color="#2e7d32",
             linestyle="-.",
             linewidth=2.5,
             alpha=0.95,
-            label=f"★ Area 2 Unlocked (Day {unlock_time:.1f})",
+            label=f"★ Policy 2 Area 2 Unlocked (Day {unlock_time_p2:.1f})",
         )
-        t_max = df_with["time"].max()
-        text_x = unlock_time + (t_max * 0.03) if (unlock_time < t_max * 0.80) else unlock_time - (t_max * 0.18)
-        y_pos = float(df_with["operating_npv_proxy"].max() / 1e6) * 0.55
-        ax0.annotate(
-            f"★ AREA 2 UNLOCKED\nDay {unlock_time:.1f}",
-            xy=(unlock_time, y_pos),
-            xytext=(text_x, y_pos * 1.15),
-            arrowprops=dict(facecolor="#880e4f", edgecolor="#880e4f", shrink=0.08, width=2.0, headwidth=8),
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="#fce4ec", edgecolor="#880e4f", linewidth=1.8, alpha=0.95),
-            fontsize=10,
-            fontweight="bold",
-            color="#880e4f",
-            zorder=10,
+    if unlock_time_p1 is not None:
+        ax0.axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle=":",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"★ Policy 1 Area 2 Unlocked (Day {unlock_time_p1:.1f})",
         )
-    ax0.set_title("Operating Net Present Value (NPV @ 5% Discount Rate): WITH vs WITHOUT Area 2")
+    ax0.set_title("Cumulative Operating NPV (@ 5% Discount Rate): Policy 2 vs Policy 1")
     ax0.set_ylabel("Operating NPV (M$)")
     ax0.grid(True, alpha=0.3)
     ax0.legend(loc="lower right", framealpha=0.90)
 
-    # 1. Daily Discounted Cash Flow Rates Comparison
+    # 1. Area 1 Finite Reserves Depletion Curve (Life-of-Mine Exhaustion)
     ax1 = dash[1]
     ax1.plot(
-        df_with["time"],
-        df_with["current_discounted_cash_flow_rate"] / 1e3,
-        label="Discounted CF Rate (WITH Area 2)",
+        df_p2["time"],
+        df_p2["area1_remaining_reserve"] / 1e3,
+        label="Policy 2: Area 1 Remaining Reserves (k tonnes)",
         color="#1565c0",
-        alpha=0.85,
+        linewidth=2.2,
     )
     ax1.plot(
-        df_without["time"],
-        df_without["current_discounted_cash_flow_rate"] / 1e3,
-        label="Discounted CF Rate (WITHOUT Area 2)",
+        df_p1["time"],
+        df_p1["area1_remaining_reserve"] / 1e3,
+        label="Policy 1: Area 1 Remaining Reserves (k tonnes)",
         color="#c62828",
         linestyle=":",
-        alpha=0.75,
+        linewidth=2.0,
     )
-    if unlock_time is not None:
+    ax1.axhline(0.0, color="red", linestyle="--", label="Area 1 Complete Exhaustion (0 t)")
+    if unlock_time_p1 is not None:
         ax1.axvline(
-            unlock_time,
-            color="#880e4f",
-            linestyle="-.",
+            unlock_time_p1,
+            color="#c62828",
+            linestyle=":",
             linewidth=2.0,
             alpha=0.85,
-            label=f"★ Area 2 Unlocked (Day {unlock_time:.1f})",
+            label=f"★ Policy 1 Unlocked (Day {unlock_time_p1:.1f})",
         )
-    ax1.set_title("Daily Discounted Cash Flow Rate ($k/day)")
-    ax1.set_ylabel("Rate ($k/day)")
+    ax1.set_title("Area 1 Finite Reserves Depletion (1.8M t Initial Budget across Stopes 1A, 1B, 1C)")
+    ax1.set_ylabel("Reserves (k tonnes)")
     ax1.grid(True, alpha=0.3)
-    ax1.legend(loc="lower left", framealpha=0.90)
+    ax1.legend(loc="upper right", framealpha=0.90)
 
-    # 2. Stockpiles: WITH Area 2
+    # 2. Area 2 Remaining Reserves (Deep Level 6 Stopes 2A, 2B, 2C)
+    ax2 = dash[2]
+    ax2.plot(
+        df_p2["time"],
+        df_p2["area2_remaining_reserve"] / 1e3,
+        label="Policy 2: Area 2 Deep Reserves (k tonnes)",
+        color="#2e7d32",
+        linewidth=2.2,
+    )
+    ax2.plot(
+        df_p1["time"],
+        df_p1["area2_remaining_reserve"] / 1e3,
+        label="Policy 1: Area 2 Deep Reserves (Unmined / Locked)",
+        color="#9e9e9e",
+        linestyle="--",
+        linewidth=1.8,
+    )
+    if unlock_time_p2 is not None:
+        ax2.axvline(unlock_time_p2, color="#2e7d32", linestyle="-.", linewidth=2.0, label=f"★ Policy 2 Unlocked (Day {unlock_time_p2:.1f})")
+    if unlock_time_p1 is not None:
+        ax2.axvline(unlock_time_p1, color="#c62828", linestyle=":", linewidth=2.0, label=f"★ Policy 1 Unlocked (Day {unlock_time_p1:.1f})")
+    ax2.set_title("Area 2 Deep Reserves (4.8M t Initial Budget across Stopes 2A, 2B, 2C)")
+    ax2.set_ylabel("Reserves (k tonnes)")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper right", framealpha=0.90)
+
+    # 3. Stacked Development Metres: Policy 2 (Capital Decline vs Stope Turnaround Development)
+    ax3 = dash[3]
+    ax3.fill_between(
+        df_p2["time"],
+        0,
+        df_p2["area2_cumulative_development"],
+        label="Area 2 Capital Decline (0 → 4,000 m)",
+        color="#7b1fa2",
+        alpha=0.60,
+        step="post",
+    )
+    ax3.fill_between(
+        df_p2["time"],
+        df_p2["area2_cumulative_development"],
+        df_p2["cumulative_mine_development"],
+        label="Stope Turnaround & Access Development",
+        color="#f57c00",
+        alpha=0.65,
+        step="post",
+    )
+    ax3.plot(
+        df_p2["time"],
+        df_p2["cumulative_mine_development"],
+        label="Total Mine Development (Capital + Turnaround)",
+        color="#212121",
+        linewidth=2.0,
+    )
+    ax3.axhline(4000.0, color="#7b1fa2", linestyle=":", linewidth=1.8, label="Area 2 Unlock (4,000 m)")
+    if unlock_time_p2 is not None:
+        ax3.axvline(unlock_time_p2, color="#7b1fa2", linestyle="-.", linewidth=2.0)
+    ax3.set_title("Policy 2: Underground Development Breakdown (Capital Decline & Stope Turnaround)")
+    ax3.set_ylabel("Development (m)")
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(loc="upper left", framealpha=0.90)
+
+    # 4. Stockpiles: Policy 2
     plot_ore_with_modes(
-        df_with,
+        df_p2,
         time_col="time",
         ore_cols=["total_system_ore_mass", "Ore1Stock_mass", "Ore2Stock_mass"],
         mode_col="active_operating_mode_name",
         campaign_split_mode="SHUTDOWN",
-        title="Stockpiles & Campaigns (WITH Area 2: Dual-Area Supply)",
+        title="Stockpiles & Campaigns: Policy 2 (Two-Tier Hierarchical Dispatch Sustaining Mode A)",
         palette=palette,
         hlines=[
             {"y": 60000.0, "color": "black", "linestyle": "--", "label": "Target Total (60k)"},
             {"y": 20400.0, "color": "red", "linestyle": ":", "label": "Critical Ore 2 (20.4k)"},
         ],
-        ax=dash[2],
+        ax=dash[4],
     )
-    if unlock_time is not None:
-        dash[2].axvspan(
-            df_with["time"].min(),
-            unlock_time,
-            color="#ffebee",
-            alpha=0.35,
-            label="Mine 2 Locked (Dev Phase)",
-        )
-        dash[2].axvline(
-            unlock_time,
-            color="#880e4f",
+    if unlock_time_p2 is not None:
+        dash[4].axvline(
+            unlock_time_p2,
+            color="#2e7d32",
             linestyle="-.",
             linewidth=2.5,
             alpha=0.95,
-            label=f"★ Mine 2 Unlocked (Day {unlock_time:.1f})",
+            label=f"★ Area 2 Unlocked (Day {unlock_time_p2:.1f})",
         )
-        t_max = df_with["time"].max()
-        text_x = unlock_time + (t_max * 0.03) if (unlock_time < t_max * 0.80) else unlock_time - (t_max * 0.18)
-        dash[2].annotate(
-            f"★ MINE 2 UNLOCKED\nDay {unlock_time:.1f}",
-            xy=(unlock_time, 48000.0),
-            xytext=(text_x, 52000.0),
-            arrowprops=dict(facecolor="#880e4f", edgecolor="#880e4f", shrink=0.08, width=2.0, headwidth=8),
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="#fce4ec", edgecolor="#880e4f", linewidth=1.8, alpha=0.95),
-            fontsize=10,
-            fontweight="bold",
-            color="#880e4f",
-            zorder=10,
-        )
-        dash[2].legend(loc="upper right", framealpha=0.90)
+        dash[4].legend(loc="upper right", framealpha=0.90)
 
-    # 3. Stockpiles: WITHOUT Area 2
+    # 5. Stockpiles: Policy 1
     plot_ore_with_modes(
-        df_without,
+        df_p1,
         time_col="time",
         ore_cols=["total_system_ore_mass", "Ore1Stock_mass", "Ore2Stock_mass"],
         mode_col="active_operating_mode_name",
         campaign_split_mode="SHUTDOWN",
-        title="Stockpiles & Campaigns (WITHOUT Area 2: Single-Area Starvation & Contingency)",
+        title="Stockpiles & Campaigns: Policy 1 (Severe Ore 2 Starvation & Depletion Shutdown)",
         palette=palette,
         hlines=[
             {"y": 60000.0, "color": "black", "linestyle": "--", "label": "Target Total (60k)"},
             {"y": 20400.0, "color": "red", "linestyle": ":", "label": "Critical Ore 2 (20.4k)"},
         ],
-        ax=dash[3],
-    )
-
-    # 4. Operating Modes Step Timeline (WITH Area 2)
-    plot_time_series(
-        df_with,
-        y_columns=["Mode A", "Mode B", "Shutdown"],
-        title="Operating Modes (WITH Area 2)",
-        is_step=True,
-        ax=dash[4],
-    )
-    if unlock_time is not None:
-        dash[4].axvline(
-            unlock_time,
-            color="#880e4f",
-            linestyle="-.",
-            linewidth=2.0,
-            alpha=0.85,
-            label=f"★ Area 2 Unlocked (Day {unlock_time:.1f})",
-        )
-        dash[4].legend(loc="upper right", framealpha=0.90)
-
-    # 5. Operating Modes Step Timeline (WITHOUT Area 2)
-    plot_time_series(
-        df_without,
-        y_columns=["Mode A", "Mode B", "Shutdown"],
-        title="Operating Modes (WITHOUT Area 2 - Frequent Contingencies)",
-        is_step=True,
         ax=dash[5],
     )
+    if unlock_time_p1 is not None:
+        dash[5].axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle="-.",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"★ Area 2 Unlocked (Day {unlock_time_p1:.1f})",
+        )
+        dash[5].legend(loc="upper right", framealpha=0.90)
 
-    # 6. Cumulative Mine Development Comparison
+    # 6. Policy 2: Two-Tier Dispatch Weights & Dynamic Fallback Count
     ax6 = dash[6]
     ax6.step(
-        df_with["time"],
-        df_with["cumulative_mine_development"],
-        label="Total Mine Dev (WITH Area 2)",
-        color="#2e7d32",
-        linewidth=2.0,
+        df_p2["time"],
+        df_p2["analytical_face1_weight"],
+        label="Analytical Weight w1 (Area 1)",
+        color="#1565c0",
         where="post",
     )
     ax6.step(
-        df_without["time"],
-        df_without["cumulative_mine_development"],
-        label="Total Mine Dev (WITHOUT Area 2)",
-        color="#f57c00",
-        linestyle="--",
-        linewidth=2.0,
+        df_p2["time"],
+        df_p2["analytical_face2_weight"],
+        label="Analytical Weight w2 (Area 2)",
+        color="#2e7d32",
         where="post",
     )
-    if unlock_time is not None:
-        ax6.axvline(
-            unlock_time,
-            color="#880e4f",
-            linestyle="-.",
-            linewidth=2.0,
-            alpha=0.85,
-            label=f"★ Area 2 Unlocked (Day {unlock_time:.1f})",
-        )
-    ax6.set_title("Cumulative Underground Development Metres Comparison")
-    ax6.set_ylabel("Metres (m)")
+    ax6_r = ax6.twinx()
+    ax6_r.step(
+        df_p2["time"],
+        df_p2["fallback_dispatch_count"],
+        label="Dynamic Constrained Fallback Events (Count)",
+        color="#e65100",
+        linestyle="--",
+        where="post",
+    )
+    ax6.set_title("Policy 2: Two-Tier Dispatch Weights (w1, w2) & Dynamic Constrained Fallbacks")
+    ax6.set_ylabel("Dispatch Weight")
+    ax6_r.set_ylabel("Fallback Count")
     ax6.grid(True, alpha=0.3)
-    ax6.legend(loc="upper left", framealpha=0.90)
+    ax6.legend(loc="upper left")
+    ax6_r.legend(loc="upper right")
 
-    # 7. Safety Margin: Ore 2 Distance to Starvation (WITH vs WITHOUT)
-    plot_safety_margin(
-        df_with,
-        level_col="Ore2Stock_mass",
-        constraint_value=0.0,
-        constraint_type="lower",
-        title="Safety Margin: Ore 2 Distance to Starvation Floor (WITH Area 2)",
-        danger_threshold=3000.0,
+    # 7. Operating Modes Timeline: Policy 2
+    plot_time_series(
+        df_p2,
+        y_columns=["Mode A", "Mode B", "Shutdown"],
+        title="Operating Modes Timeline: Policy 2",
+        is_step=True,
         ax=dash[7],
     )
-    if unlock_time is not None:
-        dash[7].axvline(
-            unlock_time,
-            color="#880e4f",
-            linestyle="-.",
-            linewidth=2.0,
-            alpha=0.85,
-            label=f"★ Area 2 Unlocked (Day {unlock_time:.1f})",
-        )
-        dash[7].legend(loc="lower left", framealpha=0.90)
 
-    # 8. Fleet Utilization & Idle Breakdown: WITH Area 2
-    plot_truck_idle_and_utilization(
-        df_with,
-        title="Fleet Utilization & Idle Breakdown: WITH Area 2 Expansion",
+    # 8. Operating Modes Timeline: Policy 1
+    plot_time_series(
+        df_p1,
+        y_columns=["Mode A", "Mode B", "Shutdown"],
+        title="Operating Modes Timeline: Policy 1",
+        is_step=True,
         ax=dash[8],
     )
 
-    # 9. Fleet Utilization & Idle Breakdown: WITHOUT Area 2
-    plot_truck_idle_and_utilization(
-        df_without,
-        title="Fleet Utilization & Idle Breakdown: WITHOUT Area 2 Baseline",
+    # 9. Stopes in Turnaround Development: Policy 2
+    plot_time_series(
+        df_p2,
+        y_columns=["stopes_in_turnaround"],
+        title="Policy 2: Number of Underground Stopes Simultaneously in Turnaround Development",
+        is_step=True,
         ax=dash[9],
     )
+    dash[9].set_ylabel("Stopes in Turnaround")
 
-    # 10. Mode Distribution: WITH Area 2
-    plot_mode_distribution(
-        df_with,
-        mode_col="active_operating_mode_name",
-        time_col="time",
-        title="Mode Distribution (% Time Spent - WITH Area 2)",
-        palette=palette,
+    # 10. Fleet Utilization & Idle Time: Policy 2
+    plot_truck_idle_and_utilization(
+        df_p2,
+        title="Policy 2: Haul Fleet Utilization & Idle Time Breakdown",
         ax=dash[10],
     )
 
-    # 11. Mode Distribution: WITHOUT Area 2
-    plot_mode_distribution(
-        df_without,
-        mode_col="active_operating_mode_name",
-        time_col="time",
-        title="Mode Distribution (% Time Spent - WITHOUT Area 2)",
-        palette=palette,
+    # 11. Fleet Utilization & Idle Time: Policy 1
+    plot_truck_idle_and_utilization(
+        df_p1,
+        title="Policy 1: Haul Fleet Utilization & Idle Time Breakdown",
         ax=dash[11],
     )
 
+    # 12. Mode Distribution: Policy 2
+    plot_mode_distribution(
+        df_p2,
+        mode_col="active_operating_mode_name",
+        time_col="time",
+        title="Mode Distribution (% Time Spent - Policy 2)",
+        palette=palette,
+        ax=dash[12],
+    )
+
+    # 13. Mode Distribution: Policy 1
+    plot_mode_distribution(
+        df_p1,
+        mode_col="active_operating_mode_name",
+        time_col="time",
+        title="Mode Distribution (% Time Spent - Policy 1)",
+        palette=palette,
+        ax=dash[13],
+    )
+
     dash.save(output_path)
-    print(f"Saved counterfactual comparison dashboard to '{output_path}'.")
+    print(f"Saved multi-stope lifecycle benchmark dashboard to '{output_path}'.")
     return dash
 
 
 # ---------------------------------------------------------------------------
-# Execution & Analysis Workflow
+# Execution & Benchmark Runner
 # ---------------------------------------------------------------------------
-def run_counterfactual_study(
+def run_stope_lifecycle_study(
     total_ore_to_extract: float = 6600000.0,
     warmup_ore: float = 600000.0,
     total_days: Optional[float] = None,
@@ -1587,7 +1564,7 @@ def run_counterfactual_study(
     seed: int = 42,
     plot: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Conducts a full paired counterfactual study between WITH Area 2 and WITHOUT Area 2."""
+    """Runs the comparative benchmark with multi-stope lifecycles and two-tier dispatch."""
     strategic_target = StrategicYearTarget(
         min_development=10000.0,
         min_ore1_production=1300000.0,
@@ -1598,10 +1575,13 @@ def run_counterfactual_study(
         ready_by_day=area2_ready_by_day,
     )
 
+    # 1. Run Policy 2
     print("\n" + "=" * 80)
-    print(" 1/2 RUNNING BASE CASE: WITH AREA 2 CAPITAL EXPANSION")
+    print(" 1/2 RUNNING POLICY 2: VALUE-ORIENTED + MULTI-STOPE TWO-TIER DISPATCH")
     print("=" * 80)
-    sim_with = TwoAreaCounterfactualEngine(
+    sim_p2 = TwoAreaStopeLifecycleEngine(
+        policy_name="POLICY_2_VALUE_ORIENTED",
+        use_two_tier_dispatch=True,
         num_trucks=num_trucks,
         num_operators=num_operators,
         availability=availability,
@@ -1610,37 +1590,35 @@ def run_counterfactual_study(
         ore_to_be_extracted_during_warming_period=warmup_ore,
         strategic_targets=(strategic_target,),
         area2_readiness_target=area2_target,
-        area2_counterfactual_disable=False,
         annual_discount_rate=discount_rate,
         seed=seed,
     )
-    eng_with = drs.DRSEngine(max_step_size=DT_MAX)
-    eng_with.register(sim_with)
-    eng_with.on_step(sim_with.on_event)
+    eng_p2 = drs.DRSEngine(max_step_size=DT_MAX)
+    eng_p2.register(sim_p2)
+    eng_p2.on_step(sim_p2.on_event)
 
     if total_days is not None:
-        sim_with.horizon_sec = total_days * 86400.0
-        eng_with.run(until=sim_with.horizon_sec)
+        sim_p2.horizon_sec = total_days * 86400.0
+        eng_p2.run(until=sim_p2.horizon_sec)
     else:
-        sim_with.total_ore_to_extract = warmup_ore
-        sim_with.face1.total_ore_to_extract = warmup_ore
-        sim_with.face2.total_ore_to_extract = warmup_ore
-        eng_with.run(until=float("inf"))
+        sim_p2.total_ore_to_extract = warmup_ore
+        eng_p2.run(until=float("inf"))
 
-        sim_with.plant.reset_mode_timers()
-        sim_with.plant.cumulative_milled_mass.value = 0.0
+        sim_p2.plant.reset_mode_timers()
+        sim_p2.plant.cumulative_milled_mass.value = 0.0
 
-        sim_with.total_ore_to_extract = total_ore_to_extract
-        sim_with.face1.total_ore_to_extract = total_ore_to_extract
-        sim_with.face2.total_ore_to_extract = total_ore_to_extract
-        eng_with.run(until=float("inf"))
+        sim_p2.total_ore_to_extract = total_ore_to_extract
+        eng_p2.run(until=float("inf"))
 
-    df_with = pd.DataFrame(sim_with.history_records)
+    df_p2 = pd.DataFrame(sim_p2.history_records)
 
+    # 2. Run Policy 1
     print("\n" + "=" * 80)
-    print(" 2/2 RUNNING COUNTERFACTUAL CASE: WITHOUT AREA 2 (PERMANENTLY LOCKED)")
+    print(" 2/2 RUNNING POLICY 1: LOCAL MYOPIC BASELINE (AREA 1 DEPLETION RISK)")
     print("=" * 80)
-    sim_without = TwoAreaCounterfactualEngine(
+    sim_p1 = TwoAreaStopeLifecycleEngine(
+        policy_name="POLICY_1_MYOPIC",
+        use_two_tier_dispatch=False,
         num_trucks=num_trucks,
         num_operators=num_operators,
         availability=availability,
@@ -1649,154 +1627,80 @@ def run_counterfactual_study(
         ore_to_be_extracted_during_warming_period=warmup_ore,
         strategic_targets=(strategic_target,),
         area2_readiness_target=area2_target,
-        area2_counterfactual_disable=True,
         annual_discount_rate=discount_rate,
         seed=seed,
     )
-    eng_without = drs.DRSEngine(max_step_size=DT_MAX)
-    eng_without.register(sim_without)
-    eng_without.on_step(sim_without.on_event)
+    eng_p1 = drs.DRSEngine(max_step_size=DT_MAX)
+    eng_p1.register(sim_p1)
+    eng_p1.on_step(sim_p1.on_event)
 
     if total_days is not None:
-        sim_without.horizon_sec = total_days * 86400.0
-        eng_without.run(until=sim_without.horizon_sec)
+        sim_p1.horizon_sec = total_days * 86400.0
+        eng_p1.run(until=sim_p1.horizon_sec)
     else:
-        sim_without.total_ore_to_extract = warmup_ore
-        sim_without.face1.total_ore_to_extract = warmup_ore
-        sim_without.face2.total_ore_to_extract = warmup_ore
-        eng_without.run(until=float("inf"))
+        sim_p1.total_ore_to_extract = warmup_ore
+        eng_p1.run(until=float("inf"))
 
-        sim_without.plant.reset_mode_timers()
-        sim_without.plant.cumulative_milled_mass.value = 0.0
+        sim_p1.plant.reset_mode_timers()
+        sim_p1.plant.cumulative_milled_mass.value = 0.0
 
-        sim_without.total_ore_to_extract = total_ore_to_extract
-        sim_without.face1.total_ore_to_extract = total_ore_to_extract
-        sim_without.face2.total_ore_to_extract = total_ore_to_extract
-        eng_without.run(until=float("inf"))
+        sim_p1.total_ore_to_extract = total_ore_to_extract
+        eng_p1.run(until=float("inf"))
 
-    df_without = pd.DataFrame(sim_without.history_records)
+    df_p1 = pd.DataFrame(sim_p1.history_records)
 
-    # Print Economic Reporting
-    final_with = df_with.iloc[-1]
-    final_without = df_without.iloc[-1]
-
-    npv_with = float(final_with["operating_npv_proxy"])
-    npv_without = float(final_without["operating_npv_proxy"])
-    inc_npv = npv_with - npv_without
-
-    cf_with = float(final_with["cumulative_cash_flow"])
-    cf_without = float(final_without["cumulative_cash_flow"])
-
-    dev_with = float(final_with["cumulative_mine_development"])
-    dev_without = float(final_without["cumulative_mine_development"])
-
-    milled_with = float(final_with["cumulative_milled_mass"])
-    milled_without = float(final_without["cumulative_milled_mass"])
+    # Summary Statistics
+    final_p2 = df_p2.iloc[-1]
+    final_p1 = df_p1.iloc[-1]
+    npv_p2 = float(final_p2["operating_npv_proxy"])
+    npv_p1 = float(final_p1["operating_npv_proxy"])
+    value_gain = npv_p2 - npv_p1
 
     print("\n" + "=" * 80)
-    print(" STRATEGIC COUNTERFACTUAL INCREMENTAL NPV EVALUATION")
+    print(" MULTI-STOPE UNDERGROUND BENCHMARK RESULTS")
     print("=" * 80)
-    print(f"WITH Area 2 (Base Case):")
-    print(f"  Total Ore Milled:            {milled_with:,.1f} t")
-    print(f"  Total Mine Development:      {dev_with:,.1f} metres")
-    print(f"  Cumulative Undiscounted CF:  ${cf_with:,.2f}")
-    print(f"  Operating Net Present Value: ${npv_with:,.2f}")
+    print("Policy 2 (Value-Oriented + Multi-Stope Two-Tier Dispatch):")
+    print(f"  Area 2 Unlocked:             {sim_p2.area2_ready} (Day: {float(final_p2['area2_ready_day']):.2f})")
+    print(f"  Total Ore Milled:            {float(final_p2['cumulative_milled_mass']):,.1f} t")
+    print(f"  Capital Dev (Area 2):        {float(final_p2['area2_cumulative_development']):,.1f} / {area2_required_dev:.1f} m")
+    print(f"  Stope Turnaround Dev:        {float(final_p2['stope_turnaround_dev_m']):,.1f} m")
+    print(f"  Dynamic Fallback Dispatches: {float(final_p2['fallback_dispatch_count']):,.0f}")
+    print(f"  Operating Net Present Value: ${npv_p2:,.2f}")
 
-    print(f"\nWITHOUT Area 2 (Counterfactual Baseline):")
-    print(f"  Total Ore Milled:            {milled_without:,.1f} t")
-    print(f"  Total Mine Development:      {dev_without:,.1f} metres")
-    print(f"  Cumulative Undiscounted CF:  ${cf_without:,.2f}")
-    print(f"  Operating Net Present Value: ${npv_without:,.2f}")
+    print("\nPolicy 1 (Local-Objective Myopic Baseline):")
+    print(f"  Area 2 Unlocked:             {sim_p1.area2_ready} (Day: {float(final_p1['area2_ready_day']):.2f})")
+    print(f"  Total Ore Milled:            {float(final_p1['cumulative_milled_mass']):,.1f} t")
+    print(f"  Capital Dev (Area 2):        {float(final_p1['area2_cumulative_development']):,.1f} / {area2_required_dev:.1f} m")
+    print(f"  Operating Net Present Value: ${npv_p1:,.2f}")
 
     print("\n" + "-" * 80)
-    print(f" >>> TRUE INCREMENTAL NPV OF AREA 2 CAPITAL PROJECT: ${inc_npv:,.2f} <<<")
+    print(f" >>> TOTAL VALUE CREATED BY HIERARCHICAL MULTI-STOPE CONTROL: ${value_gain:,.2f} <<<")
     print("-" * 80)
     print("=" * 80 + "\n")
 
-    if plot and len(df_with) > 0 and len(df_without) > 0:
-        plot_counterfactual_comparison_dashboard(df_with, df_without)
+    if plot and len(df_p2) > 0 and len(df_p1) > 0:
+        plot_stope_lifecycle_dashboard(df_p1, df_p2)
 
-    return df_with, df_without
+    return df_p1, df_p2
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Two-Area Strategic Planning & Counterfactual Incremental NPV Simulation"
-    )
-    parser.add_argument(
-        "--total_ore_to_extract",
-        type=float,
-        default=6600000.0,
-        help="Total production ore tonnage to extract (default: 6,600,000.0 t)",
-    )
-    parser.add_argument(
-        "--warmup_ore",
-        type=float,
-        default=600000.0,
-        help="Warmup period ore tonnage to extract (default: 600,000.0 t)",
-    )
-    parser.add_argument(
-        "--total_days",
-        type=float,
-        default=None,
-        help="Total simulation duration in days (optional)",
-    )
-    parser.add_argument(
-        "--trucks",
-        type=int,
-        default=18,
-        help="Number of AD30 haulage trucks (default: 18)",
-    )
-    parser.add_argument(
-        "--operators",
-        type=int,
-        default=18,
-        help="Number of operators per shift (default: 18)",
-    )
-    parser.add_argument(
-        "--availability",
-        type=float,
-        default=0.85,
-        help="Mechanical availability fraction (default: 0.85)",
-    )
-    parser.add_argument(
-        "--stockpile_target",
-        type=float,
-        default=60000.0,
-        help="Target total ore stockpile buffer (default: 60000.0 t)",
-    )
-    parser.add_argument(
-        "--area2_required_dev",
-        type=float,
-        default=4000.0,
-        help="Required development metres to unlock Area 2 (default: 4,000.0 m)",
-    )
-    parser.add_argument(
-        "--area2_ready_by_day",
-        type=float,
-        default=365.0,
-        help="Target schedule deadline for Area 2 (default: 365.0 d)",
-    )
-    parser.add_argument(
-        "--discount_rate",
-        type=float,
-        default=0.05,
-        help="Annual discount rate (default: 0.05)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility (default: 42)",
-    )
-    parser.add_argument(
-        "--no_plot",
-        action="store_true",
-        help="Disable dashboard plot generation",
-    )
+    parser = argparse.ArgumentParser(description="Multi-Stope Underground Lifecycle Simulation Benchmark")
+    parser.add_argument("--total_ore_to_extract", type=float, default=6600000.0)
+    parser.add_argument("--warmup_ore", type=float, default=600000.0)
+    parser.add_argument("--total_days", type=float, default=None)
+    parser.add_argument("--trucks", type=int, default=18)
+    parser.add_argument("--operators", type=int, default=18)
+    parser.add_argument("--availability", type=float, default=0.85)
+    parser.add_argument("--stockpile_target", type=float, default=60000.0)
+    parser.add_argument("--area2_required_dev", type=float, default=4000.0)
+    parser.add_argument("--area2_ready_by_day", type=float, default=365.0)
+    parser.add_argument("--discount_rate", type=float, default=0.05)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no_plot", action="store_true")
     args = parser.parse_args()
 
-    run_counterfactual_study(
+    run_stope_lifecycle_study(
         total_ore_to_extract=args.total_ore_to_extract,
         warmup_ore=args.warmup_ore,
         total_days=args.total_days,

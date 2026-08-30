@@ -1,10 +1,24 @@
-from typing import List, Mapping
+"""Fleet Dispatch Controllers for Underground Mine Haulage.
+
+Implements:
+  1. ShelswellDispatchController: Classic rule-based heuristic dispatch (highest muck, shallowest, round robin).
+  2. TwoTierHierarchicalDispatchController: Value-oriented closed-loop dispatch implementing:
+     - Tier 1 (Absolute Primary Requirement): Guarantee total mill feed (e.g. 6,000 t/d) to prevent mill starvation.
+     - Tier 2 (Secondary Blending Objective): Match optimal analytical dispatch weights (w1, w2) for active campaign mode.
+     - Tier 3 (Dynamic Constrained Fallback): If preferred stope is in turnaround/busy, redirect to nearest available stope.
+     - Surplus Capacity Redirection: Idle/excess haulage capacity is redirected to advance waste development headings.
+"""
+
+from __future__ import annotations
+
+import random
+from typing import List, Mapping, Optional, Sequence, Tuple
 from .fleet import Truck, TruckState
 from .bays import LoadingBay
 from .topology import RoadSegment
+from .stope import StopeFace, StopeState
 
 
-# TODO: should this be in controllers.py? I think this is a fleet controller, but for individual trucks. How can we make that clear and stuff. im not sure. like we have two kinds of fleet controllers, two kinds of contracts. it is supposed to be a library where you can create modules and systems etc, and this is something we compared (inidividual trucks vs not), but how should that be handled and stuff? Is there a way to merge the two?
 class ShelswellDispatchController:
     """Implements Shelswell's operational dispatch rules cleanly in Python."""
 
@@ -70,3 +84,90 @@ class ShelswellDispatchController:
         truck.target_bay_id = target_bay.bay_id
         truck.target_level = target_bay.level_index
         truck.state = TruckState.TRAVEL_EMPTY
+
+
+class TwoTierHierarchicalDispatchController:
+    """Two-Tier Hierarchical Dispatch Controller: Primary Tonnage Throughput & Secondary Analytical Blending."""
+
+    def __init__(
+        self,
+        stopes: Sequence[StopeFace],
+        target_daily_ore_tonnes: float = 6000.0,
+        target_stockpile_buffer_tonnes: float = 60000.0,
+        seed: int = 42,
+    ):
+        self.stopes = list(stopes)
+        self.target_daily_ore_tonnes = target_daily_ore_tonnes
+        self.target_stockpile_buffer_tonnes = target_stockpile_buffer_tonnes
+        self.rng = random.Random(seed)
+        self.total_dispatches = 0
+        self.fallback_dispatches = 0
+
+    def select_stope_for_truck(
+        self,
+        current_total_stock: float,
+        daily_hauled_so_far: float,
+        day_progress_fraction: float,
+        analytical_w2: float,  # Target fraction from Area 2 (Level 6)
+        area2_locked: bool = False,
+        lhd_queues: Optional[Mapping[int, int]] = None,
+        target_daily_ore_tonnes: Optional[float] = None,
+    ) -> Optional[Tuple[StopeFace, bool]]:
+        """Selects the optimal stope for a haul truck.
+
+        Returns:
+          (selected_stope, is_fallback) or None if all ore needs are satisfied and fleet should haul waste.
+        """
+        lhd_queues = lhd_queues or {}
+        self.total_dispatches += 1
+
+        daily_target = target_daily_ore_tonnes if target_daily_ore_tonnes is not None else self.target_daily_ore_tonnes
+
+        # Tier 1 (Absolute Primary Requirement): Determine if ore haulage is required
+        expected_hauled = daily_target * day_progress_fraction
+        is_stockpile_low = current_total_stock < self.target_stockpile_buffer_tonnes
+        is_behind_schedule = daily_hauled_so_far < expected_hauled
+
+        # If stockpiles are 100% full and day's target is met, pause ore dispatch -> surplus to dev
+        if (not is_stockpile_low) and daily_hauled_so_far >= expected_hauled:
+            return None
+
+        # Filter available stopes
+        active_stopes = [s for s in self.stopes if not s.is_exhausted]
+        if not active_stopes:
+            return None
+
+        # Separate into Area 1 and Area 2
+        area1_stopes = [s for s in active_stopes if s.area_id == 1 and s.is_ore_available]
+        area2_stopes = [s for s in active_stopes if s.area_id == 2 and s.is_ore_available]
+
+        if area2_locked:
+            preferred_area = 1
+        else:
+            # Tier 2 (Secondary Objective): Solve preferred area from analytical blending weight w2
+            preferred_area = 2 if self.rng.random() < analytical_w2 else 1
+
+        # Attempt to select stope in preferred area
+        candidate_stopes = area2_stopes if preferred_area == 2 else area1_stopes
+
+        if candidate_stopes:
+            # Pick stope with shortest LHD queue or highest remaining parcel ore
+            selected = min(
+                candidate_stopes,
+                key=lambda s: (lhd_queues.get(s.face_id, 0), -s.remaining_parcel_ore),
+            )
+            return selected, False
+
+        # Tier 3 (Dynamic Constrained Fallback): Preferred area has no available stopes!
+        # Fallback to alternative area rather than starving the mill
+        fallback_candidates = area1_stopes if preferred_area == 2 else area2_stopes
+        if fallback_candidates:
+            self.fallback_dispatches += 1
+            selected = min(
+                fallback_candidates,
+                key=lambda s: (lhd_queues.get(s.face_id, 0), -s.remaining_parcel_ore),
+            )
+            return selected, True
+
+        # All stopes currently in turnaround development
+        return None

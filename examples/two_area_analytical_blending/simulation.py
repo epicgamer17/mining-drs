@@ -64,6 +64,7 @@ from drs_mining.components.plot import (
     plot_attributed_deficit,
     plot_deficit_disparity,
     plot_deficit_breakdown_bar,
+    plot_truck_idle_and_utilization,
     print_transition_log,
     print_deficit_by_mode,
 )
@@ -316,9 +317,9 @@ class TwoAreaAnalyticalBlendingSimulation(drs.Module):
         # Global time tracker
         self.gt = drs.Timer("gt", 0.0, rate=1.0)
 
-        # 1. Dual Mine Faces with High-Ore1 Face 1 (85%) and Balanced Face 2 (55%)
+        # 1. Dual Mine Faces with Area 1 70/30 (30% Ore 2) and Area 2 65/35 (35% Ore 2)
         self.gen1 = StochasticFaciesGenerator(
-            mean_fraction=0.15,
+            mean_fraction=0.30,
             std_dev=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -331,7 +332,7 @@ class TwoAreaAnalyticalBlendingSimulation(drs.Module):
             max_ore_mass=50000.0,
             total_ore_to_extract=total_ore_to_extract,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.15,
+            mean_ore_fraction=0.30,
             std_dev_ore_fraction=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -339,7 +340,7 @@ class TwoAreaAnalyticalBlendingSimulation(drs.Module):
         )
 
         self.gen2 = StochasticFaciesGenerator(
-            mean_fraction=0.45,
+            mean_fraction=0.35,
             std_dev=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -352,7 +353,7 @@ class TwoAreaAnalyticalBlendingSimulation(drs.Module):
             max_ore_mass=50000.0,
             total_ore_to_extract=total_ore_to_extract,
             ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.45,
+            mean_ore_fraction=0.35,
             std_dev_ore_fraction=0.05,
             prob_new_facies=0.3,
             variation_same_facies=0.01,
@@ -1217,6 +1218,8 @@ class TwoAreaAnalyticalBlendingSimulation(drs.Module):
             + self.face2.active_parcel_ore_fraction.value * w2
         )
 
+        n_idle = max(0, len(self.trucks) - (n_operating + n_refueling))
+
         self.history_records.append(
             {
                 "time": t_days,
@@ -1229,6 +1232,10 @@ class TwoAreaAnalyticalBlendingSimulation(drs.Module):
                 "active_operating_mode": self.plant.active_operating_mode.value,
                 "active_operating_mode_name": active_mode,
                 "campaign_mode": camp_mode,
+                "trucks_operating": n_operating,
+                "trucks_refueling": n_refueling,
+                "trucks_idle": n_idle,
+                "truck_idle_fraction": n_idle / max(1, len(self.trucks)),
                 "current_campaign_duration": self.mode_controller.current_campaign_duration.value,
                 "current_contingency_duration": self.plant.current_contingency_duration.value,
                 "strategic_year_index": self.strategic_year_index.value,
@@ -1294,9 +1301,9 @@ def plot_analytical_blending_dashboard(
     df: pd.DataFrame,
     output_path: str = "plots/two_area_analytical_blending_dashboard.png",
     palette: dict = None,
-    figsize: Tuple[int, int] = (16, 48),
+    figsize: Tuple[int, int] = (16, 52),
 ):
-    """Generates the 12-panel analytical blending diagnostics dashboard."""
+    """Generates the 13-panel analytical blending diagnostics dashboard."""
     palette = palette or MODE_PALETTE
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -1304,13 +1311,13 @@ def plot_analytical_blending_dashboard(
         df = prepare_history(df)
 
     dash = Dashboard(
-        nrows=12,
+        nrows=13,
         ncols=1,
         figsize=figsize,
         sharex=False,
         title="Two-Area Operational Analytical Face-Allocation Blending (Appendix A & B)",
     )
-    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 11])
+    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12])
 
     unlock_rows = df[df["area2_ready"] == True]
     unlock_time = float(unlock_rows["time"].iloc[0]) if not unlock_rows.empty else None
@@ -1523,6 +1530,13 @@ def plot_analytical_blending_dashboard(
         title="Cumulative Production Deficit by Operating Mode",
         palette=palette,
         ax=dash[11],
+    )
+
+    # 12. Fleet Utilization & Idle Time Breakdown
+    plot_truck_idle_and_utilization(
+        df,
+        title="Haul Fleet Utilization & Idle Time Breakdown",
+        ax=dash[12],
     )
 
     dash.save(output_path)

@@ -1,3 +1,4 @@
+from typing import Optional, Tuple, List, Dict, Any, Union
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import numpy as np
@@ -629,6 +630,59 @@ def plot_mode_dwell_times(
     return ax
 
 
+def plot_truck_idle_and_utilization(
+    df,
+    time_col: str = "time",
+    idle_col: str = "trucks_idle",
+    operating_col: str = "trucks_operating",
+    refueling_col: str = "trucks_refueling",
+    dev_col: Optional[str] = "development_priority_reserved_trucks",
+    total_trucks: Optional[int] = None,
+    title: str = "Haul Fleet Utilization & Idle Time Breakdown",
+    ax=None,
+    verbose: bool = False,
+):
+    """Plots stacked fleet status over time (Idle / Buffer Pacing vs Active Production vs Development vs Refueling)."""
+    ax = _get_ax(ax, figsize=(14, 5))
+
+    t = df[time_col]
+    op = df[operating_col] if operating_col in df.columns else pd.Series(0, index=df.index)
+    refuel = df[refueling_col] if refueling_col in df.columns else pd.Series(0, index=df.index)
+    dev = df[dev_col] if (dev_col and dev_col in df.columns) else pd.Series(0, index=df.index)
+    idle = df[idle_col] if idle_col in df.columns else pd.Series(0, index=df.index)
+
+    if total_trucks is None:
+        total_trucks = int((op + refuel + idle).max()) if not df.empty else 18
+
+    # Stacked layers
+    # Layer 1: Operating (Hauling Ore)
+    ax.fill_between(t, 0, op, label="Active Production Haulage", color="#2e7d32", alpha=0.75, step="post")
+    # Layer 2: Refueling
+    ax.fill_between(t, op, op + refuel, label="Refueling / Service", color="#f57c00", alpha=0.70, step="post")
+    # Layer 3: Dev Reserved (if tracked separately)
+    y_top = op + refuel
+    # Layer 4: Idle / Buffer Pacing
+    ax.fill_between(t, y_top, y_top + idle, label="Idle (Buffer Pacing / Standby)", color="#78909c", alpha=0.45, step="post")
+
+    ax.plot(t, op + refuel + idle, label=f"Total Fleet ({total_trucks} Trucks)", color="#212121", linewidth=1.5, linestyle=":")
+
+    mean_idle = idle.mean()
+    mean_op = op.mean()
+    util_pct = (mean_op / max(1, total_trucks)) * 100.0
+
+    ax.set_title(f"{title} (Mean Idle: {mean_idle:.1f} trucks, Avg Production Utilization: {util_pct:.1f}%)", fontsize=12, pad=10)
+    ax.set_ylabel("Truck Count")
+    ax.set_xlabel("Simulation Time (Days)")
+    ax.set_ylim(0, total_trucks * 1.15)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", framealpha=0.90)
+
+    if verbose:
+        print(f"[{title}] Mean Operating: {mean_op:.2f} trucks | Mean Idle: {mean_idle:.2f} trucks | Avg Utilization: {util_pct:.1f}%")
+
+    return ax
+
+
 # ============================================================
 # Shared diagnostics palette / assumptions
 # ============================================================
@@ -655,9 +709,13 @@ STRUCTURAL_MODES = ["SHUTDOWN", "MODE_A"]
 def prepare_history(df):
     """Add the derived mode/stockpile columns shared by the diagnostics helpers."""
     df = df.copy()
-    df["active_operating_mode_name"] = df["active_operating_mode"].apply(
-        lambda x: x.name if x else "None"
-    )
+    if "active_operating_mode" in df.columns:
+        df["active_operating_mode_name"] = df["active_operating_mode"].apply(
+            lambda x: x.name if hasattr(x, "name") else (str(x) if x else "None")
+        )
+    elif "active_operating_mode_name" not in df.columns:
+        df["active_operating_mode_name"] = "None"
+
     df["prev_mode_name"] = df["active_operating_mode_name"].shift(1)
 
     df["Mode A"] = df["active_operating_mode_name"].apply(

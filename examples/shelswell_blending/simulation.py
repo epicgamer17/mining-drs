@@ -57,6 +57,7 @@ from drs_mining.components.plot import (
     plot_attributed_deficit,
     plot_deficit_disparity,
     plot_deficit_breakdown_bar,
+    plot_truck_idle_and_utilization,
     print_transition_log,
     print_deficit_by_mode,
 )
@@ -937,9 +938,12 @@ class ShelswellBlendingHaulage(drs.Module):
                 "milled_ore2_rate": plant_draw.ore2,
                 "cumulative_milled_mass": self.plant.cumulative_milled_mass.value,
                 "active_trucks": n_operating,
+                "trucks_operating": n_operating,
                 "trucks_waiting_load": n_waiting_load,
                 "trucks_waiting_dump": n_waiting_dump,
                 "trucks_refueling": n_refueling,
+                "trucks_idle": max(0, len(self.trucks) - (n_operating + n_refueling)),
+                "truck_idle_fraction": max(0, len(self.trucks) - (n_operating + n_refueling)) / max(1, len(self.trucks)),
                 "traffic_delay_min": self.traffic_delay_sum / 60.0,
             }
         )
@@ -1031,9 +1035,9 @@ def plot_shelswell_blending_dashboard(
     df: pd.DataFrame,
     output_path: str = "plots/shelswell_blending_dashboard.png",
     palette: dict = None,
-    figsize: Tuple[int, int] = (16, 44),
+    figsize: Tuple[int, int] = (16, 48),
 ):
-    """Builds and saves the 11-panel comprehensive diagnostics dashboard."""
+    """Builds and saves the 12-panel comprehensive diagnostics dashboard."""
     palette = palette or MODE_PALETTE
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -1041,13 +1045,13 @@ def plot_shelswell_blending_dashboard(
         df = prepare_history(df)
 
     dash = Dashboard(
-        nrows=11,
+        nrows=12,
         ncols=1,
         figsize=figsize,
         sharex=False,
         title="Shelswell (2017) DES Haulage + DRS Blending Modes Diagnostics",
     )
-    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 9])
+    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 9, 11])
 
     # 0. Operating Modes Step Timeline
     plot_time_series(
@@ -1188,6 +1192,13 @@ def plot_shelswell_blending_dashboard(
         ideal_rate_per_day=6000.0,
         palette=palette,
         ax=dash[10],
+    )
+
+    # 11. Fleet Utilization & Idle Time Breakdown
+    plot_truck_idle_and_utilization(
+        df,
+        title="Haul Fleet Utilization & Idle Time Breakdown",
+        ax=dash[11],
     )
 
     dash.save(output_path)
