@@ -6,6 +6,7 @@ and telemetry recording, while delegating physical travel dynamics to MineTopolo
 muck extraction & readiness to MineFace, and metallurgical recovery to MetallurgicalPlant.
 """
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 import math
@@ -42,7 +43,7 @@ from drs_mining.components.planning import (
     select_fleet_mode,
     TacticalReviewController,
 )
-from drs_mining.components.discrete_fleet import (
+from drs_mining.components.fleet import (
     TruckPhase,
     Operator,
     DESTruck as Truck,
@@ -102,16 +103,20 @@ def _in_shift_window(t: float) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Base Two-Area Simulation Engine
+# Base Mining Simulation Engine
 # ---------------------------------------------------------------------------
-class TwoAreaSimulationBase(drs.Module):
-    """Orchestrator for two-area discrete event haulage, plant processing,
-    tactical fleet modes, and economic cash-flow tracking.
+class MiningSimulationBase(drs.Module):
+    """General discrete-event mining simulation orchestrator.
+    
+    Coordinates multi-face haulage, discrete truck fleets, physical decline topology,
+    stockpiles, processing plant campaigns, and financial accounting.
     """
 
     def __init__(
         self,
         config: Optional[SimulationConfig] = None,
+        faces: Optional[Sequence[MineFace]] = None,
+        topology: Optional[MineTopology] = None,
         num_trucks: int = 18,
         num_operators: int = 18,
         num_lhds_per_face: int = 2,
@@ -205,64 +210,75 @@ class TwoAreaSimulationBase(drs.Module):
         self.gt = drs.Timer("gt", 0.0, rate=1.0)
 
         # 1. Physical Topology
-        self.topology = MineTopology(
-            decline_m=DECLINE_M,
-            level_spacing_m=LEVEL_SPACING_M,
-            level_drift_m=LEVEL_DRIFT_M,
-            surface_m=SURFACE_M,
-            level_depths={AREA1_LEVEL: 900.0, AREA2_LEVEL: 1800.0},
-            speeds=DEFAULT_SPEEDS,
-            base_pass_bay_delay_sec=BASE_PASS_BAY_DELAY_SEC,
-            per_truck_pass_bay_delay_sec=PER_TRUCK_PASS_BAY_DELAY_SEC,
-        )
+        if topology is not None:
+            self.topology = topology
+        else:
+            self.topology = MineTopology(
+                decline_m=DECLINE_M,
+                level_spacing_m=LEVEL_SPACING_M,
+                level_drift_m=LEVEL_DRIFT_M,
+                surface_m=SURFACE_M,
+                level_depths={AREA1_LEVEL: 900.0, AREA2_LEVEL: 1800.0},
+                speeds=DEFAULT_SPEEDS,
+                base_pass_bay_delay_sec=BASE_PASS_BAY_DELAY_SEC,
+                per_truck_pass_bay_delay_sec=PER_TRUCK_PASS_BAY_DELAY_SEC,
+            )
 
-        # 2. Dual Mine Faces
-        self.gen1 = StochasticFaciesGenerator(
-            mean_fraction=0.30,
-            std_dev=0.05,
-            prob_new_facies=0.3,
-            variation_same_facies=0.01,
-        )
-        self.face1 = MineFace(
-            name="mine_face_1",
-            face_id=1,
-            generator=self.gen1,
-            min_ore_mass=30000.0,
-            max_ore_mass=50000.0,
-            total_ore_to_extract=total_ore_to_extract,
-            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.30,
-            std_dev_ore_fraction=0.05,
-            prob_new_facies=0.3,
-            variation_same_facies=0.01,
-            initial_parcel_mass=40000.0,
-            required_development=0.0,
-        )
+        # 2. Mine Faces
+        if faces is not None:
+            self.faces = list(faces)
+            self.face1 = self.faces[0]
+            self.face2 = self.faces[1] if len(self.faces) > 1 else self.faces[0]
+            self.gen1 = getattr(self.face1, "generator", None)
+            self.gen2 = getattr(self.face2, "generator", None)
+        else:
+            self.gen1 = StochasticFaciesGenerator(
+                mean_fraction=0.30,
+                std_dev=0.05,
+                prob_new_facies=0.3,
+                variation_same_facies=0.01,
+            )
+            self.face1 = MineFace(
+                name="mine_face_1",
+                face_id=1,
+                generator=self.gen1,
+                min_ore_mass=30000.0,
+                max_ore_mass=50000.0,
+                total_ore_to_extract=total_ore_to_extract,
+                ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+                mean_ore_fraction=0.30,
+                std_dev_ore_fraction=0.05,
+                prob_new_facies=0.3,
+                variation_same_facies=0.01,
+                initial_parcel_mass=40000.0,
+                required_development=0.0,
+            )
 
-        self.gen2 = StochasticFaciesGenerator(
-            mean_fraction=0.35,
-            std_dev=0.05,
-            prob_new_facies=0.3,
-            variation_same_facies=0.01,
-        )
-        self.face2 = MineFace(
-            name="mine_face_2",
-            face_id=2,
-            generator=self.gen2,
-            min_ore_mass=30000.0,
-            max_ore_mass=50000.0,
-            total_ore_to_extract=total_ore_to_extract,
-            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=0.35,
-            std_dev_ore_fraction=0.05,
-            prob_new_facies=0.3,
-            variation_same_facies=0.01,
-            initial_parcel_mass=40000.0,
-            required_development=self.area2_readiness_target.required_development,
-            ready_by_day=self.area2_readiness_target.ready_by_day,
-            counterfactual_disable=self.area2_counterfactual_disable,
-            on_unlock_callback=self._on_area2_unlocked,
-        )
+            self.gen2 = StochasticFaciesGenerator(
+                mean_fraction=0.35,
+                std_dev=0.05,
+                prob_new_facies=0.3,
+                variation_same_facies=0.01,
+            )
+            self.face2 = MineFace(
+                name="mine_face_2",
+                face_id=2,
+                generator=self.gen2,
+                min_ore_mass=30000.0,
+                max_ore_mass=50000.0,
+                total_ore_to_extract=total_ore_to_extract,
+                ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+                mean_ore_fraction=0.35,
+                std_dev_ore_fraction=0.05,
+                prob_new_facies=0.3,
+                variation_same_facies=0.01,
+                initial_parcel_mass=40000.0,
+                required_development=self.area2_readiness_target.required_development,
+                ready_by_day=self.area2_readiness_target.ready_by_day,
+                counterfactual_disable=self.area2_counterfactual_disable,
+                on_unlock_callback=self._on_area2_unlocked,
+            )
+            self.faces = [self.face1, self.face2]
 
         # 3. Stockpiles
         self.ore1_stock = Stockpile(
@@ -310,8 +326,8 @@ class TwoAreaSimulationBase(drs.Module):
 
         # 5. Discrete Entities
         self.dump_station = SurfaceDumpStation(capacity=SURFACE_TIP_SITES)
-        self.face_queues: Dict[int, list] = {1: [], 2: []}
-        self.face_lhds_busy: Dict[int, int] = {1: 0, 2: 0}
+        self.face_queues: Dict[int, list] = defaultdict(list)
+        self.face_lhds_busy: Dict[int, int] = defaultdict(int)
 
         self.trucks = [
             Truck(f"T{i+1:02d}", drs.Timer(f"tr_tmr_{i}", 0.0, rate=-1.0))
@@ -337,9 +353,9 @@ class TwoAreaSimulationBase(drs.Module):
         # Counters & Telemetry
         self.ore1_dumped_total = drs.Level("ore1_dumped_total", 0.0)
         self.ore2_dumped_total = drs.Level("ore2_dumped_total", 0.0)
-        self.tonnes_hauled_by_face = {1: 0.0, 2: 0.0}
-        self.ore1_hauled_by_face = {1: 0.0, 2: 0.0}
-        self.ore2_hauled_by_face = {1: 0.0, 2: 0.0}
+        self.tonnes_hauled_by_face: Dict[int, float] = defaultdict(float)
+        self.ore1_hauled_by_face: Dict[int, float] = defaultdict(float)
+        self.ore2_hauled_by_face: Dict[int, float] = defaultdict(float)
 
         self.telemetry_history: List[Dict[str, Any]] = []
         self._telemetry_dt = 1800.0  # Log every 30 minutes
@@ -464,9 +480,23 @@ class TwoAreaSimulationBase(drs.Module):
             nxt.timer.value = spot
             nxt.timer.rate = -1.0
 
+    def get_face_by_id(self, face_id: int) -> MineFace:
+        """Resolves a MineFace component by its numeric face_id."""
+        if hasattr(self, "faces"):
+            faces_attr = getattr(self, "faces")
+            if isinstance(faces_attr, dict) and face_id in faces_attr:
+                return faces_attr[face_id]
+            if isinstance(faces_attr, (list, tuple)):
+                for f in faces_attr:
+                    if getattr(f, "face_id", None) == face_id:
+                        return f
+        if face_id == 2:
+            return self.face2
+        return self.face1
+
     def _finish_loading(self, tr: Truck) -> None:
         t = self.gt.value
-        face = self.face2 if tr.target_face_id == 2 else self.face1
+        face = self.get_face_by_id(tr.target_face_id)
         ore2_frac = face.current_ore_grade
         tr.current_payload = ORE_PAYLOAD
         tr.payload_ore_fraction = ore2_frac
@@ -730,9 +760,9 @@ class TwoAreaSimulationBase(drs.Module):
                 elif tr.phase == TruckPhase.REFUELING:
                     self._finish_refuel(tr)
 
-        # Dispatch idle trucks
+        # Dispatch idle/parked trucks
         for tr in self.trucks:
-            if tr.phase == TruckPhase.IDLE:
+            if tr.phase in (TruckPhase.IDLE, TruckPhase.PARKED):
                 self._try_dispatch(tr)
 
         # Record periodic telemetry
@@ -853,9 +883,9 @@ class TwoAreaSimulationBase(drs.Module):
             "cumulative_time_shutdown": self.plant.cumulative_time_shutdown.value,
             "cumulative_time_mode_a": self.plant.cumulative_time_mode_a.value,
             "cumulative_time_mode_b": self.plant.cumulative_time_mode_b.value,
-            "trucks_idle": sum(1 for tr in self.trucks if tr.phase == TruckPhase.IDLE),
+            "trucks_idle": sum(1 for tr in self.trucks if tr.phase in (TruckPhase.IDLE, TruckPhase.PARKED)),
             "trucks_operating": sum(
-                1 for tr in self.trucks if tr.phase in OPERATING_PHASES and tr.phase != TruckPhase.IDLE
+                1 for tr in self.trucks if tr.phase in OPERATING_PHASES and tr.phase not in (TruckPhase.IDLE, TruckPhase.PARKED)
             ),
         }
         self.telemetry_history.append(record)
@@ -873,3 +903,7 @@ class TwoAreaSimulationBase(drs.Module):
             "area2_ready_day": self.face2.ready_day,
             "area2_completed_late": self.face2.completed_late,
         }
+
+
+# Two-Area Simulation Engine Alias
+TwoAreaSimulationBase = MiningSimulationBase

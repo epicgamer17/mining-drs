@@ -36,7 +36,7 @@ from .allocation import (
     solve_face_allocation_rates,
 )
 from drs_mining.config.economics import EconomicParameters
-from .discrete_fleet import (
+from .fleet import (
     TruckPhase,
     Operator,
     DESTruck,
@@ -45,7 +45,7 @@ from .discrete_fleet import (
     SEAT_PHASES,
     DUE_PHASES,
 )
-from .simulation_base import TwoAreaSimulationBase, ORE_PAYLOAD
+from .simulation_base import MiningSimulationBase, TwoAreaSimulationBase, ORE_PAYLOAD
 
 # Alias for StopeFace
 StopeFace = MineFace
@@ -99,6 +99,7 @@ __all__ = [
     "OPERATING_PHASES",
     "SEAT_PHASES",
     "DUE_PHASES",
+    "MiningSimulationBase",
     "TwoAreaSimulationBase",
     "ORE_PAYLOAD",
 ]

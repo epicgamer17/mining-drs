@@ -9,8 +9,7 @@ Implements:
      - Surplus Capacity Redirection: Idle/excess haulage capacity is redirected to advance waste development headings.
 """
 
-from __future__ import annotations
-
+from dataclasses import dataclass
 import random
 from typing import List, Mapping, Optional, Sequence, Tuple
 from .fleet import Truck, TruckState
@@ -84,6 +83,15 @@ class ShelswellDispatchController:
         truck.target_bay_id = target_bay.bay_id
         truck.target_level = target_bay.level_index
         truck.state = TruckState.TRAVEL_EMPTY
+
+
+@dataclass
+class DispatchDecision:
+    """Result of a hierarchical stope dispatch decision."""
+
+    selected_stope_id: Optional[int] = None
+    is_fallback: bool = False
+    stope: Optional[MineFace] = None
 
 
 class TwoTierHierarchicalDispatchController:
@@ -171,3 +179,42 @@ class TwoTierHierarchicalDispatchController:
 
         # All stopes currently in turnaround development
         return None
+
+    def dispatch(
+        self,
+        active_operating_mode_name: str = "MODE_A",
+        truck_payload: float = 26.1,
+        truck_cycle_time_sec: float = 2100.0,
+        allow_area2: bool = True,
+        analytical_w2: Optional[float] = None,
+        current_total_stock: float = 0.0,
+        daily_hauled_so_far: float = 0.0,
+        day_progress_fraction: float = 0.0,
+        lhd_queues: Optional[Mapping[int, int]] = None,
+    ) -> DispatchDecision:
+        """High-level dispatch entry point compatible with operational simulations."""
+        if analytical_w2 is None:
+            if "MODE_A" in active_operating_mode_name:
+                analytical_w2 = 0.833
+            elif "MODE_B" in active_operating_mode_name:
+                analytical_w2 = 0.300
+            else:
+                analytical_w2 = 0.500
+
+        res = self.select_stope_for_truck(
+            current_total_stock=current_total_stock,
+            daily_hauled_so_far=daily_hauled_so_far,
+            day_progress_fraction=day_progress_fraction,
+            analytical_w2=analytical_w2,
+            area2_locked=not allow_area2,
+            lhd_queues=lhd_queues,
+        )
+        if res is None:
+            avail = [s for s in self.stopes if s.is_ore_available and (allow_area2 or s.area_id == 1)]
+            if avail:
+                st = avail[self.rng.randint(0, len(avail) - 1)]
+                return DispatchDecision(selected_stope_id=st.face_id, is_fallback=True, stope=st)
+            return DispatchDecision(selected_stope_id=1, is_fallback=False, stope=self.stopes[0] if self.stopes else None)
+
+        stope, is_fb = res
+        return DispatchDecision(selected_stope_id=stope.face_id, is_fallback=is_fb, stope=stope)

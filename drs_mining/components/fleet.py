@@ -1,42 +1,128 @@
-from dataclasses import dataclass
+"""Consolidated Fleet, Trucks, Operators, and Dump Stations.
+
+Provides unified discrete-event and continuous haulage entities for mine simulations.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, Tuple, List, Sequence, Mapping, Callable
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+
 import drs
 
 
-class TruckState(Enum):
-    PARKED = auto()
-    TRAVEL_EMPTY = auto()
-    WAITING_LOAD = auto()
-    LOADING = auto()
-    TRAVEL_LOADED = auto()
-    WAITING_DUMP = auto()
-    DUMPING = auto()
-    REFUELING = auto()
-    MAINTENANCE = auto()
+class TruckPhase(Enum):
+    """Discrete execution phases of a haul truck in the DES state machine."""
+
+    IDLE = "idle"
+    EMPTY = "empty"
+    WAIT_LOAD = "wait_load"
+    SPOT_LOAD = "spot_load"
+    ACQUIRE = "acquire"
+    LOADING = "loading"
+    LOADED = "loaded"
+    WAIT_DUMP = "wait_dump"
+    SPOT_DUMP = "spot_dump"
+    DUMPING = "dumping"
+    REFUELING = "refueling"
+    PARKED = "parked"
+    TRAVEL_EMPTY = "travel_empty"
+    WAITING_LOAD = "waiting_load"
+    TRAVEL_LOADED = "travel_loaded"
+    WAITING_DUMP = "waiting_dump"
+    MAINTENANCE = "maintenance"
 
 
-# TODO: is dataclass good or should python-drs introduce a Entity class?
+# Backwards compatibility alias
+TruckState = TruckPhase
+
+OPERATING_PHASES: Set[TruckPhase] = {
+    TruckPhase.EMPTY,
+    TruckPhase.WAIT_LOAD,
+    TruckPhase.SPOT_LOAD,
+    TruckPhase.ACQUIRE,
+    TruckPhase.LOADING,
+    TruckPhase.LOADED,
+    TruckPhase.WAIT_DUMP,
+    TruckPhase.SPOT_DUMP,
+    TruckPhase.DUMPING,
+    TruckPhase.TRAVEL_EMPTY,
+    TruckPhase.WAITING_LOAD,
+    TruckPhase.TRAVEL_LOADED,
+    TruckPhase.WAITING_DUMP,
+}
+
+SEAT_PHASES: Set[TruckPhase] = OPERATING_PHASES | {TruckPhase.REFUELING}
+
+DUE_PHASES: Set[TruckPhase] = {
+    TruckPhase.EMPTY,
+    TruckPhase.SPOT_LOAD,
+    TruckPhase.ACQUIRE,
+    TruckPhase.LOADING,
+    TruckPhase.LOADED,
+    TruckPhase.SPOT_DUMP,
+    TruckPhase.DUMPING,
+    TruckPhase.REFUELING,
+    TruckPhase.TRAVEL_EMPTY,
+    TruckPhase.TRAVEL_LOADED,
+}
+
+
+@dataclass
+class Operator:
+    """Human operator assigned to a haul truck during a shift."""
+
+    idx: int
+    free: bool = True
+    used_seat: float = 0.0
+
+
 @dataclass
 class Truck:
+    """Unified haul truck entity tracked by both discrete and continuous simulation engines."""
+
     truck_id: str
-    truck_type: str
-    ore_payload_cap: float
-    waste_payload_cap: float
-    speeds: dict
-
-    # State tracking
-    state: TruckState = TruckState.PARKED
-    current_location: str = "SURFACE_PARKING"
+    timer: Optional[drs.Timer] = None
+    phase: TruckPhase = TruckPhase.PARKED
+    target_face_id: int = 1
+    target_loadout: int = -1
+    target_level: int = 4
     current_payload: float = 0.0
-    payload_type: str = "ORE"  # "ORE" or "WASTE"
-    target_level: Optional[int] = None
-    target_bay_id: Optional[str] = None
+    payload_ore_fraction: float = 0.30
+    seat_used: float = 0.0
+    fuel: float = 100.0
+    refuel_threshold: float = 30.0
+    operator: int = -1
+    trip_start: float = 0.0
+    dump_dur: float = 0.0
+    down_start: float = math.inf
+    down_end: float = math.inf
 
-    # Fuel & Mechanical State
-    fuel_level_pct: float = 100.0  # 0.0 - 100.0%
-    fuel_burn_rate_pct_per_sec: float = 0.005  # per-second burn rate
-    next_failure_time: float = 1e9  # Calculated from MTBF
+    # Legacy attributes for compatibility
+    truck_type: str = "AD30"
+    ore_payload_cap: float = 26.1
+    waste_payload_cap: float = 24.6
+    speeds: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    payload_type: str = "ORE"
+    current_location: str = "SURFACE_PARKING"
+    target_bay_id: Optional[str] = None
+    fuel_level_pct: float = 100.0
+    fuel_burn_rate_pct_per_sec: float = 0.005
+    next_failure_time: float = 1e9
+
+    def __post_init__(self):
+        if self.timer is None:
+            self.timer = drs.Timer(f"tr_tmr_{self.truck_id}", 0.0, rate=0.0)
+
+    @property
+    def state(self) -> TruckPhase:
+        return self.phase
+
+    @state.setter
+    def state(self, value: TruckPhase):
+        self.phase = value
 
     def get_speed_mps(self, segment_type: str) -> float:
         """Returns speed in meters/second for current load state."""
@@ -45,19 +131,36 @@ class Truck:
         return kph / 3.6
 
 
-# TODO: is dataclass good or should python-drs introduce a Entity class?
+# Alias for DES Truck
+DESTruck = Truck
+
+
+@dataclass
+class SurfaceDumpStation:
+    """Surface crusher tip / stockpile dump facility with finite truck bays."""
+
+    name: str = "SURFACE_CRUSHER_HOPPER"
+    capacity: int = 2
+    in_use: int = 0
+    queue: List[Truck] = field(default_factory=list)
+    _active_ore1_rate: float = 0.0
+    _active_ore2_rate: float = 0.0
+
+
 @dataclass
 class LHD:
+    """Load-Haul-Dump (LHD) underground mucking loader entity."""
+
     lhd_id: str
     level_index: int
-    bucket_ore_cap: float
-    bucket_waste_cap: float
-    load_spot_min: float
-    load_min: float
-    dump_min: float
-    tram_dist_m: float
-    speed_loaded_kph: float
-    speed_empty_kph: float
+    bucket_ore_cap: float = 14.0
+    bucket_waste_cap: float = 14.0
+    load_spot_min: float = 0.50
+    load_min: float = 0.50
+    dump_min: float = 0.30
+    tram_dist_m: float = 30.0
+    speed_loaded_kph: float = 9.0
+    speed_empty_kph: float = 12.0
 
     def get_bucket_cycle_sec(self) -> float:
         """Calculates duration in seconds of 1 LHD digging & tramming bucket pass."""
@@ -81,8 +184,9 @@ class LHD:
         return total_min * 60.0
 
 
-# TODO: what does this do? Why do we need it? can we remove it?
 class ContinuousFleetLogistics(drs.Module):
+    """Continuous fleet routing and flow split component."""
+
     def __init__(self, num_stockpiles: int = 2):
         super().__init__()
         self.num_stockpiles = num_stockpiles
