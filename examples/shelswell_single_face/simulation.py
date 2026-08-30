@@ -49,7 +49,7 @@ from drs_mining.components import (
     MineFace,
     TruckPhase,
     Operator,
-    DESTruck as Truck,
+    Truck,
     SurfaceDumpStation,
     OPERATING_PHASES,
     SEAT_PHASES,

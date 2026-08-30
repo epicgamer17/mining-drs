@@ -3,9 +3,14 @@ from .modes import OperatingMode, RequireDecision
 from .generators import StochasticFaciesGenerator
 from .fleet import (
     ContinuousFleetLogistics,
-    TruckState,
     Truck,
     LHD,
+    TruckPhase,
+    Operator,
+    SurfaceDumpStation,
+    OPERATING_PHASES,
+    SEAT_PHASES,
+    DUE_PHASES,
 )
 from .topology import RoadSegment, MineTopology, DEFAULT_SPEEDS
 from .bays import LoadingBay, DumpingBay
@@ -36,15 +41,6 @@ from .allocation import (
     solve_face_allocation_rates,
 )
 from drs_mining.config.economics import EconomicParameters
-from .fleet import (
-    TruckPhase,
-    Operator,
-    DESTruck,
-    SurfaceDumpStation,
-    OPERATING_PHASES,
-    SEAT_PHASES,
-    DUE_PHASES,
-)
 from .simulation_base import MiningSimulationBase, TwoAreaSimulationBase, ORE_PAYLOAD
 
 # Alias for StopeFace
@@ -65,7 +61,6 @@ __all__ = [
     "Stockpile",
     "create_stockpiles",
     "ShelswellDispatchController",
-    "TruckState",
     "Truck",
     "LHD",
     "create_truck_fleet",
@@ -94,7 +89,6 @@ __all__ = [
     "EconomicParameters",
     "TruckPhase",
     "Operator",
-    "DESTruck",
     "SurfaceDumpStation",
     "OPERATING_PHASES",
     "SEAT_PHASES",

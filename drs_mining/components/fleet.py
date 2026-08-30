@@ -17,6 +17,7 @@ class TruckPhase(Enum):
     """Discrete execution phases of a haul truck in the DES state machine."""
 
     IDLE = "idle"
+    PARKED = "parked"
     EMPTY = "empty"
     WAIT_LOAD = "wait_load"
     SPOT_LOAD = "spot_load"
@@ -27,16 +28,8 @@ class TruckPhase(Enum):
     SPOT_DUMP = "spot_dump"
     DUMPING = "dumping"
     REFUELING = "refueling"
-    PARKED = "parked"
-    TRAVEL_EMPTY = "travel_empty"
-    WAITING_LOAD = "waiting_load"
-    TRAVEL_LOADED = "travel_loaded"
-    WAITING_DUMP = "waiting_dump"
     MAINTENANCE = "maintenance"
 
-
-# Backwards compatibility alias
-TruckState = TruckPhase
 
 OPERATING_PHASES: Set[TruckPhase] = {
     TruckPhase.EMPTY,
@@ -48,10 +41,6 @@ OPERATING_PHASES: Set[TruckPhase] = {
     TruckPhase.WAIT_DUMP,
     TruckPhase.SPOT_DUMP,
     TruckPhase.DUMPING,
-    TruckPhase.TRAVEL_EMPTY,
-    TruckPhase.WAITING_LOAD,
-    TruckPhase.TRAVEL_LOADED,
-    TruckPhase.WAITING_DUMP,
 }
 
 SEAT_PHASES: Set[TruckPhase] = OPERATING_PHASES | {TruckPhase.REFUELING}
@@ -65,8 +54,6 @@ DUE_PHASES: Set[TruckPhase] = {
     TruckPhase.SPOT_DUMP,
     TruckPhase.DUMPING,
     TruckPhase.REFUELING,
-    TruckPhase.TRAVEL_EMPTY,
-    TruckPhase.TRAVEL_LOADED,
 }
 
 
@@ -100,7 +87,7 @@ class Truck:
     down_start: float = math.inf
     down_end: float = math.inf
 
-    # Legacy attributes for compatibility
+    # Truck configuration & attributes
     truck_type: str = "AD30"
     ore_payload_cap: float = 26.1
     waste_payload_cap: float = 24.6
@@ -129,10 +116,6 @@ class Truck:
         load_key = "loaded" if self.current_payload > 0 else "empty"
         kph = self.speeds.get(segment_type, {}).get(load_key, 10.0)
         return kph / 3.6
-
-
-# Alias for DES Truck
-DESTruck = Truck
 
 
 @dataclass

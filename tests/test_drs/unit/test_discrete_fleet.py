@@ -5,7 +5,7 @@ import drs
 from drs_mining.components.fleet import (
     TruckPhase,
     Operator,
-    DESTruck,
+    Truck,
     SurfaceDumpStation,
     OPERATING_PHASES,
     SEAT_PHASES,
@@ -26,7 +26,7 @@ def test_operator_and_truck_instantiation():
     assert op.free
 
     timer = drs.Timer("t_truck", initial_value=0.0)
-    truck = DESTruck(truck_id="T01", timer=timer)
+    truck = Truck(truck_id="T01", timer=timer)
     assert truck.truck_id == "T01"
     assert truck.phase in (TruckPhase.IDLE, TruckPhase.PARKED)
     assert truck.fuel == 100.0

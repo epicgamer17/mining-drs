@@ -1,6 +1,6 @@
 from typing import Optional
 import drs
-from .fleet import Truck, TruckState, LHD
+from .fleet import Truck, TruckPhase, LHD
 
 
 class LoadingBay(drs.Module):
@@ -63,7 +63,7 @@ class LoadingBay(drs.Module):
             total_load_time_sec = 1.0
 
         self.active_truck = truck
-        self.active_truck.state = TruckState.LOADING
+        self.active_truck.phase = TruckPhase.LOADING
         self.load_time_remaining = total_load_time_sec
         self.total_load_duration_sec = total_load_time_sec
 
@@ -84,7 +84,7 @@ class LoadingBay(drs.Module):
 
             self.load_time_remaining -= dt
             if self.load_time_remaining <= 0.0 or self.muck_level.value <= 0.0:
-                self.active_truck.state = TruckState.TRAVEL_LOADED
+                self.active_truck.phase = TruckPhase.LOADED
                 self.active_truck = None
                 self.load_rate.value = 0.0
                 self.muck_level.rate = 0.0
@@ -127,7 +127,7 @@ class DumpingBay(drs.Module):
         total_dump_time_sec = self.calculate_dump_duration_sec(truck)
 
         self.active_truck = truck
-        self.active_truck.state = TruckState.DUMPING
+        self.active_truck.phase = TruckPhase.DUMPING
         self.dump_time_remaining = total_dump_time_sec
 
         # Flow into surface stockpile accumulator (Tonnes / Sec)
@@ -150,7 +150,7 @@ class DumpingBay(drs.Module):
             self.dump_time_remaining -= dt
             if self.dump_time_remaining <= 0.0:
                 self.active_truck.current_payload = 0.0
-                self.active_truck.state = TruckState.TRAVEL_EMPTY
+                self.active_truck.phase = TruckPhase.EMPTY
                 self.active_truck = None
                 self.dump_rate.value = 0.0
                 self.dumped_total.rate = 0.0

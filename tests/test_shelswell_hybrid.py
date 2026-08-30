@@ -2,7 +2,7 @@ import pytest
 import math
 import drs
 
-from drs_mining.components.fleet import Truck, TruckState, LHD
+from drs_mining.components.fleet import Truck, TruckPhase, LHD
 from drs_mining.components.topology import RoadSegment
 from drs_mining.components.bays import LoadingBay, DumpingBay
 from drs_mining.components.dispatch import ShelswellDispatchController
@@ -18,7 +18,7 @@ def test_truck_discrete_state():
         speeds=speeds,
     )
     assert truck.truck_id == "T01"
-    assert truck.state == TruckState.PARKED
+    assert truck.phase == TruckPhase.PARKED
     assert truck.ore_payload_cap == 26.1
     assert truck.waste_payload_cap == 24.6
 
@@ -85,12 +85,12 @@ def test_loading_and_dumping_bays():
 
     started = bay.start_loading(truck)
     assert started
-    assert truck.state == TruckState.LOADING
+    assert truck.phase == TruckPhase.LOADING
     assert bay.load_rate.value > 0.0
 
     # Step simulation forward
     bay.update_continuous_step(bay.total_load_duration_sec + 1.0)
-    assert truck.state == TruckState.TRAVEL_LOADED
+    assert truck.phase == TruckPhase.LOADED
     assert truck.current_payload > 0.0
     assert bay.active_truck is None
 
@@ -105,11 +105,11 @@ def test_loading_and_dumping_bays():
 
     dump_started = dump_bay.start_dumping(truck)
     assert dump_started
-    assert truck.state == TruckState.DUMPING
+    assert truck.phase == TruckPhase.DUMPING
 
     dump_bay.update_continuous_step(100.0)
     assert dump_bay.dumped_total.value > 0.0
-    assert truck.state == TruckState.TRAVEL_EMPTY
+    assert truck.phase == TruckPhase.EMPTY
 
 
 def test_dispatch_controller():
@@ -139,10 +139,10 @@ def test_dispatch_controller():
     # Normal dispatch: should select bay2 with highest unclaimed muck
     controller.assign_next_destination(truck)
     assert truck.target_bay_id == "L2_ORE"
-    assert truck.state == TruckState.TRAVEL_EMPTY
+    assert truck.phase == TruckPhase.EMPTY
 
     # Low fuel intercept test
     truck.fuel_level_pct = 10.0
     controller.assign_next_destination(truck)
-    assert truck.state == TruckState.REFUELING
+    assert truck.phase == TruckPhase.REFUELING
     assert truck.current_location == "SURFACE_FUEL_DEPOT"

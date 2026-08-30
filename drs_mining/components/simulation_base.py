@@ -46,7 +46,7 @@ from drs_mining.components.planning import (
 from drs_mining.components.fleet import (
     TruckPhase,
     Operator,
-    DESTruck as Truck,
+    Truck,
     SurfaceDumpStation,
     OPERATING_PHASES,
     SEAT_PHASES,

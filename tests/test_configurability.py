@@ -19,7 +19,7 @@ from drs_mining import (
     FleetController,
     ContinuousFleetLogistics,
     StochasticFaciesGenerator,
-    TruckState,
+    TruckPhase,
 )
 
 
@@ -115,7 +115,7 @@ def test_configurable_loading_and_dumping_bays():
     assert duration > 0.0
 
     bay.start_loading(truck)
-    assert truck.state == TruckState.LOADING
+    assert truck.phase == TruckPhase.LOADING
     assert bay.total_load_duration_sec == duration
 
     dump_bay = DumpingBay(
@@ -174,7 +174,7 @@ def test_configurable_dispatch_controller():
 
     trucks[0].fuel_level_pct = 19.0
     controller.assign_next_destination(trucks[0])
-    assert trucks[0].state == TruckState.REFUELING
+    assert trucks[0].phase == TruckPhase.REFUELING
     assert trucks[0].current_location == "CUSTOM_DEPOT"
 
     rr_ctrl = ShelswellDispatchController(
@@ -189,7 +189,7 @@ def test_configurable_dispatch_controller():
     )
     trucks[1].fuel_level_pct = 100.0
     rr_ctrl.assign_next_destination(trucks[1])
-    assert trucks[1].state == TruckState.TRAVEL_EMPTY
+    assert trucks[1].phase == TruckPhase.EMPTY
 
 
 def test_multi_stockpile_fleet_routing():

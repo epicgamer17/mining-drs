@@ -1,7 +1,7 @@
 """Unit tests for Truck and LHD fleet component classes."""
 
 import pytest
-from drs_mining.components.fleet import Truck, LHD, TruckState, ContinuousFleetLogistics
+from drs_mining.components.fleet import Truck, LHD, TruckPhase, ContinuousFleetLogistics
 
 
 def test_truck_dataclass_and_speeds():
@@ -17,7 +17,7 @@ def test_truck_dataclass_and_speeds():
         speeds=speeds,
     )
     assert truck.truck_id == "T01"
-    assert truck.state == TruckState.PARKED
+    assert truck.phase == TruckPhase.PARKED
 
     # Speed empty
     mps_empty = truck.get_speed_mps("ramp")

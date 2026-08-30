@@ -12,7 +12,7 @@ Implements:
 from dataclasses import dataclass
 import random
 from typing import List, Mapping, Optional, Sequence, Tuple
-from .fleet import Truck, TruckState
+from .fleet import Truck, TruckPhase
 from .bays import LoadingBay
 from .topology import RoadSegment
 from .mine_face import MineFace, FaceState, StopeState
@@ -56,7 +56,7 @@ class ShelswellDispatchController:
     def assign_next_destination(self, truck: Truck):
         """Dispatch Rule: Route truck to target loadout with highest unclaimed tonnage or by strategy."""
         if truck.fuel_level_pct < self.refuel_threshold_pct:
-            truck.state = TruckState.REFUELING
+            truck.phase = TruckPhase.REFUELING
             truck.current_location = self.fuel_depot_location
             return
 
@@ -82,7 +82,7 @@ class ShelswellDispatchController:
 
         truck.target_bay_id = target_bay.bay_id
         truck.target_level = target_bay.level_index
-        truck.state = TruckState.TRAVEL_EMPTY
+        truck.phase = TruckPhase.EMPTY
 
 
 @dataclass
