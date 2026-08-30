@@ -251,14 +251,24 @@ class MiningSimulationBase(drs.Module):
                 prob_new_facies=0.3,
                 variation_same_facies=0.01,
             )
+            face_capacity = (
+                total_ore_to_extract / 2.0
+                if total_ore_to_extract is not None
+                else 1000000.0
+            )
+            warmup_cap = (
+                ore_to_be_extracted_during_warming_period / 2.0
+                if ore_to_be_extracted_during_warming_period is not None
+                else 0.0
+            )
             self.face1 = MineFace(
                 name="mine_face_1",
                 face_id=1,
                 generator=self.gen1,
                 min_ore_mass=30000.0,
                 max_ore_mass=50000.0,
-                total_ore_to_extract=total_ore_to_extract,
-                ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+                total_ore_to_extract=face_capacity,
+                ore_to_be_extracted_during_warming_period=warmup_cap,
                 mean_ore_fraction=0.30,
                 std_dev_ore_fraction=0.05,
                 prob_new_facies=0.3,
@@ -279,8 +289,8 @@ class MiningSimulationBase(drs.Module):
                 generator=self.gen2,
                 min_ore_mass=30000.0,
                 max_ore_mass=50000.0,
-                total_ore_to_extract=total_ore_to_extract,
-                ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+                total_ore_to_extract=face_capacity,
+                ore_to_be_extracted_during_warming_period=warmup_cap,
                 mean_ore_fraction=0.35,
                 std_dev_ore_fraction=0.05,
                 prob_new_facies=0.3,
@@ -1056,6 +1066,11 @@ class MiningSimulationBase(drs.Module):
             if tr.down_end > t and tr.down_end != math.inf:
                 min_dt = min(min_dt, tr.down_end - t)
 
+        # Calendar and shift boundaries
+        next_day = (math.floor(t / 86400.0) + 1.0) * 86400.0
+        next_shift = (math.floor(t / SHIFT_SECONDS) + 1.0) * SHIFT_SECONDS
+        min_dt = min(min_dt, max(1.0, next_day - t), max(1.0, next_shift - t))
+
         # Remaining campaign duration
         c_thresh = (
             self.mode_controller.duration_of_shutdowns
@@ -1098,19 +1113,22 @@ class MiningSimulationBase(drs.Module):
         self.gt.step(dt)
         self.mode_controller.current_campaign_duration.step(dt_days)
         active_mode_name = self.plant.active_operating_mode.value.name
-        timer_attr = self.plant._MODE_TIMER_ATTRS.get(active_mode_name)
-        if timer_attr and hasattr(self.plant, timer_attr):
-            getattr(self.plant, timer_attr).step(dt_days)
+        if active_mode_name == "MODE_A":
+            self.plant.cumulative_time_mode_a.step(dt_days)
+        elif active_mode_name == "MODE_B":
+            self.plant.cumulative_time_mode_b.step(dt_days)
+        elif active_mode_name == "SHUTDOWN":
+            self.plant.cumulative_time_shutdown.step(dt_days)
+
         if active_mode_name in self.plant._CONTINGENCY_MODES:
             self.plant.current_contingency_duration.step(dt_days)
 
         if self.tactical_controller.planning_started:
-            self.tactical_controller.strategic_year_timer.step(dt_days)
-            self.tactical_controller.tactical_review_timer.step(dt_days)
+            self.tactical_controller.step_timers(dt_days)
 
-        # 2. Step Truck Fuel, Seat, and Timers
+        # 2. Step Fleet & Operator Timers
         for tr in self.trucks:
-            if tr.timer.rate < 0 and tr.timer.value > 0.0:
+            if tr.timer.rate < 0.0 and tr.timer.value > 0.0:
                 tr.timer.value = max(0.0, tr.timer.value - dt)
             if tr.phase in SEAT_PHASES:
                 tr.seat_used = min(self.truck_seat_credit, tr.seat_used + dt)
@@ -1254,9 +1272,27 @@ class MiningSimulationBase(drs.Module):
             return True
         return False
 
+    def is_terminating_condition_met(self) -> bool:
+        """Evaluates whether all mining reserves are fully exhausted or simulation horizon is reached."""
+        if hasattr(self, "faces") and len(self.faces) > 1:
+            if self.is_face1_exhausted() and self.is_face2_exhausted():
+                return True
+        elif hasattr(self, "face1"):
+            if self.is_face1_exhausted():
+                return True
+        total_extracted = sum(
+            float(f.cumulative_extracted_mass.value)
+            for f in getattr(self, "faces", [self.face1])
+        )
+        if total_extracted >= self.total_ore_to_extract - 1e-6:
+            return True
+        return self.gt.value >= self.horizon_sec - 1e-6
+
     def step(self, dt: float) -> None:
         t_end = self.gt.value + dt
         while self.gt.value < t_end:
+            if self.is_terminating_condition_met():
+                break
             tte = min(self.time_to_event(), t_end - self.gt.value)
             t_next = self.gt.value + tte
             self._advance(t_next)

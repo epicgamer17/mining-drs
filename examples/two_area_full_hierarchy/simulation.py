@@ -113,15 +113,16 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
 
 
 def run_full_hierarchy_study(
-    total_days: float = 365.0,
-    warmup_ore: float = 600000.0,
+    total_days: Optional[float] = None,
+    total_ore_to_extract: float = 2000000.0,
+    warmup_ore: float = 0.0,
     area2_required_dev: float = 4000.0,
     area2_ready_by_day: float = 365.0,
     num_trucks: int = 18,
     seed: int = 42,
     plot: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Executes Policy 1 and Policy 2 full hierarchy study."""
+    """Executes Policy 1 and Policy 2 full hierarchy study until Area 1 and Area 2 are both exhausted (or total_days)."""
     strat_target = StrategicYearTarget(
         min_development=10000.0,
         min_ore1_production=1300000.0,
@@ -132,17 +133,21 @@ def run_full_hierarchy_study(
         ready_by_day=area2_ready_by_day,
     )
 
+    duration_p1 = (total_days * 86400.0) if total_days is not None else float("inf")
+    duration_p2 = (total_days * 86400.0) if total_days is not None else float("inf")
+
     print("Running Policy 1 (Myopic Baseline)...")
     sim_p1 = TwoAreaFullHierarchyEngine(
         policy=1,
         enable_analytical_blending=False,
         num_trucks=num_trucks,
+        total_ore_to_extract=total_ore_to_extract,
         ore_to_be_extracted_during_warming_period=warmup_ore,
         strategic_targets=(strat_target,),
         area2_readiness_target=area2_target,
         seed=seed,
     )
-    sim_p1.step(total_days * 86400.0)
+    sim_p1.step(duration_p1)
     df_p1 = pd.DataFrame(sim_p1.telemetry_history)
 
     print("Running Policy 2 (Three-Level Hierarchical Control)...")
@@ -150,12 +155,13 @@ def run_full_hierarchy_study(
         policy=2,
         enable_analytical_blending=True,
         num_trucks=num_trucks,
+        total_ore_to_extract=total_ore_to_extract,
         ore_to_be_extracted_during_warming_period=warmup_ore,
         strategic_targets=(strat_target,),
         area2_readiness_target=area2_target,
         seed=seed,
     )
-    sim_p2.step(total_days * 86400.0)
+    sim_p2.step(duration_p2)
     df_p2 = pd.DataFrame(sim_p2.telemetry_history)
 
     print_full_hierarchy_summary(df_p1, df_p2)
@@ -171,8 +177,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Full Three-Level Hierarchy Simulation Study"
     )
-    parser.add_argument("--total_days", type=float, default=365.0)
-    parser.add_argument("--warmup_ore", type=float, default=600000.0)
+    parser.add_argument("--total_days", type=float, default=None, help="Total days to simulate (default: run until Area 1 and Area 2 are both depleted)")
+    parser.add_argument("--total_ore", type=float, default=2000000.0, help="Total ore to extract across Area 1 and Area 2 (default: 2,000,000 t)")
+    parser.add_argument("--warmup_ore", type=float, default=0.0)
     parser.add_argument("--area2_required_dev", type=float, default=4000.0)
     parser.add_argument("--area2_ready_by_day", type=float, default=365.0)
     parser.add_argument("--trucks", type=int, default=18)
@@ -182,6 +189,7 @@ if __name__ == "__main__":
 
     run_full_hierarchy_study(
         total_days=args.total_days,
+        total_ore_to_extract=args.total_ore,
         warmup_ore=args.warmup_ore,
         area2_required_dev=args.area2_required_dev,
         area2_ready_by_day=args.area2_ready_by_day,

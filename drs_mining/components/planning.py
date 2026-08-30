@@ -169,6 +169,12 @@ class TacticalReviewController(drs.Module):
             self.annual_ore2_extracted = 0.0
             self.annual_development_start = float(current_cumulative_dev)
 
+    def step_timers(self, dt_days: float):
+        """Advances internal strategic and tactical timers."""
+        if self.planning_started:
+            self.strategic_year_timer.step(dt_days)
+            self.tactical_review_timer.step(dt_days)
+
     def record_production(self, ore1_mass: float, ore2_mass: float):
         """Accumulate ore production into current strategic year."""
         self.annual_ore1_extracted += ore1_mass
