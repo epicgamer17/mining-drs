@@ -44,7 +44,8 @@ from drs.plot import (
     plot_safety_margin,
     plot_dual_axis_step,
 )
-from drs_mining.components.modes import MODES, OperatingMode
+from drs_mining.config import MILL_MODES
+from drs_mining.components.modes import OperatingMode
 from drs_mining.components.plant import MetallurgicalPlant, PlantDrawRates
 from drs_mining.components.stockpiles import Stockpile
 from drs_mining.components.controllers import OperatingModeController

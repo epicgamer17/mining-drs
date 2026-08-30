@@ -1,44 +1,72 @@
+"""Generic domain abstractions for discrete operating modes."""
+
+from typing import Optional, Dict, Any
+
+
 class RequireDecision(Exception):
+    """Raised when an operating mode controller requires an external decision."""
+
     pass
 
 
-# TODO: make this arbitrary. Allow for arbirtraty modes and number and type of modes.
-_MODE_IDS = {
-    "MODE_A": 0,
-    "MODE_A_CONTINGENCY": 1,
-    "MODE_A_MINE_SURGING": 2,
-    "MODE_B": 3,
-    "MODE_B_CONTINGENCY": 4,
-    "MODE_B_MINE_SURGING": 5,
-    "SHUTDOWN": 6,
-}
-
-
 class OperatingMode:
-    __slots__ = ("_name", "_id")
+    """Represents a discrete operating mode for plant, fleet, or whole-mine systems."""
 
-    def __init__(self, name: str):
-        self._name = name
-        self._id = _MODE_IDS[name]
+    __slots__ = ("_name", "_id", "_category", "_metadata")
+
+    def __init__(
+        self,
+        name: str,
+        id: Optional[int] = None,
+        category: str = "general",
+        **metadata: Any,
+    ):
+        self._name = str(name)
+        self._category = str(category)
+        self._metadata = metadata
+        self._id = (
+            id if id is not None else (hash((self._category, self._name)) & 0x7FFFFFFF)
+        )
 
     @property
-    def id(self):
+    def id(self) -> int:
         return self._id
 
     @property
-    def name(self):
+    def value(self) -> int:
+        return self._id
+
+    @property
+    def name(self) -> str:
         return self._name
 
-    def __eq__(self, other):
+    @property
+    def category(self) -> str:
+        return self._category
+
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        return self._metadata
+
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, OperatingMode):
-            return self._id == other._id
+            return self._name == other._name and self._category == other._category
+        if hasattr(other, "name") and hasattr(other, "category"):
+            return (
+                self._name == getattr(other, "name")
+                and self._category == getattr(other, "category")
+            )
+        if isinstance(other, str):
+            return self._name == other
         return NotImplemented
 
-    def __hash__(self):
-        return hash(self._id)
+    def __hash__(self) -> int:
+        return hash((self._category, self._name))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
+        if self._category != "general":
+            return f"OperatingMode({self._name}, category='{self._category}')"
         return f"OperatingMode({self._name})"
 
-
-MODES = {name: OperatingMode(name) for name in _MODE_IDS}
+    def __str__(self) -> str:
+        return self._name

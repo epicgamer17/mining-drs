@@ -29,7 +29,7 @@ from drs_mining.components import (
     StochasticFaciesGenerator,
     Stockpile,
 )
-from drs_mining.components.modes import MODES
+from drs_mining.config import MILL_MODES
 from drs_mining.components.plot import (
     plot_multi_face_dashboard,
     prepare_history,
@@ -445,18 +445,13 @@ def _run_capacity_case(
     np_seed: int = 42,
     random_seed: int = 11,
 ):
-    from drs_mining.components.modes import MODES
-
-    np.random.seed(np_seed)
-    random.seed(random_seed)
-
     kwargs = config_kwargs or {}
     network = build_multi_face_network(**kwargs)
     faces, fleet, plant, mode_ctrl, fleet_ctrl, ore1_stock, ore2_stock = network
     if equal_allocation:
         _apply_equal_allocation(fleet_ctrl)
 
-    mode_ctrl.active_campaign_mode.value = MODES["MODE_A"]
+    mode_ctrl.active_campaign_mode.value = MILL_MODES["MODE_A"]
 
     engine = DRSEngine()
     _register_and_policy(engine, network)
@@ -685,7 +680,7 @@ def run_and_analyze(config, equal_allocation=False, name="Dynamic Fleet Allocati
     if equal_allocation:
         _apply_equal_allocation(fleet_ctrl)
 
-    mode_ctrl.active_campaign_mode.value = MODES["MODE_A"]
+    mode_ctrl.active_campaign_mode.value = MILL_MODES["MODE_A"]
 
     engine = DRSEngine()
     _register_and_policy(engine, network)

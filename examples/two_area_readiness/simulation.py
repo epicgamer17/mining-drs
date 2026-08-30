@@ -49,7 +49,8 @@ from drs.plot import (
     plot_dual_axis_step,
     plot_safety_margin,
 )
-from drs_mining.components.modes import MODES, OperatingMode
+from drs_mining.config import MILL_MODES, FLEET_MODES
+from drs_mining.components.modes import OperatingMode
 from drs_mining.components.plant import MetallurgicalPlant, PlantDrawRates
 from drs_mining.components.stockpiles import Stockpile
 from drs_mining.components.controllers import OperatingModeController
@@ -57,11 +58,10 @@ from drs_mining.components.generators import StochasticFaciesGenerator
 from drs_mining.components.mine_face import MineFace
 from drs_mining.components.planning import (
     AreaReadinessTarget,
-    MiningPriority,
     StrategicYearTarget,
     strategic_target_for_year,
     trajectory_progress_ratio,
-    select_mining_priority,
+    select_fleet_mode,
 )
 from drs_mining.components.plot import (
     MODE_PALETTE,
@@ -444,7 +444,8 @@ class TwoAreaReadinessSimulation(drs.Module):
         self.strategic_year_timer = drs.Timer("strategic_year_timer", 0.0, rate=1.0)
         self.tactical_review_timer = drs.Timer("tactical_review_timer", 0.0, rate=1.0)
         self.tactical_review_count = drs.Level("tactical_review_count", 0.0)
-        self.mining_priority = MiningPriority.BALANCED
+        self.fleet_mode = FLEET_MODES["BALANCED"]
+        self.mining_priority = self.fleet_mode
 
         # 7. Area 2 Readiness & Physical Unlock Variables
         self.area2_ready = False
@@ -692,10 +693,10 @@ class TwoAreaReadinessSimulation(drs.Module):
 
         # Allocate development metres to Area 2 project (measured from start of strategic planning)
         if self.is_area2_locked() and self.strategic_planning_started:
-            prio = self.mining_priority
-            if prio == MiningPriority.DEVELOPMENT:
+            prio = self.fleet_mode
+            if prio == FLEET_MODES["DEVELOPMENT"]:
                 frac = 0.85
-            elif prio == MiningPriority.BALANCED:
+            elif prio == FLEET_MODES["BALANCED"]:
                 frac = 0.60
             else:
                 frac = 0.35
@@ -800,17 +801,18 @@ class TwoAreaReadinessSimulation(drs.Module):
             self.tactical_review_count.value += 1.0
 
             # Select Mining Priority based on Trajectory Deficits (incorporating Area 2 readiness ratio)
-            selected = select_mining_priority(
+            selected = select_fleet_mode(
                 development_ratio=float(self.development_trajectory_ratio.value),
                 ore1_ratio=float(self.ore1_trajectory_ratio.value),
                 ore2_ratio=float(self.ore2_trajectory_ratio.value),
                 tolerance=self.tactical_progress_tolerance,
                 area2_readiness_trajectory_ratio=float(self.area2_readiness_trajectory_ratio.value),
             )
+            self.fleet_mode = selected
             self.mining_priority = selected
 
             # Update Fleet Reservation for Development
-            if selected == MiningPriority.DEVELOPMENT:
+            if selected == FLEET_MODES["DEVELOPMENT"]:
                 reserved = math.ceil(
                     len(self.trucks)
                     * self.development_priority_truck_reservation_fraction

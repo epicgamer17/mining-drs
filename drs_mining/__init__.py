@@ -26,10 +26,10 @@ from drs_mining.components import (
     ShelswellDispatchController,
     ContinuousFleetLogistics,
     StochasticFaciesGenerator,
-    MODES,
     OperatingMode,
     RequireDecision,
 )
+from drs_mining.config import MILL_MODES, FLEET_MODES
 
 __all__ = [
     "Storage",
@@ -55,7 +55,9 @@ __all__ = [
     "ShelswellDispatchController",
     "ContinuousFleetLogistics",
     "StochasticFaciesGenerator",
-    "MODES",
+    "MILL_MODES",
+    "FLEET_MODES",
     "OperatingMode",
     "RequireDecision",
 ]
+

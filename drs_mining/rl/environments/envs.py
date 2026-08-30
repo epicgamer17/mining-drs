@@ -8,7 +8,6 @@ import drs
 from drs import DRSEngine, Telemetry
 from drs_mining.components import (
     build_mining_simulation,
-    MODES,
     RequireDecision,
 )
 from .controllers import RL_MineController

@@ -45,7 +45,8 @@ from drs.plot import (
     plot_safety_margin,
 )
 from drs_mining.components.allocation import solve_face_allocation_rates
-from drs_mining.components.modes import MODES, OperatingMode
+from drs_mining.config import MILL_MODES, FLEET_MODES
+from drs_mining.components.modes import OperatingMode
 from drs_mining.components.plant import MetallurgicalPlant, PlantDrawRates
 from drs_mining.components.stockpiles import Stockpile
 from drs_mining.components.controllers import OperatingModeController
@@ -53,11 +54,10 @@ from drs_mining.components.generators import StochasticFaciesGenerator
 from drs_mining.components.mine_face import MineFace
 from drs_mining.components.planning import (
     AreaReadinessTarget,
-    MiningPriority,
     StrategicYearTarget,
     strategic_target_for_year,
     trajectory_progress_ratio,
-    select_mining_priority,
+    select_fleet_mode,
 )
 from drs_mining.components.plot import (
     MODE_PALETTE,
@@ -423,11 +423,12 @@ class TwoAreaFullHierarchyEngine(drs.Module):
         self.strategic_year_timer = drs.Timer("strategic_year_timer", 0.0, rate=1.0)
         self.tactical_review_timer = drs.Timer("tactical_review_timer", 0.0, rate=1.0)
         self.tactical_review_count = drs.Level("tactical_review_count", 0.0)
-        self.mining_priority = (
-            MiningPriority.PRODUCTION
+        self.fleet_mode = (
+            FLEET_MODES["PRODUCTION"]
             if policy_name == "POLICY_1_MYOPIC"
-            else MiningPriority.BALANCED
+            else FLEET_MODES["BALANCED"]
         )
+        self.mining_priority = self.fleet_mode
 
         # 7. Area 2 Readiness Variables
         self.area2_ready = False
@@ -793,11 +794,11 @@ class TwoAreaFullHierarchyEngine(drs.Module):
             dev_trucks = (
                 max(reserved_trucks, float(available_extra)) + locked_boost
             )
-            prio = self.mining_priority
+            prio = self.fleet_mode
             frac_to_area2 = (
                 0.85
-                if prio == MiningPriority.DEVELOPMENT
-                else (0.60 if prio == MiningPriority.BALANCED else 0.35)
+                if prio == FLEET_MODES["DEVELOPMENT"]
+                else (0.60 if prio == FLEET_MODES["BALANCED"] else 0.35)
             )
 
         self.development_rate_m_per_day.value = (
@@ -912,21 +913,23 @@ class TwoAreaFullHierarchyEngine(drs.Module):
             self.tactical_review_count.value += 1.0
 
             if self.policy_name == "POLICY_1_MYOPIC":
-                self.mining_priority = MiningPriority.PRODUCTION
+                self.fleet_mode = FLEET_MODES["PRODUCTION"]
+                self.mining_priority = self.fleet_mode
                 self.development_priority_reserved_trucks.value = 0.0
             else:
                 effective_dev_ratio = min(
                     float(self.development_trajectory_ratio.value),
                     float(self.area2_readiness_trajectory_ratio.value),
                 )
-                selected = select_mining_priority(
+                selected = select_fleet_mode(
                     development_ratio=effective_dev_ratio,
                     ore1_ratio=float(self.ore1_trajectory_ratio.value),
                     ore2_ratio=float(self.ore2_trajectory_ratio.value),
                     tolerance=self.tactical_progress_tolerance,
                 )
-                self.mining_priority = selected
-                if selected == MiningPriority.DEVELOPMENT:
+                self.fleet_mode = selected
+                self.mining_priority = self.fleet_mode
+                if selected == FLEET_MODES["DEVELOPMENT"]:
                     n_res = max(1, int(round(len(self.trucks) * 0.20)))
                     self.development_priority_reserved_trucks.value = float(
                         n_res

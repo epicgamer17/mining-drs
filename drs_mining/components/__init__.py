@@ -1,5 +1,5 @@
 from drs import Storage, Processor
-from .modes import MODES, OperatingMode, RequireDecision
+from .modes import OperatingMode, RequireDecision
 from .generators import StochasticFaciesGenerator
 from .fleet import (
     ContinuousFleetLogistics,
@@ -24,12 +24,11 @@ from .factories import (
 )
 
 from .planning import (
-    MiningPriority,
     AreaReadinessTarget,
     StrategicYearTarget,
     strategic_target_for_year,
     trajectory_progress_ratio,
-    select_mining_priority,
+    select_fleet_mode,
 )
 from .allocation import (
     FaceAllocationResult,
@@ -59,16 +58,15 @@ __all__ = [
     "build_mining_simulation",
     "create_blending_system",
     "StochasticFaciesGenerator",
-    "MODES",
     "OperatingMode",
     "RequireDecision",
-    "MiningPriority",
     "AreaReadinessTarget",
     "StrategicYearTarget",
     "strategic_target_for_year",
     "trajectory_progress_ratio",
-    "select_mining_priority",
+    "select_fleet_mode",
     "ContinuousFleetLogistics",
     "FaceAllocationResult",
     "solve_face_allocation_rates",
 ]
+

@@ -3,11 +3,11 @@
 import pytest
 from drs_mining.components.planning import (
     AreaReadinessTarget,
-    MiningPriority,
     StrategicYearTarget,
     trajectory_progress_ratio,
-    select_mining_priority,
+    select_fleet_mode,
 )
+from drs_mining.config import FLEET_MODES
 from examples.two_area_readiness.simulation import TwoAreaReadinessSimulation
 
 

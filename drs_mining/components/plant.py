@@ -4,7 +4,8 @@ import math
 import drs
 from drs import Processor
 from .stockpiles import Stockpile
-from .modes import MODES, OperatingMode
+from .modes import OperatingMode
+from drs_mining.config.modes import MILL_MODES
 
 
 # TODO: could this be more arbitrary? It seems it forces 2 ore types and 2 overall mode types (A and B) with Contingency and Surging. What if we had one or type? Or 3? Or 3 Modes? or just 1? Can we make it work more arbitrarily.
@@ -86,7 +87,7 @@ class MetallurgicalPlant(Processor):
             "cumulative_milled_mass", initial_value=0.0
         )
         self.active_operating_mode = drs.Variable(
-            "active_operating_mode", MODES["MODE_A"]
+            "active_operating_mode", MILL_MODES["MODE_A"]
         )
         self.current_contingency_duration = drs.Timer(
             "current_contingency_duration", initial_value=0.0
@@ -195,7 +196,7 @@ class MetallurgicalPlant(Processor):
     ) -> OperatingMode:
         c_name = campaign_mode.name
         if c_name == "SHUTDOWN":
-            return MODES["SHUTDOWN"]
+            return MILL_MODES["SHUTDOWN"]
 
         current_name = self.active_operating_mode.value.name
         eps = 1e-9
@@ -204,41 +205,41 @@ class MetallurgicalPlant(Processor):
         if not current_name.startswith(c_name):
             current_name = c_name
             if total_stock > self.target_ore_stock_level + 1e-6:
-                return MODES[c_name + "_MINE_SURGING"]
-            return MODES[c_name]
+                return MILL_MODES[c_name + "_MINE_SURGING"]
+            return MILL_MODES[c_name]
 
         if "_CONTINGENCY" in current_name:
             if self._contingency_complete():
                 self.current_contingency_duration.reset()
-                return MODES[c_name]
+                return MILL_MODES[c_name]
             if c_name == "MODE_A" and ore1 <= eps:
-                return MODES["MODE_A_MINE_SURGING"]
+                return MILL_MODES["MODE_A_MINE_SURGING"]
             if c_name == "MODE_B" and ore2 <= eps:
-                return MODES["MODE_B_MINE_SURGING"]
-            return MODES[current_name]
+                return MILL_MODES["MODE_B_MINE_SURGING"]
+            return MILL_MODES[current_name]
 
         if "_MINE_SURGING" in current_name:
             if total_stock <= self.target_ore_stock_level + 1e-6:
-                return MODES[c_name]
-            return MODES[current_name]
+                return MILL_MODES[c_name]
+            return MILL_MODES[current_name]
 
         if c_name == "MODE_A":
             if ore1 <= eps:
-                return MODES["MODE_A_MINE_SURGING"]
+                return MILL_MODES["MODE_A_MINE_SURGING"]
             if ore2 <= eps:
                 self.current_contingency_duration.reset()
-                return MODES["MODE_A_CONTINGENCY"]
-            return MODES["MODE_A"]
+                return MILL_MODES["MODE_A_CONTINGENCY"]
+            return MILL_MODES["MODE_A"]
 
         if c_name == "MODE_B":
             if ore1 <= eps:
                 self.current_contingency_duration.reset()
-                return MODES["MODE_B_CONTINGENCY"]
+                return MILL_MODES["MODE_B_CONTINGENCY"]
             if ore2 <= eps:
-                return MODES["MODE_B_MINE_SURGING"]
-            return MODES["MODE_B"]
+                return MILL_MODES["MODE_B_MINE_SURGING"]
+            return MILL_MODES["MODE_B"]
 
-        return MODES[c_name]
+        return MILL_MODES[c_name]
 
 
     def _contingency_complete(self) -> bool:

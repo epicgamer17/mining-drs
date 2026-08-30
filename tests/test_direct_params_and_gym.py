@@ -7,6 +7,7 @@ from drs_mining.components import (
 )
 from drs_mining.rl.environments import MiningRLEnv
 import gymnasium as gym
+import json
 import os
 
 
@@ -40,16 +41,26 @@ def test_direct_parameter_instantiation():
     assert fleet_controller.total_lhd_count == 4.0
 
 
-def test_topology_dict_loading():
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    flat_path = os.path.join(root_dir, "drs_topology_flat.json")
-    tree_path = os.path.join(root_dir, "drs_topology_tree.json")
+def test_topology_dict_loading(tmp_path):
+    flat_data = [{"road_id": 1, "length": 100.0}]
+    tree_data = {"segments": [{"road_id": 1, "length": 100.0}]}
 
-    flat_dict = load_topology_dict(flat_path)
-    assert isinstance(flat_dict, list)
+    # Test direct list and dict
+    assert isinstance(load_topology_dict(flat_data), list)
+    assert isinstance(load_topology_dict(tree_data), dict)
 
-    tree_dict = load_topology_dict(tree_path)
-    assert isinstance(tree_dict, dict)
+    # Test JSON string
+    assert isinstance(load_topology_dict(json.dumps(flat_data)), list)
+    assert isinstance(load_topology_dict(json.dumps(tree_data)), dict)
+
+    # Test file paths
+    flat_file = tmp_path / "flat.json"
+    flat_file.write_text(json.dumps(flat_data))
+    assert isinstance(load_topology_dict(str(flat_file)), list)
+
+    tree_file = tmp_path / "tree.json"
+    tree_file.write_text(json.dumps(tree_data))
+    assert isinstance(load_topology_dict(str(tree_file)), dict)
 
 
 def test_gym_make_environment():

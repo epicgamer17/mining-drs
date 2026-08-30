@@ -20,7 +20,7 @@ from drs_mining.components import (
     Stockpile,
     StochasticFaciesGenerator,
 )
-from drs_mining.components.modes import MODES
+from drs_mining.config import MILL_MODES
 from drs_mining.components.plot import (
     plot_single_face_dashboard,
     prepare_history,
@@ -315,7 +315,7 @@ if __name__ == "__main__":
     )
     mine, fleet, plant, mode_ctrl, fleet_ctrl, ore1_stock, ore2_stock = network
 
-    mode_ctrl.active_campaign_mode.value = MODES["MODE_A"]
+    mode_ctrl.active_campaign_mode.value = MILL_MODES["MODE_A"]
 
     engine = DRSEngine()
     _register_and_policy(engine, network)

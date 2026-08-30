@@ -2,7 +2,7 @@ import math
 import pytest
 import pandas as pd
 
-from drs_mining.components.modes import MODES
+from drs_mining.config import MILL_MODES
 from examples.shelswell_blending.simulation import (
     ShelswellBlendingHaulage,
     TruckPhase,
@@ -47,14 +47,14 @@ def test_daily_target_setting_by_mode():
     assert sim.daily_target_waste == 500.0
 
     # Switch to Mode B
-    sim.mode_controller.active_campaign_mode.value = MODES["MODE_B"]
+    sim.mode_controller.active_campaign_mode.value = MILL_MODES["MODE_B"]
     sim._update_operating_mode_and_targets()
     assert sim.daily_target_ore1 == 4600.0
     assert sim.daily_target_ore2 == 800.0
     assert sim.daily_target_waste == 500.0
 
     # Switch to Shutdown
-    sim.mode_controller.active_campaign_mode.value = MODES["SHUTDOWN"]
+    sim.mode_controller.active_campaign_mode.value = MILL_MODES["SHUTDOWN"]
     sim._update_operating_mode_and_targets()
     assert sim.daily_target_ore1 == 0.0
     assert sim.daily_target_ore2 == 0.0

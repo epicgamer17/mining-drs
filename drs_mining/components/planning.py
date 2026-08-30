@@ -1,16 +1,9 @@
 """Strategic and tactical planning components for mining operations."""
 
 from dataclasses import dataclass
-from enum import Enum, auto
 from typing import Optional, Sequence
-
-
-class MiningPriority(Enum):
-    """Monthly mine-level priority selected by the tactical controller."""
-
-    PRODUCTION = auto()
-    BALANCED = auto()
-    DEVELOPMENT = auto()
+from drs_mining.components.modes import OperatingMode
+from drs_mining.config.modes import FLEET_MODES
 
 
 @dataclass(frozen=True)
@@ -71,22 +64,19 @@ def trajectory_progress_ratio(
     return max(0.0, actual) / expected
 
 
-def select_mining_priority(
+def select_fleet_mode(
     development_ratio: float,
     ore1_ratio: float,
     ore2_ratio: float,
     tolerance: float = 0.90,
     area2_readiness_trajectory_ratio: float = 1.0,
-) -> MiningPriority:
-    """Rule-based monthly tactical review; no optimization is performed.
+) -> OperatingMode:
+    """Rule-based monthly tactical review selecting the active Fleet OperatingMode.
 
     - If all strategic trajectories are within tolerance, remain BALANCED.
     - Otherwise prioritize the most delayed commitment.
-    - Ore 1 and Ore 2 deficits both map to PRODUCTION priority.
-    - Annual development or Area 2 readiness schedule deficits map to DEVELOPMENT.
-
-    The selected priority can be used by tactical controllers to adjust
-    development allocation or reserve production resources.
+    - Ore 1 and Ore 2 deficits both map to PRODUCTION mode.
+    - Annual development or Area 2 readiness schedule deficits map to DEVELOPMENT mode.
     """
     tolerance = max(0.0, min(1.0, tolerance))
     development_schedule_ratio = min(
@@ -94,13 +84,15 @@ def select_mining_priority(
         area2_readiness_trajectory_ratio,
     )
     deficits = {
-        MiningPriority.DEVELOPMENT: max(0.0, 1.0 - development_schedule_ratio),
-        MiningPriority.PRODUCTION: max(
+        FLEET_MODES["DEVELOPMENT"]: max(0.0, 1.0 - development_schedule_ratio),
+        FLEET_MODES["PRODUCTION"]: max(
             0.0, 1.0 - min(ore1_ratio, ore2_ratio)
         ),
     }
 
-    largest_priority, largest_deficit = max(deficits.items(), key=lambda item: item[1])
+    largest_mode, largest_deficit = max(deficits.items(), key=lambda item: item[1])
     if largest_deficit <= (1.0 - tolerance):
-        return MiningPriority.BALANCED
-    return largest_priority
+        return FLEET_MODES["BALANCED"]
+    return largest_mode
+
+

@@ -1,8 +1,9 @@
 import math
 from typing import List, Dict, Mapping, Sequence, Optional, Union, Tuple
 import drs
-from .modes import MODES, OperatingMode, RequireDecision
+from .modes import OperatingMode, RequireDecision
 from .mine_face import MineFace
+from drs_mining.config.modes import MILL_MODES
 
 
 class OperatingModeController(drs.Module):
@@ -15,7 +16,7 @@ class OperatingModeController(drs.Module):
         critical_ore2_level: float,
         target_ore_stock_level: float = 60000.0,
         total_ore_to_extract: float = 6600000.0,
-        initial_mode: OperatingMode = MODES["MODE_A"],
+        initial_mode: OperatingMode = MILL_MODES["MODE_A"],
     ):
         super().__init__()
         self.duration_of_production_campaigns = duration_of_production_campaigns
@@ -46,10 +47,10 @@ class OperatingModeController(drs.Module):
                     self.current_campaign_duration.reset()
                     self.pending_rl_action = None
                     action_modes = [
-                        MODES["MODE_A"],
-                        MODES["MODE_B"],
-                        MODES["MODE_A_MINE_SURGING"],
-                        MODES["MODE_B_MINE_SURGING"],
+                        MILL_MODES["MODE_A"],
+                        MILL_MODES["MODE_B"],
+                        MILL_MODES["MODE_A_MINE_SURGING"],
+                        MILL_MODES["MODE_B_MINE_SURGING"],
                     ]
                     next_mode = action_modes[rl_action]
                     self.active_campaign_mode.value = next_mode
@@ -66,7 +67,7 @@ class OperatingModeController(drs.Module):
                 self.active_campaign_mode.value = next_mode
             else:
                 self.current_campaign_duration.reset()
-                self.active_campaign_mode.value = MODES["SHUTDOWN"]
+                self.active_campaign_mode.value = MILL_MODES["SHUTDOWN"]
 
         active_name = self.active_campaign_mode.value.name
         self._update_campaign_timers(active_name)
@@ -76,8 +77,8 @@ class OperatingModeController(drs.Module):
         self, ore2_stock_level: float, total_stock_level: Optional[float] = None
     ) -> OperatingMode:
         if ore2_stock_level > self.critical_ore2_level:
-            return MODES["MODE_A"]
-        return MODES["MODE_B"]
+            return MILL_MODES["MODE_A"]
+        return MILL_MODES["MODE_B"]
 
     def _campaign_complete(self) -> bool:
         threshold = (
