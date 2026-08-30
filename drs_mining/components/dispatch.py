@@ -16,7 +16,7 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 from .fleet import Truck, TruckState
 from .bays import LoadingBay
 from .topology import RoadSegment
-from .stope import StopeFace, StopeState
+from .mine_face import MineFace, FaceState, StopeState
 
 
 class ShelswellDispatchController:
@@ -91,7 +91,7 @@ class TwoTierHierarchicalDispatchController:
 
     def __init__(
         self,
-        stopes: Sequence[StopeFace],
+        stopes: Sequence[MineFace],
         target_daily_ore_tonnes: float = 6000.0,
         target_stockpile_buffer_tonnes: float = 60000.0,
         seed: int = 42,
@@ -112,7 +112,7 @@ class TwoTierHierarchicalDispatchController:
         area2_locked: bool = False,
         lhd_queues: Optional[Mapping[int, int]] = None,
         target_daily_ore_tonnes: Optional[float] = None,
-    ) -> Optional[Tuple[StopeFace, bool]]:
+    ) -> Optional[Tuple[MineFace, bool]]:
         """Selects the optimal stope for a haul truck.
 
         Returns:

@@ -44,11 +44,27 @@ from drs.plot import (
     plot_dual_axis_step,
     plot_safety_margin,
 )
-from drs_mining.config import MILL_MODES
-from drs_mining.components.modes import OperatingMode
-from drs_mining.components.plant import MetallurgicalPlant, PlantDrawRates
-from drs_mining.components.stockpiles import Stockpile
-from drs_mining.components.controllers import OperatingModeController
+from drs_mining.config import (
+    MILL_MODES,
+    CalendarConfig,
+    TopologyConfig,
+    HaulageFleetConfig,
+    PlantConfig,
+    GeologyConfig,
+    SimulationConfig,
+)
+from drs_mining.components import (
+    OperatingMode,
+    MetallurgicalPlant,
+    PlantDrawRates,
+    Stockpile,
+    OperatingModeController,
+    TruckPhase,
+    Operator,
+    OPERATING_PHASES,
+    SEAT_PHASES,
+    DUE_PHASES,
+)
 from drs_mining.components.plot import (
     MODE_PALETTE,
     prepare_history,
@@ -63,66 +79,44 @@ from drs_mining.components.plot import (
     print_deficit_by_mode,
 )
 
-
 # ---------------------------------------------------------------------------
-# Constants & Physical Parameters (Shelswell 2017 & Blending Modes)
+# Centralized Config Constants
 # ---------------------------------------------------------------------------
-DAYS_IN_YEAR = 365.0
+_CFG = SimulationConfig()
+DAYS_IN_YEAR = _CFG.calendar.days_in_year
+NON_PRODUCTION_DAYS = _CFG.calendar.non_production_days
+SHIFT_SECONDS = _CFG.calendar.shift_seconds
+SHIFT_WORK_HOURS = _CFG.calendar.shift_work_hours
+HAULAGE_SEAT_FRACTION = _CFG.calendar.haulage_seat_fraction
+SEAT_PER_SHIFT_SEC = _CFG.calendar.seat_per_shift_sec
 
-# NOTE: Statutory non-production holidays (NON_PRODUCTION_DAYS = 11 in Shelswell 2017)
-# have been disabled (set to 0) in this blending baseline. In the original Shelswell DES,
-# 11 unworked holidays cause the surface stockpile to absorb 1-day continuous mill draws
-# (dipping by 5.4k-6.0k t per holiday). Disabling holidays ensures uninterrupted fleet supply,
-# keeping the total stockpile tightly centered at the target 60,000 t buffer matching
-# blending_modes/simulation.py and shelswell_single_face/simulation.py.
-NON_PRODUCTION_DAYS = 0
-
-SHIFT_SECONDS = 12.0 * 3600.0  # 12 h calendar slot per shift
-SHIFT_WORK_HOURS = 10.5  # 10.5 h shift duration
-HAULAGE_SEAT_FRACTION = 0.5417  # 54.17 % workable seat availability
-SEAT_PER_SHIFT_SEC = HAULAGE_SEAT_FRACTION * SHIFT_SECONDS  # ~6.5 h
-
-# Mine Geometry
-DECLINE_M = 2100.0
-LEVEL_SPACING_M = 300.0
-ORE_LEVEL_DRIFT_M = 60.0  # 40 m loadout + 20 m air door
-WASTE_LEVEL_DRIFT_M = 75.0  # 55 m loadout + 20 m air door
-ROM_SURFACE_M = 300.0  # ROM pads from portal
-WASTE_SURFACE_M = 440.0  # Waste dump from portal
+DECLINE_M = _CFG.topology.decline_m
+LEVEL_SPACING_M = _CFG.topology.level_spacing_m
+ORE_LEVEL_DRIFT_M = _CFG.topology.level_drift_m
+WASTE_LEVEL_DRIFT_M = 75.0
+ROM_SURFACE_M = _CFG.topology.surface_m
+WASTE_SURFACE_M = 440.0
 N_LEVELS = 7
+SPEEDS = _CFG.topology.speeds
 
-# Speeds (Table 1, kph)
-SPEEDS = {
-    "surface": {"empty": 17.4, "loaded": 13.4},
-    "decline": {"empty": 15.1, "loaded": 11.2},
-    "ramp": {"empty": 12.9, "loaded": 9.2},
-    "level": {"empty": 7.6, "loaded": 6.6},
-}
-
-# Payloads & Equipment Durations
-ORE_PAYLOAD = 26.1  # tonnes
-WASTE_PAYLOAD = 24.6  # tonnes
+ORE_PAYLOAD = _CFG.fleet.truck_payload
+WASTE_PAYLOAD = 24.6
 TRUCK_LOAD_SPOT_MIN = 0.82
 LHD_ACQUISITION_MAX_MIN = 3.0
 TRUCK_LOAD_DUR_MIN = 6.69
-DUMP_SPOT_MIN = 0.57
-DUMP_MIN = 0.88
+DUMP_SPOT_MIN = _CFG.fleet.dump_spot_min
+DUMP_MIN = _CFG.fleet.dump_dur_min
 
-# Surface Dump Tip Capacities
 ROM_TIP_SITES_ORE1 = 2
 ROM_TIP_SITES_ORE2 = 2
 WASTE_TIP_SITES = 2
 
-# Refuelling
-FUEL_BURN_PCT_PER_SEC = 100.0 / (7.5 * 3600.0)
-REFUEL_DUR_MIN = 25.0
-N_FUEL_PUMPS = 2
-
-# Traffic Congestion Delays
-BASE_PASS_BAY_DELAY_SEC = 13.0
-PER_TRUCK_PASS_BAY_DELAY_SEC = 1.0
-
-DT_MAX = 900.0  # max engine drift step (sec)
+FUEL_BURN_PCT_PER_SEC = _CFG.fleet.fuel_burn_pct_per_sec
+REFUEL_DUR_MIN = _CFG.fleet.refuel_dur_min
+N_FUEL_PUMPS = _CFG.fleet.num_fuel_pumps
+BASE_PASS_BAY_DELAY_SEC = _CFG.fleet.base_pass_bay_delay_sec
+PER_TRUCK_PASS_BAY_DELAY_SEC = _CFG.fleet.per_truck_pass_bay_delay_sec
+DT_MAX = _CFG.dt_max
 
 
 # ---------------------------------------------------------------------------
@@ -144,50 +138,6 @@ def _in_shift_window(t: float) -> bool:
 # ---------------------------------------------------------------------------
 # Discrete State Entities
 # ---------------------------------------------------------------------------
-class TruckPhase(Enum):
-    IDLE = "idle"  # parked on surface, awaiting dispatch or shift
-    EMPTY = "empty"  # empty travel surface -> underground loadout
-    WAIT_LOAD = "wait_load"  # queued at level LHD
-    SPOT_LOAD = "spot_load"  # spotting at loadout bay
-    ACQUIRE = "acquire"  # waiting for LHD
-    LOADING = "loading"  # active loading
-    LOADED = "loaded"  # loaded travel level -> surface tip
-    WAIT_DUMP = "wait_dump"  # queued at surface dump station
-    DUMPING = "dumping"  # active dumping into stockpile
-    REFUELING = "refueling"  # fuel depot
-
-
-OPERATING_PHASES = {
-    TruckPhase.EMPTY,
-    TruckPhase.WAIT_LOAD,
-    TruckPhase.SPOT_LOAD,
-    TruckPhase.ACQUIRE,
-    TruckPhase.LOADING,
-    TruckPhase.LOADED,
-    TruckPhase.WAIT_DUMP,
-    TruckPhase.DUMPING,
-}
-
-SEAT_PHASES = OPERATING_PHASES | {TruckPhase.REFUELING}
-
-DUE_PHASES = {
-    TruckPhase.EMPTY,
-    TruckPhase.SPOT_LOAD,
-    TruckPhase.ACQUIRE,
-    TruckPhase.LOADING,
-    TruckPhase.LOADED,
-    TruckPhase.DUMPING,
-    TruckPhase.REFUELING,
-}
-
-
-@dataclass
-class Operator:
-    idx: int
-    free: bool = True
-    used_seat: float = 0.0
-
-
 @dataclass
 class Truck:
     truck_id: str

@@ -220,21 +220,44 @@ def plot_normalized_deviation_violin(
     return ax
 
 
+def _resolve_extraction_series(df: pd.DataFrame, extraction_col: Any) -> pd.Series:
+    """Helper to safely extract step-by-step mined mass series from a dataframe."""
+    if isinstance(extraction_col, (list, tuple)):
+        valid = [c for c in extraction_col if c in df.columns]
+        if valid:
+            return df[valid].sum(axis=1).diff().shift(-1).fillna(0)
+    elif extraction_col in df.columns:
+        return df[extraction_col].diff().shift(-1).fillna(0)
+
+    for candidate in ["total_mined", "total_extracted_ore", "cumulative_extracted_mass", "cumulative_milled_mass"]:
+        if candidate in df.columns:
+            return df[candidate].diff().shift(-1).fillna(0)
+
+    candidates = [c for c in df.columns if "extracted_mass" in c or "mined" in c]
+    if candidates:
+        return df[candidates].sum(axis=1).diff().shift(-1).fillna(0)
+
+    return pd.Series(0.0, index=df.index)
+
+
 def plot_attributed_deficit(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass",
                             ideal_rate_per_day=6000.0, title="Cumulative Production Deficit by Mode", ax=None, palette=None):
     ax = _get_ax(ax, figsize=(12, 6))
 
-    dt = df[time_col].diff().shift(-1).fillna(0)
-    actual_extraction_step = df[extraction_col].diff().shift(-1).fillna(0)
+    dt = df[time_col].diff().shift(-1).fillna(0) if time_col in df.columns else df.get("day", pd.Series(0, index=df.index)).diff().shift(-1).fillna(0)
+    actual_extraction_step = _resolve_extraction_series(df, extraction_col)
 
     ideal_extraction_step = dt * ideal_rate_per_day
     step_deficit = ideal_extraction_step - actual_extraction_step
 
     step_deficit = step_deficit.clip(lower=0)
 
+    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
+    time_col_name = time_col if time_col in df.columns else "day"
+
     deficit_df = pd.DataFrame({
-        'time': df[time_col],
-        'mode': df[mode_col].astype(str),
+        'time': df[time_col_name],
+        'mode': df[mode_col_name].astype(str),
         'deficit': step_deficit
     })
 
@@ -253,17 +276,29 @@ def plot_attributed_deficit(df, time_col="time", mode_col="active_operating_mode
     palette = palette or {}
     colors = []
     for idx, c in enumerate(cols):
-        mode_name = str(c).split('.')[-1].upper()
-        if mode_name in palette:
-            colors.append(palette[mode_name])
+        clean_c = str(c).split('.')[-1].upper()
+        if clean_c in palette:
+            colors.append(palette[clean_c])
+        elif clean_c == "MODE_A_CONTINGENCY":
+            colors.append("gold")
+        elif clean_c == "MODE_B_CONTINGENCY":
+            colors.append("cyan")
+        elif clean_c == "SHUTDOWN":
+            colors.append("gray")
         else:
             colors.append(cmap(idx % 10))
 
     cumulative_pivot[cols].plot.area(ax=ax, alpha=0.8, linewidth=0, color=colors)
 
     ax.set_title(title, fontsize=14, pad=15)
-    ax.set_xlabel("Simulation Time (Days)")
-    ax.set_ylabel("Cumulative Lost Tonnage")
+    ax.set_xlabel("Simulation Time (Days)", fontsize=12)
+    ax.set_ylabel("Cumulative Lost Production (Tons)", fontsize=12)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+
+    total_lost = cumulative_pivot.iloc[-1].sum() if not cumulative_pivot.empty else 0
+    ax.text(0.02, 0.95, f"Total Lost: {total_lost:,.0f} tons",
+            transform=ax.transAxes, fontsize=12, fontweight='bold',
+            ha='left', va='top', bbox=dict(facecolor='white', alpha=0.8))
 
     handles, labels = ax.get_legend_handles_labels()
     clean_labels = [str(l).split('.')[-1] for l in labels]
@@ -276,14 +311,16 @@ def plot_deficit_disparity(df, time_col="time", mode_col="active_operating_mode"
     ax = _get_ax(ax, figsize=(10, 6))
 
     df = df.copy()
-    df[mode_col] = df[mode_col].astype(str)
-    df['dt'] = df[time_col].diff().shift(-1).fillna(0)
-    df['dx'] = df[extraction_col].diff().shift(-1).fillna(0)
+    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
+    time_col_name = time_col if time_col in df.columns else "day"
+    df[mode_col_name] = df[mode_col_name].astype(str)
+    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
+    df['dx'] = _resolve_extraction_series(df, extraction_col)
 
     df['ideal_dx'] = df['dt'] * ideal_rate
     df['deficit'] = (df['ideal_dx'] - df['dx']).clip(lower=0)
 
-    summary = df.groupby(mode_col).agg({'dt': 'sum', 'deficit': 'sum'})
+    summary = df.groupby(mode_col_name).agg({'dt': 'sum', 'deficit': 'sum'})
 
     summary['% of Total Time'] = (summary['dt'] / summary['dt'].sum()) * 100
     summary['% of Total Deficit'] = (summary['deficit'] / summary['deficit'].sum()) * 100
@@ -294,12 +331,12 @@ def plot_deficit_disparity(df, time_col="time", mode_col="active_operating_mode"
         print("-" * (8 + len(title)))
 
     melted = summary[['% of Total Time', '% of Total Deficit']].reset_index().melt(
-        id_vars=mode_col, var_name="Metric", value_name="Percentage"
+        id_vars=mode_col_name, var_name="Metric", value_name="Percentage"
     )
 
     order = summary.sort_values('% of Total Deficit', ascending=False).index
 
-    sns.barplot(data=melted, y=mode_col, x="Percentage", hue="Metric", order=order, palette=["#1f77b4", "#d62728"], ax=ax)
+    sns.barplot(data=melted, y=mode_col_name, x="Percentage", hue="Metric", order=order, palette=["#1f77b4", "#d62728"], ax=ax)
 
     ax.set_title(title, fontsize=14, pad=15)
     ax.set_xlabel("Percentage (%)", fontsize=12)
@@ -313,10 +350,12 @@ def plot_deficit_breakdown_bar(df, time_col="time", mode_col="active_operating_m
     ax = _get_ax(ax, figsize=(10, 6))
 
     df = df.copy()
-    df['dt'] = df[time_col].diff().shift(-1).fillna(0)
-    df['dx'] = df[extraction_col].diff().shift(-1).fillna(0)
+    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
+    time_col_name = time_col if time_col in df.columns else "day"
+    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
+    df['dx'] = _resolve_extraction_series(df, extraction_col)
     df['deficit'] = ((df['dt'] * ideal_rate_per_day) - df['dx']).clip(lower=0)
-    df['mode_str'] = df[mode_col].astype(str).apply(lambda x: x.split('.')[-1])
+    df['mode_str'] = df[mode_col_name].astype(str).apply(lambda x: x.split('.')[-1])
 
     summary = df.groupby('mode_str')['deficit'].sum()
     summary = summary[summary > 0].sort_values(ascending=True)
@@ -362,10 +401,12 @@ def plot_structural_vs_operational_deficit(df, time_col="time", mode_col="active
     ax = _get_ax(ax, figsize=(10, 6))
 
     df = df.copy()
-    df['dt'] = df[time_col].diff().shift(-1).fillna(0)
-    df['dx'] = df[extraction_col].diff().shift(-1).fillna(0)
+    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
+    time_col_name = time_col if time_col in df.columns else "day"
+    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
+    df['dx'] = _resolve_extraction_series(df, extraction_col)
     df['deficit'] = ((df['dt'] * ideal_rate) - df['dx']).clip(lower=0)
-    df['mode_str'] = df[mode_col].astype(str)
+    df['mode_str'] = df[mode_col_name].astype(str)
 
     structural_modes = structural_modes or []
 
@@ -377,7 +418,7 @@ def plot_structural_vs_operational_deficit(df, time_col="time", mode_col="active
 
     df['Deficit_Type'] = df['mode_str'].apply(classify_bucket)
 
-    pivot = df.pivot_table(index=time_col, columns='Deficit_Type', values='deficit', aggfunc='sum').fillna(0)
+    pivot = df.pivot_table(index=time_col_name, columns='Deficit_Type', values='deficit', aggfunc='sum').fillna(0)
     cumsum_pivot = pivot.cumsum()
 
     if verbose:
@@ -407,12 +448,14 @@ def plot_normalized_cumulative_deficit(df, time_col="time", mode_col="active_ope
     ax = _get_ax(ax, figsize=(12, 6))
 
     df = df.copy()
-    df['dt'] = df[time_col].diff().shift(-1).fillna(0)
-    df['dx'] = df[extraction_col].diff().shift(-1).fillna(0)
+    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
+    time_col_name = time_col if time_col in df.columns else "day"
+    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
+    df['dx'] = _resolve_extraction_series(df, extraction_col)
     df['deficit'] = ((df['dt'] * ideal_rate_per_day) - df['dx']).clip(lower=0)
-    df['mode_str'] = df[mode_col].astype(str).apply(lambda x: x.split('.')[-1])
+    df['mode_str'] = df[mode_col_name].astype(str).apply(lambda x: x.split('.')[-1])
 
-    pivot_df = df.pivot_table(index=time_col, columns='mode_str', values='deficit', aggfunc='sum').fillna(0)
+    pivot_df = df.pivot_table(index=time_col_name, columns='mode_str', values='deficit', aggfunc='sum').fillna(0)
     cumulative_pivot = pivot_df.cumsum()
 
     row_sums = cumulative_pivot.sum(axis=1)
@@ -442,10 +485,12 @@ def plot_structural_vs_operational_by_mode(df, time_col="time", mode_col="active
     ax = _get_ax(ax, figsize=(10, 6))
 
     df = df.copy()
-    df['dt'] = df[time_col].diff().shift(-1).fillna(0)
-    df['dx'] = df[extraction_col].diff().shift(-1).fillna(0)
+    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
+    time_col_name = time_col if time_col in df.columns else "day"
+    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
+    df['dx'] = _resolve_extraction_series(df, extraction_col)
     df['deficit'] = ((df['dt'] * ideal_rate) - df['dx']).clip(lower=0)
-    df['mode_str'] = df[mode_col].astype(str).apply(lambda x: x.split('.')[-1])
+    df['mode_str'] = df[mode_col_name].astype(str).apply(lambda x: x.split('.')[-1])
 
     structural_modes = structural_modes or []
 
@@ -808,8 +853,10 @@ def print_transition_log(
         print(
             f"  \u21b3 Ore1 Stock: {row['Ore1Stock_mass']:.1f} | Ore2 Stock: {row['Ore2Stock_mass']:.1f} (Critical: {critical_ore2_level}) | Total Stock: {row['total_system_ore_mass']:.1f} (Target: {target_ore_stock_level})"
         )
+        camp_dur = row.get("current_campaign_duration", 0.0)
+        cont_dur = row.get("current_contingency_duration", 0.0)
         print(
-            f"  \u21b3 Campaign/Shutdown Timer: {row['current_campaign_duration']:.2f} | Contingency Timer: {row['current_contingency_duration']:.2f}"
+            f"  \u21b3 Campaign/Shutdown Timer: {camp_dur:.2f} | Contingency Timer: {cont_dur:.2f}"
         )
     print("---------------------------\n")
 
@@ -826,13 +873,27 @@ def print_deficit_by_mode(
     single-face history uses ``["cumulative_extracted_mass"]`` while the
     multi-face history uses ``["face1_extracted_mass", "face2_extracted_mass"]``.
     """
-    dt = df["time"].diff().fillna(0)
-    actual_extraction_step = df[extraction_cols].sum(axis=1).diff().fillna(0)
+    dt = df["time"].diff().fillna(0) if "time" in df.columns else df.get("day", pd.Series(0, index=df.index)).diff().fillna(0)
+    valid_cols = [c for c in extraction_cols if c in df.columns]
+    if not valid_cols:
+        for candidate in ["total_mined", "total_extracted_ore", "cumulative_extracted_mass", "cumulative_milled_mass"]:
+            if candidate in df.columns:
+                valid_cols = [candidate]
+                break
+        if not valid_cols:
+            valid_cols = [c for c in df.columns if "extracted_mass" in c or "mined" in c]
+
+    if valid_cols:
+        actual_extraction_step = df[valid_cols].sum(axis=1).diff().fillna(0)
+    else:
+        actual_extraction_step = pd.Series(0.0, index=df.index)
+
     ideal_extraction_step = dt * ideal_rate
     step_deficit = (ideal_extraction_step - actual_extraction_step).clip(lower=0)
 
+    mode_col = "active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode"
     deficit_df = pd.DataFrame(
-        {"mode": df["active_operating_mode_name"], "deficit": step_deficit}
+        {"mode": df[mode_col], "deficit": step_deficit}
     )
 
     total_deficit_by_mode = (
@@ -1241,3 +1302,131 @@ def plot_multi_face_dashboard(
     dash.save(f"{save_dir}/Comprehensive_Diagnostics_Plot_{prefix}.png")
     plt.close(dash.fig)
     return df
+
+
+def print_strategic_economic_summary(
+    with_df: pd.DataFrame, without_df: Optional[pd.DataFrame] = None
+):
+    """Prints comprehensive whole-mine economic results and incremental NPV."""
+    final_with = with_df.iloc[-1]
+    npv_with = float(final_with.get("cumulative_npv", final_with.get("operating_npv_proxy", 0.0)))
+    cf_with = float(final_with.get("cumulative_cash_flow", 0.0))
+    milled_with = float(final_with.get("total_processed", final_with.get("cumulative_milled_mass", 0.0)))
+    dev_with = float(final_with.get("cumulative_development", final_with.get("cumulative_mine_development", 0.0)))
+
+    print("\n" + "=" * 80)
+    print(" STRATEGIC ECONOMICS & INCREMENTAL NPV SUMMARY")
+    print("=" * 80)
+    print(f"WITH Area 2 (Base Case):")
+    print(f"  Total Ore Milled:            {milled_with:,.1f} t")
+    print(f"  Total Mine Development:      {dev_with:,.1f} metres")
+    print(f"  Cumulative Undiscounted CF:  ${cf_with:,.2f}")
+    print(f"  Operating Net Present Value: ${npv_with:,.2f}")
+
+    if without_df is not None and not without_df.empty:
+        final_without = without_df.iloc[-1]
+        npv_without = float(final_without.get("cumulative_npv", final_without.get("operating_npv_proxy", 0.0)))
+        cf_without = float(final_without.get("cumulative_cash_flow", 0.0))
+        milled_without = float(final_without.get("total_processed", final_without.get("cumulative_milled_mass", 0.0)))
+        dev_without = float(final_without.get("cumulative_development", final_without.get("cumulative_mine_development", 0.0)))
+        incremental_npv = npv_with - npv_without
+
+        print(f"\nWITHOUT Area 2 (Counterfactual):")
+        print(f"  Total Ore Milled:            {milled_without:,.1f} t")
+        print(f"  Total Mine Development:      {dev_without:,.1f} metres")
+        print(f"  Cumulative Undiscounted CF:  ${cf_without:,.2f}")
+        print(f"  Operating Net Present Value: ${npv_without:,.2f}")
+
+        print(f"\n--------------------------------------------------------------------------------")
+        print(f" >>> TRUE INCREMENTAL NPV OF AREA 2 CAPITAL PROJECT: ${incremental_npv:,.2f} <<<")
+        print(f"--------------------------------------------------------------------------------")
+    print("=" * 80 + "\n")
+
+
+def plot_two_area_dashboard(
+    df: pd.DataFrame,
+    output_path: str = "plots/two_area_dashboard.png",
+    title: str = "Two-Area Strategic Planning & Operations Dashboard",
+    palette: dict = None,
+    figsize: Tuple[int, int] = (16, 40),
+):
+    """Builds and saves the standardized multi-panel two-area diagnostics dashboard."""
+    import os
+    palette = palette or MODE_PALETTE
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    fig, axes = plt.subplots(6, 1, figsize=figsize, sharex=True)
+    time_col = "day" if "day" in df.columns else "time"
+
+    # 1. Stockpiles
+    ax = axes[0]
+    if "ore1_stockpile" in df.columns:
+        ax.plot(df[time_col], df["ore1_stockpile"], label="Ore 1 Stockpile (t)", color="#1976D2")
+        ax.plot(df[time_col], df["ore2_stockpile"], label="Ore 2 Stockpile (t)", color="#D32F2F")
+        ax.plot(df[time_col], df["total_stockpile"], label="Total Stockpile (t)", color="#388E3C", linestyle="--")
+    elif "Ore1Stock_mass" in df.columns:
+        ax.plot(df[time_col], df["Ore1Stock_mass"], label="Ore 1 Stockpile (t)", color="#1976D2")
+        ax.plot(df[time_col], df["Ore2Stock_mass"], label="Ore 2 Stockpile (t)", color="#D32F2F")
+        ax.plot(df[time_col], df["total_system_ore_mass"], label="Total Stockpile (t)", color="#388E3C", linestyle="--")
+    ax.axhline(60000.0, color="black", linestyle=":", label="Buffer Target (60kt)")
+    ax.set_ylabel("Stockpile Mass (t)")
+    ax.set_title(f"{title} - Surface Buffers")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    # 2. Cumulative Production
+    ax = axes[1]
+    o1_col = "ore1_mined" if "ore1_mined" in df.columns else "Ore1_Mined"
+    o2_col = "ore2_mined" if "ore2_mined" in df.columns else "Ore2_Mined"
+    if o1_col in df.columns:
+        ax.plot(df[time_col], df[o1_col] / 1000.0, label="Ore 1 Mined (kt)", color="#1976D2")
+    if o2_col in df.columns:
+        ax.plot(df[time_col], df[o2_col] / 1000.0, label="Ore 2 Mined (kt)", color="#D32F2F")
+    ax.set_ylabel("Cumulative Ore (kt)")
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3)
+
+    # 3. Capital Development & Readiness
+    ax = axes[2]
+    dev_col = "cumulative_development" if "cumulative_development" in df.columns else "cumulative_mine_development"
+    if dev_col in df.columns:
+        ax.plot(df[time_col], df[dev_col], label="Cumulative Development (m)", color="#7B1FA2")
+        ax.axhline(4000.0, color="red", linestyle="--", label="Area 2 Target (4,000 m)")
+    ax.set_ylabel("Development (m)")
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3)
+
+    # 4. Cash Flows & Economics
+    ax = axes[3]
+    npv_col = "cumulative_npv" if "cumulative_npv" in df.columns else "operating_npv_proxy"
+    cf_col = "cumulative_cash_flow" if "cumulative_cash_flow" in df.columns else "cumulative_cash_flow"
+    if npv_col in df.columns:
+        ax.plot(df[time_col], df[npv_col] / 1e6, label="Discounted NPV ($M, r=5%)", color="#2E7D32", linewidth=2)
+    if cf_col in df.columns:
+        ax.plot(df[time_col], df[cf_col] / 1e6, label="Undiscounted Cash Flow ($M)", color="#0288D1", linestyle="--")
+    ax.set_ylabel("Economics ($M)")
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3)
+
+    # 5. Fleet Operating vs Idle Trucks
+    ax = axes[4]
+    if "trucks_operating" in df.columns:
+        ax.plot(df[time_col], df["trucks_operating"], label="Operating Trucks", color="#F57C00")
+        ax.plot(df[time_col], df["trucks_idle"], label="Idle Trucks", color="#757575", linestyle=":")
+    ax.set_ylabel("Truck Count")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    # 6. Mode Distributions
+    ax = axes[5]
+    mode_col = "mill_mode" if "mill_mode" in df.columns else "active_operating_mode_name"
+    if mode_col in df.columns:
+        ax.plot(df[time_col], df[mode_col], label="Mill Operating Mode", color="#00796B", drawstyle="steps-post")
+    ax.set_xlabel("Time (Days)")
+    ax.set_ylabel("Mill Mode")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+

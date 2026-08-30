@@ -76,3 +76,41 @@ def test_operating_mode_separation_and_custom_creation():
     assert custom_mode.metadata["boost"] == 1.5
 
 
+def test_tactical_review_controller_lifecycle():
+    from drs_mining.components.planning import TacticalReviewController
+
+    targets = [
+        StrategicYearTarget(min_development=1000.0, min_ore1_production=50000.0, min_ore2_production=30000.0)
+    ]
+    controller = TacticalReviewController(
+        strategic_targets=targets,
+        tactical_review_period_days=30.0,
+        tactical_progress_tolerance=0.90,
+    )
+
+    assert not controller.planning_started
+    controller.start_planning(current_cumulative_dev=100.0)
+    assert controller.planning_started
+    assert controller.annual_development_start == 100.0
+
+    # Advance 15 days, on track
+    controller.tactical_review_timer.value = 30.0
+    controller.strategic_year_timer.value = 30.0
+    # Dev: 100 + 100 = 200m (expected = 1000 * 30/365 = 82.19m) -> ahead
+    controller.record_production(ore1_mass=5000.0, ore2_mass=3000.0)
+
+    mode = controller.update_review(current_cumulative_dev=200.0, total_trucks=10)
+    assert mode == FLEET_MODES["BALANCED"]
+    assert controller.development_priority_reserved_trucks.value == 0.0
+
+    # Simulate development lagging significantly while production is on track -> Triggers DEVELOPMENT mode
+    controller.record_production(ore1_mass=30000.0, ore2_mass=20000.0)
+    controller.tactical_review_timer.value = 30.0
+    controller.strategic_year_timer.value = 180.0
+    # Dev: only 250m after half a year (actual dev 150m vs expected ~493m)
+    mode_dev = controller.update_review(current_cumulative_dev=250.0, total_trucks=10)
+    assert mode_dev == FLEET_MODES["DEVELOPMENT"]
+    assert controller.development_priority_reserved_trucks.value == 2.0  # 20% of 10 trucks
+
+
+

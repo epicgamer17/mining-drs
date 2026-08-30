@@ -2,7 +2,7 @@
 
 import pytest
 from drs_mining.components.generators import StochasticFaciesGenerator
-from drs_mining.components.stope import StopeFace, StopeState
+from drs_mining.components.mine_face import MineFace as StopeFace, FaceState as StopeState
 from drs_mining.components.dispatch import TwoTierHierarchicalDispatchController
 
 

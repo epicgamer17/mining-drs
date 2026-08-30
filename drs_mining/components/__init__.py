@@ -7,13 +7,13 @@ from .fleet import (
     Truck,
     LHD,
 )
-from .topology import RoadSegment
+from .topology import RoadSegment, MineTopology, DEFAULT_SPEEDS
 from .bays import LoadingBay, DumpingBay
-from .mine_face import MineFace
+from .mine_face import MineFace, FaceState, StopeState, StopeParcel
 from .plant import MetallurgicalPlant, PlantDrawRates
 from .controllers import OperatingModeController, FleetController
 from .stockpiles import Stockpile
-from .dispatch import ShelswellDispatchController
+from .dispatch import ShelswellDispatchController, TwoTierHierarchicalDispatchController
 from .factories import (
     build_mining_simulation,
     create_blending_system,
@@ -29,16 +29,35 @@ from .planning import (
     strategic_target_for_year,
     trajectory_progress_ratio,
     select_fleet_mode,
+    TacticalReviewController,
 )
 from .allocation import (
     FaceAllocationResult,
     solve_face_allocation_rates,
 )
+from drs_mining.config.economics import EconomicParameters
+from .discrete_fleet import (
+    TruckPhase,
+    Operator,
+    DESTruck,
+    SurfaceDumpStation,
+    OPERATING_PHASES,
+    SEAT_PHASES,
+    DUE_PHASES,
+)
+from .simulation_base import TwoAreaSimulationBase, ORE_PAYLOAD
+
+# Alias for StopeFace
+StopeFace = MineFace
 
 __all__ = [
     "Storage",
     "Processor",
     "MineFace",
+    "FaceState",
+    "StopeFace",
+    "StopeState",
+    "StopeParcel",
     "MetallurgicalPlant",
     "PlantDrawRates",
     "OperatingModeController",
@@ -52,6 +71,8 @@ __all__ = [
     "create_truck_fleet",
     "create_lhd_fleet",
     "RoadSegment",
+    "MineTopology",
+    "DEFAULT_SPEEDS",
     "LoadingBay",
     "DumpingBay",
     "load_topology_dict",
@@ -65,8 +86,21 @@ __all__ = [
     "strategic_target_for_year",
     "trajectory_progress_ratio",
     "select_fleet_mode",
+    "TacticalReviewController",
+    "TwoTierHierarchicalDispatchController",
     "ContinuousFleetLogistics",
     "FaceAllocationResult",
     "solve_face_allocation_rates",
+    "EconomicParameters",
+    "TruckPhase",
+    "Operator",
+    "DESTruck",
+    "SurfaceDumpStation",
+    "OPERATING_PHASES",
+    "SEAT_PHASES",
+    "DUE_PHASES",
+    "TwoAreaSimulationBase",
+    "ORE_PAYLOAD",
 ]
+
 
