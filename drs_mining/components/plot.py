@@ -675,6 +675,102 @@ def plot_mode_dwell_times(
     return ax
 
 
+def plot_fleet_activity_distribution(
+    df,
+    time_col="time",
+    total_trucks: Optional[int] = None,
+    title="Haul Fleet Activity & Time Distribution",
+    ax=None,
+    verbose=True,
+):
+    """Plots horizontal bar chart of fleet activity distribution (% total fleet hours & mean trucks)."""
+    ax = _get_ax(ax, figsize=(10, 4.5))
+
+    df_sorted = df.copy()
+    dt = df_sorted[time_col].diff().shift(-1).fillna(0)
+    total_time = dt.sum()
+    if total_time <= 0:
+        total_time = 1.0
+
+    op1 = df_sorted.get("trucks_area1_operating", pd.Series(0, index=df_sorted.index))
+    op2 = df_sorted.get("trucks_area2_operating", pd.Series(0, index=df_sorted.index))
+    refuel = df_sorted.get("trucks_refueling", pd.Series(0, index=df_sorted.index))
+    dev = df_sorted.get("trucks_dev_reserved", pd.Series(0, index=df_sorted.index))
+    idle = df_sorted.get("trucks_idle", pd.Series(0, index=df_sorted.index))
+
+    if total_trucks is None:
+        total_trucks = int((op1 + op2 + refuel + idle).max()) if not df_sorted.empty else 18
+        if total_trucks <= 0:
+            total_trucks = 18
+
+    # Time-weighted average truck counts
+    mean_op1 = (op1 * dt).sum() / total_time
+    mean_op2 = (op2 * dt).sum() / total_time
+    mean_dev = (dev * dt).sum() / total_time
+    mean_refuel = (refuel * dt).sum() / total_time
+    mean_idle = (idle * dt).sum() / total_time
+
+    # Ensure sum does not exceed total_trucks
+    active_tot = mean_op1 + mean_op2 + mean_dev + mean_refuel
+    if mean_idle + active_tot > total_trucks + 0.1:
+        mean_idle = max(0.0, total_trucks - active_tot)
+
+    activities = {
+        "Area 1 Stope Ore Haulage": (mean_op1, "#1976D2"),
+        "Area 2 Stope Ore Haulage": (mean_op2, "#388E3C"),
+        "Mine Development Priority Fleet": (mean_dev, "#7B1FA2"),
+        "Refueling & Service": (mean_refuel, "#F57C00"),
+        "Idle / Standby (Buffer Pacing)": (mean_idle, "#78909C"),
+    }
+
+    # Convert to percentages
+    labels = []
+    pcts = []
+    colors = []
+    truck_counts = []
+
+    for name, (count, color) in activities.items():
+        pct = (count / max(1, total_trucks)) * 100.0
+        labels.append(name)
+        pcts.append(pct)
+        colors.append(color)
+        truck_counts.append(count)
+
+    # Invert so top activity appears at top of horizontal chart
+    labels.reverse()
+    pcts.reverse()
+    colors.reverse()
+    truck_counts.reverse()
+
+    bars = ax.barh(labels, pcts, color=colors, alpha=0.85, edgecolor="#212121", linewidth=0.8)
+
+    for bar, count, pct in zip(bars, truck_counts, pcts):
+        width = bar.get_width()
+        ax.text(
+            width + 0.8,
+            bar.get_y() + bar.get_height() / 2,
+            f"{pct:.1f}% ({count:.1f} trucks)",
+            va="center",
+            ha="left",
+            fontsize=10,
+            fontweight="bold",
+        )
+
+    ax.set_title(f"{title} (Fleet Size: {total_trucks} Trucks)", fontsize=13, pad=12)
+    ax.set_xlabel("% of Total Fleet Hours", fontsize=11)
+    ax.set_xlim(0, max(100.0, max(pcts) + 18.0) if pcts else 100.0)
+    ax.grid(axis="x", linestyle="--", alpha=0.5)
+
+    if verbose:
+        print(f"\n--- {title} ---")
+        for name, (count, _) in activities.items():
+            pct = (count / max(1, total_trucks)) * 100.0
+            print(f"{name}: {pct:.1f}% ({count:.2f} trucks)")
+        print("-" * (8 + len(title)))
+
+    return ax
+
+
 def plot_truck_idle_and_utilization(
     df,
     time_col: str = "time",
@@ -1623,7 +1719,7 @@ def plot_full_hierarchy_dashboard(
         sharex=False,
         title="Three-Level Strategic, Tactical & Analytical Blending Mining Benchmark",
     )
-    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
     # 0. Cumulative Operating NPV Comparison (Policy 2 vs Policy 1)
     ax0 = dash[0]
@@ -2585,67 +2681,19 @@ def plot_full_hierarchy_dashboard(
     dash[9].set_ylabel("Trajectory Ratio")
     dash[9].legend(loc="upper right")
 
-    # 10. Fleet Utilization & Idle Time: Policy 2
-    plot_truck_idle_and_utilization(
+    # 10. Fleet Activity Distribution: Policy 2
+    plot_fleet_activity_distribution(
         df_p2,
-        title="Policy 2: Haul Fleet Utilization & Idle Time Breakdown",
+        title="Fleet Activity Distribution (% Total Fleet Hours - Policy 2 Hierarchical Control)",
         ax=dash[10],
     )
-    if unlock_time_p2 is not None:
-        dash[10].axvline(
-            unlock_time_p2,
-            color="#2e7d32",
-            linestyle="-.",
-            linewidth=2.0,
-            alpha=0.85,
-        )
-    if deplete_time_p2 is not None:
-        dash[10].axvline(
-            deplete_time_p2,
-            color="#2e7d32",
-            linestyle="--",
-            linewidth=2.0,
-            alpha=0.85,
-        )
-    if deplete2_time_p2 is not None:
-        dash[10].axvline(
-            deplete2_time_p2,
-            color="#1b5e20",
-            linestyle="-.",
-            linewidth=2.0,
-            alpha=0.85,
-        )
 
-    # 11. Fleet Utilization & Idle Time: Policy 1
-    plot_truck_idle_and_utilization(
+    # 11. Fleet Activity Distribution: Policy 1
+    plot_fleet_activity_distribution(
         df_p1,
-        title="Policy 1: Haul Fleet Utilization & Idle Time Breakdown",
+        title="Fleet Activity Distribution (% Total Fleet Hours - Policy 1 Myopic Baseline)",
         ax=dash[11],
     )
-    if unlock_time_p1 is not None:
-        dash[11].axvline(
-            unlock_time_p1,
-            color="#c62828",
-            linestyle="-.",
-            linewidth=2.0,
-            alpha=0.85,
-        )
-    if deplete_time_p1 is not None:
-        dash[11].axvline(
-            deplete_time_p1,
-            color="#c62828",
-            linestyle="--",
-            linewidth=2.0,
-            alpha=0.85,
-        )
-    if deplete2_time_p1 is not None:
-        dash[11].axvline(
-            deplete2_time_p1,
-            color="#b71c1c",
-            linestyle="-.",
-            linewidth=2.0,
-            alpha=0.85,
-        )
 
     # 12. Mode Distribution: Policy 2
     plot_mode_distribution(
