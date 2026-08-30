@@ -680,36 +680,45 @@ def plot_truck_idle_and_utilization(
     time_col: str = "time",
     idle_col: str = "trucks_idle",
     operating_col: str = "trucks_operating",
+    area1_col: str = "trucks_area1_operating",
+    area2_col: str = "trucks_area2_operating",
     refueling_col: str = "trucks_refueling",
-    dev_col: Optional[str] = "development_priority_reserved_trucks",
+    dev_col: Optional[str] = "trucks_dev_reserved",
     total_trucks: Optional[int] = None,
     title: str = "Haul Fleet Utilization & Idle Time Breakdown",
     ax=None,
     verbose: bool = False,
 ):
-    """Plots stacked fleet status over time (Idle / Buffer Pacing vs Active Production vs Development vs Refueling)."""
+    """Plots stacked fleet status over time (Area 1 Production vs Area 2 Production vs Development vs Refueling vs Idle)."""
     ax = _get_ax(ax, figsize=(14, 5))
 
     t = df[time_col]
     op = df[operating_col] if operating_col in df.columns else pd.Series(0, index=df.index)
+    op1 = df[area1_col] if area1_col in df.columns else op
+    op2 = df[area2_col] if area2_col in df.columns else pd.Series(0, index=df.index)
     refuel = df[refueling_col] if refueling_col in df.columns else pd.Series(0, index=df.index)
     dev = df[dev_col] if (dev_col and dev_col in df.columns) else pd.Series(0, index=df.index)
     idle = df[idle_col] if idle_col in df.columns else pd.Series(0, index=df.index)
 
     if total_trucks is None:
-        total_trucks = int((op + refuel + idle).max()) if not df.empty else 18
+        total_trucks = int((op + dev + refuel + idle).max()) if not df.empty else 18
 
-    # Stacked layers
-    # Layer 1: Operating (Hauling Ore)
-    ax.fill_between(t, 0, op, label="Active Production Haulage", color="#2e7d32", alpha=0.75, step="post")
-    # Layer 2: Refueling
-    ax.fill_between(t, op, op + refuel, label="Refueling / Service", color="#f57c00", alpha=0.70, step="post")
-    # Layer 3: Dev Reserved (if tracked separately)
-    y_top = op + refuel
-    # Layer 4: Idle / Buffer Pacing
-    ax.fill_between(t, y_top, y_top + idle, label="Idle (Buffer Pacing / Standby)", color="#78909c", alpha=0.45, step="post")
+    # Stacked layers:
+    # Layer 1: Area 1 Production Haulage
+    ax.fill_between(t, 0, op1, label="Area 1 Production Haulage", color="#1976D2", alpha=0.75, step="post")
+    # Layer 2: Area 2 Production Haulage
+    ax.fill_between(t, op1, op1 + op2, label="Area 2 Production Haulage", color="#388E3C", alpha=0.75, step="post")
+    # Layer 3: Mine Development Priority (Reserved Fleet)
+    y_dev = op1 + op2
+    ax.fill_between(t, y_dev, y_dev + dev, label="Mine Development Priority Fleet", color="#7B1FA2", alpha=0.65, step="post")
+    # Layer 4: Refueling & Service
+    y_refuel = y_dev + dev
+    ax.fill_between(t, y_refuel, y_refuel + refuel, label="Refueling / Service", color="#F57C00", alpha=0.70, step="post")
+    # Layer 5: Idle & Standby (Buffer Pacing)
+    y_top = y_refuel + refuel
+    ax.fill_between(t, y_top, y_top + idle, label="Idle (Buffer Pacing / Standby)", color="#78909C", alpha=0.45, step="post")
 
-    ax.plot(t, op + refuel + idle, label=f"Total Fleet ({total_trucks} Trucks)", color="#212121", linewidth=1.5, linestyle=":")
+    ax.plot(t, op + dev + refuel + idle, label=f"Total Fleet ({total_trucks} Trucks)", color="#212121", linewidth=1.5, linestyle=":")
 
     mean_idle = idle.mean()
     mean_op = op.mean()
@@ -816,6 +825,23 @@ def prepare_history(df):
         df["campaign_cash_flow_rate"] = grouped.transform("mean")
         df["daily_cash_flow_min"] = grouped.transform("min")
         df["daily_cash_flow_max"] = grouped.transform("max")
+
+    # Fleet Area 1 / Area 2 breakdown fallback
+    if "trucks_area1_operating" not in df.columns or df["trucks_area1_operating"].isna().all():
+        if "trucks_operating_face1" in df.columns:
+            df["trucks_area1_operating"] = df["trucks_operating_face1"]
+            df["trucks_area2_operating"] = df.get("trucks_operating_face2", 0.0)
+        elif "trucks_operating" in df.columns:
+            if "analytical_face1_weight" in df.columns:
+                w1 = df["analytical_face1_weight"].clip(0.0, 1.0)
+                df["trucks_area1_operating"] = df["trucks_operating"] * w1
+                df["trucks_area2_operating"] = df["trucks_operating"] * (1.0 - w1)
+            else:
+                a2_ready = df.get("area2_ready", False)
+                mode_a = df.get("Mode A", 0.0) == 1.0
+                w2 = np.where(a2_ready, np.where(mode_a, 0.65, 0.35), 0.0)
+                df["trucks_area2_operating"] = df["trucks_operating"] * w2
+                df["trucks_area1_operating"] = df["trucks_operating"] - df["trucks_area2_operating"]
 
     return df
 
@@ -1847,8 +1873,8 @@ def plot_full_hierarchy_dashboard(
             df_p1["campaign_cash_flow_rate"] / 1e3,
             label="Campaign Discounted CF Rate: Policy 1 ($k/day)",
             color="#c62828",
-            linestyle="--",
-            linewidth=1.8,
+            linestyle="-",
+            linewidth=2.0,
             where="post",
         )
         if "daily_cash_flow_min" in df_p1.columns and "daily_cash_flow_max" in df_p1.columns:
@@ -1867,8 +1893,9 @@ def plot_full_hierarchy_dashboard(
             df_p1["current_discounted_cash_flow_rate"] / 1e3,
             label="Discounted CF Rate: Policy 1 ($k/day)",
             color="#c62828",
-            linestyle=":",
-            alpha=0.75,
+            linestyle="-",
+            linewidth=1.8,
+            alpha=0.85,
         )
 
     ax1.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6)
@@ -1926,40 +1953,62 @@ def plot_full_hierarchy_dashboard(
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="lower left", framealpha=0.90)
 
-    # 2. Stacked Development Metres: Policy 2 (Capital vs Sustaining)
+    # 2. Stacked Development & Production: Policy 2 (Capital Dev + Stopes + Area 1/2 Production)
     ax2 = dash[2]
+    dev_factor = 0.05  # 50 tonnes per meter of development = 0.05 kt/m
+    p2_cap_dev_kt = df_p2["area2_cumulative_development"] * dev_factor
+    p2_stope_dev_kt = (df_p2["cumulative_mine_development"] - df_p2["area2_cumulative_development"]).clip(lower=0.0) * dev_factor
+    p2_ore1_kt = df_p2["area1_mined"] / 1000.0
+    p2_ore2_kt = df_p2["area2_mined"] / 1000.0
+
+    p2_y1 = p2_cap_dev_kt
+    p2_y2 = p2_y1 + p2_stope_dev_kt
+    p2_y3 = p2_y2 + p2_ore1_kt
+    p2_y4 = p2_y3 + p2_ore2_kt
+
     ax2.fill_between(
         df_p2["time"],
         0,
-        df_p2["area2_cumulative_development"],
-        label="Area 2 Capital Decline (0 → 4,000 m Target)",
+        p2_y1,
+        label="Area 2 Capital Decline (0 → 4,000 m / 200 kt Target)",
         color="#7b1fa2",
-        alpha=0.60,
+        alpha=0.75,
         step="post",
     )
     ax2.fill_between(
         df_p2["time"],
-        df_p2["area2_cumulative_development"],
-        df_p2["cumulative_mine_development"],
-        label="General Sustaining Mine Development",
-        color="#2e7d32",
-        alpha=0.35,
+        p2_y1,
+        p2_y2,
+        label="Stope & Level Sustaining Development",
+        color="#ff9800",
+        alpha=0.55,
+        step="post",
+    )
+    ax2.fill_between(
+        df_p2["time"],
+        p2_y2,
+        p2_y3,
+        label="Area 1 Stope Ore Production",
+        color="#1976d2",
+        alpha=0.65,
+        step="post",
+    )
+    ax2.fill_between(
+        df_p2["time"],
+        p2_y3,
+        p2_y4,
+        label="Area 2 Stope Ore Production",
+        color="#388e3c",
+        alpha=0.65,
         step="post",
     )
     ax2.step(
         df_p2["time"],
-        df_p2["cumulative_mine_development"],
-        label="Total Combined Development",
+        p2_y4,
+        label="Total Material (Development + Production)",
         color="#1b5e20",
         linewidth=2.0,
         where="post",
-    )
-    ax2.axhline(
-        4000.0,
-        color="#7b1fa2",
-        linestyle=":",
-        linewidth=1.8,
-        label="Area 2 Unlock Threshold (4,000 m)",
     )
     if unlock_time_p2 is not None:
         ax2.axvline(
@@ -1986,8 +2035,8 @@ def plot_full_hierarchy_dashboard(
         )
         ax2.annotate(
             f"* AREA 1 DEPLETED\nDay {deplete_time_p2:.1f}",
-            xy=(deplete_time_p2, df_p2["cumulative_mine_development"].max() * 0.85),
-            xytext=(text_x_p2_dep, df_p2["cumulative_mine_development"].max() * 0.70),
+            xy=(deplete_time_p2, p2_y4.max() * 0.85),
+            xytext=(text_x_p2_dep, p2_y4.max() * 0.70),
             arrowprops=dict(
                 facecolor="#2e7d32",
                 edgecolor="#2e7d32",
@@ -2017,46 +2066,67 @@ def plot_full_hierarchy_dashboard(
             label=f"* Policy 2 Area 2 Depleted (Day {deplete2_time_p2:.1f})",
         )
     ax2.set_title(
-        "Policy 2: Stacked Underground Development (Rapid Capital Advance & Timely Unlock)"
+        "Policy 2: Stacked Underground Development & Stope Production (Decline + Stopes + Area 1/2 Ore)"
     )
-    ax2.set_ylabel("Development (m)")
+    ax2.set_ylabel("Cumulative Material (kt)")
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc="upper left", framealpha=0.90)
 
-    # 3. Stacked Development Metres: Policy 1 (Myopic Neglect & Emergency Finish)
+    # 3. Stacked Development & Production: Policy 1 (Myopic Baseline)
     ax3 = dash[3]
+    p1_cap_dev_kt = df_p1["area2_cumulative_development"] * dev_factor
+    p1_stope_dev_kt = (df_p1["cumulative_mine_development"] - df_p1["area2_cumulative_development"]).clip(lower=0.0) * dev_factor
+    p1_ore1_kt = df_p1["area1_mined"] / 1000.0
+    p1_ore2_kt = df_p1["area2_mined"] / 1000.0
+
+    p1_y1 = p1_cap_dev_kt
+    p1_y2 = p1_y1 + p1_stope_dev_kt
+    p1_y3 = p1_y2 + p1_ore1_kt
+    p1_y4 = p1_y3 + p1_ore2_kt
+
     ax3.fill_between(
         df_p1["time"],
         0,
-        df_p1["area2_cumulative_development"],
+        p1_y1,
         label="Area 2 Capital Decline (Emergency Finish on Depletion)",
         color="#c2185b",
-        alpha=0.60,
+        alpha=0.75,
         step="post",
     )
     ax3.fill_between(
         df_p1["time"],
-        df_p1["area2_cumulative_development"],
-        df_p1["cumulative_mine_development"],
-        label="General Sustaining Mine Development",
+        p1_y1,
+        p1_y2,
+        label="Stope & Level Sustaining Development",
         color="#e65100",
-        alpha=0.35,
+        alpha=0.55,
+        step="post",
+    )
+    ax3.fill_between(
+        df_p1["time"],
+        p1_y2,
+        p1_y3,
+        label="Area 1 Stope Ore Production",
+        color="#1976d2",
+        alpha=0.65,
+        step="post",
+    )
+    ax3.fill_between(
+        df_p1["time"],
+        p1_y3,
+        p1_y4,
+        label="Area 2 Stope Ore Production",
+        color="#d32f2f",
+        alpha=0.65,
         step="post",
     )
     ax3.step(
         df_p1["time"],
-        df_p1["cumulative_mine_development"],
-        label="Total Combined Development",
+        p1_y4,
+        label="Total Material (Development + Production)",
         color="#b71c1c",
         linewidth=2.0,
         where="post",
-    )
-    ax3.axhline(
-        4000.0,
-        color="#c2185b",
-        linestyle=":",
-        linewidth=1.8,
-        label="Area 2 Unlock Threshold (4,000 m)",
     )
     if unlock_time_p1 is not None:
         ax3.axvline(
@@ -2075,8 +2145,8 @@ def plot_full_hierarchy_dashboard(
         )
         ax3.annotate(
             f"* AREA 2 UNLOCKED\nDay {unlock_time_p1:.1f}",
-            xy=(unlock_time_p1, 4000.0),
-            xytext=(text_x, 15000.0),
+            xy=(unlock_time_p1, 200.0),
+            xytext=(text_x, 1500.0),
             arrowprops=dict(
                 facecolor="#c2185b",
                 edgecolor="#c2185b",
@@ -2113,8 +2183,8 @@ def plot_full_hierarchy_dashboard(
         )
         ax3.annotate(
             f"* AREA 1 DEPLETED\nDay {deplete_time_p1:.1f}",
-            xy=(deplete_time_p1, 20000.0),
-            xytext=(text_x_p1_dep, 30000.0),
+            xy=(deplete_time_p1, p1_y3.max() * 0.85),
+            xytext=(text_x_p1_dep, p1_y3.max() * 0.70),
             arrowprops=dict(
                 facecolor="#c62828",
                 edgecolor="#c62828",
@@ -2144,9 +2214,9 @@ def plot_full_hierarchy_dashboard(
             label=f"* Policy 1 Area 2 Depleted (Day {deplete2_time_p1:.1f})",
         )
     ax3.set_title(
-        "Policy 1: Stacked Underground Development (Emergency Decline Boring upon Area 1 Depletion)"
+        "Policy 1: Stacked Underground Development & Stope Production (Decline + Stopes + Area 1/2 Ore)"
     )
-    ax3.set_ylabel("Development (m)")
+    ax3.set_ylabel("Cumulative Material (kt)")
     ax3.grid(True, alpha=0.3)
     ax3.legend(loc="upper left", framealpha=0.90)
 

@@ -1441,12 +1441,21 @@ class MiningSimulationBase(drs.Module):
         tot_processed = float(self.plant.cumulative_milled_mass.value)
         a2_locked = self.is_area2_locked(day)
 
-        n_operating = sum(
+        n_operating_f1 = sum(
             1
             for tr in self.trucks
             if tr.phase in OPERATING_PHASES
             and tr.phase not in (TruckPhase.IDLE, TruckPhase.PARKED)
+            and getattr(tr, "target_face_id", 1) == 1
         )
+        n_operating_f2 = sum(
+            1
+            for tr in self.trucks
+            if tr.phase in OPERATING_PHASES
+            and tr.phase not in (TruckPhase.IDLE, TruckPhase.PARKED)
+            and getattr(tr, "target_face_id", 1) == 2
+        )
+        n_operating = n_operating_f1 + n_operating_f2
         n_refueling = sum(
             1 for tr in self.trucks if tr.phase == TruckPhase.REFUELING
         )
@@ -1567,6 +1576,10 @@ class MiningSimulationBase(drs.Module):
             ),
             "trucks_idle": n_idle,
             "trucks_operating": n_operating,
+            "trucks_operating_face1": n_operating_f1,
+            "trucks_operating_face2": n_operating_f2,
+            "trucks_area1_operating": n_operating_f1,
+            "trucks_area2_operating": n_operating_f2,
             "trucks_refueling": n_refueling,
             "trucks_dev_reserved": n_dev_reserved,
             "truck_idle_fraction": n_idle / max(1, len(self.trucks)),

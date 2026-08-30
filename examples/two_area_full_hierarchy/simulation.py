@@ -99,8 +99,31 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     # Depletion days
     d1_p1 = df_p1[df_p1.get("area1_exhausted", False) == True]
     d1_p1_day = f"{float(d1_p1['time'].iloc[0]):.1f} d" if not d1_p1.empty else "N/A"
+    if d1_p1_day == "N/A" and "area1_depleted_day" in df_p1.columns:
+        valid_p1 = df_p1[df_p1["area1_depleted_day"] >= 0.0]
+        if not valid_p1.empty:
+            d1_p1_day = f"{float(valid_p1['area1_depleted_day'].iloc[0]):.1f} d"
+
     d1_p2 = df_p2[df_p2.get("area1_exhausted", False) == True]
     d1_p2_day = f"{float(d1_p2['time'].iloc[0]):.1f} d" if not d1_p2.empty else "N/A"
+    if d1_p2_day == "N/A" and "area1_depleted_day" in df_p2.columns:
+        valid_p2 = df_p2[df_p2["area1_depleted_day"] >= 0.0]
+        if not valid_p2.empty:
+            d1_p2_day = f"{float(valid_p2['area1_depleted_day'].iloc[0]):.1f} d"
+
+    d2_p1 = df_p1[df_p1.get("area2_exhausted", False) == True]
+    d2_p1_day = f"{float(d2_p1['time'].iloc[0]):.1f} d" if not d2_p1.empty else "N/A"
+    if d2_p1_day == "N/A" and "area2_depleted_day" in df_p1.columns:
+        valid2_p1 = df_p1[df_p1["area2_depleted_day"] >= 0.0]
+        if not valid2_p1.empty:
+            d2_p1_day = f"{float(valid2_p1['area2_depleted_day'].iloc[0]):.1f} d"
+
+    d2_p2 = df_p2[df_p2.get("area2_exhausted", False) == True]
+    d2_p2_day = f"{float(d2_p2['time'].iloc[0]):.1f} d" if not d2_p2.empty else "N/A"
+    if d2_p2_day == "N/A" and "area2_depleted_day" in df_p2.columns:
+        valid2_p2 = df_p2[df_p2["area2_depleted_day"] >= 0.0]
+        if not valid2_p2.empty:
+            d2_p2_day = f"{float(valid2_p2['area2_depleted_day'].iloc[0]):.1f} d"
 
     npv_p1 = p1_last.get("cumulative_npv", 0.0)
     npv_p2 = p2_last.get("cumulative_npv", 0.0)
@@ -117,6 +140,7 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     print(f"{'  ↳ Face 2 Ore (Level 6) (t)':<40} {face2_p1:>16,.1f}  {face2_p2:>16,.1f}")
     print(f"{'Area 2 Unlock Day':<40} {u1_day:>16}  {u2_day:>16}")
     print(f"{'Area 1 Depletion Day':<40} {d1_p1_day:>16}  {d1_p2_day:>16}")
+    print(f"{'Area 2 Depletion Day':<40} {d2_p1_day:>16}  {d2_p2_day:>16}")
     print(f"{'Area 2 Capital Dev Advance (m)':<40} {cap_dev_p1:>16,.1f}  {cap_dev_p2:>16,.1f}")
     print(f"{'Total Mine Development Advance (m)':<40} {dev_p1:>16,.1f}  {dev_p2:>16,.1f}")
     print(f"{'Cumulative Net NPV ($M)':<40} {npv_p1/1e6:>16.2f}M {npv_p2/1e6:>16.2f}M")
