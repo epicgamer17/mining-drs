@@ -533,6 +533,4 @@ class MetallurgicalPlant(Processor):
             self.cash_flow_rate_per_day.value = 0.0
             self.discounted_cash_flow_rate_per_day.value = 0.0
 
-    step_day = step_daily_economics
-
 

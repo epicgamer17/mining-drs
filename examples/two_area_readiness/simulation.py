@@ -22,7 +22,7 @@ if _REPO_ROOT not in sys.path:
 import pandas as pd
 
 from drs_mining.components import (
-    TwoAreaSimulationBase,
+    MiningSimulationBase,
     AreaReadinessTarget,
     StrategicYearTarget,
 )
@@ -33,7 +33,8 @@ from drs_mining.components.plot import (
 )
 
 
-class TwoAreaReadinessSimulation(TwoAreaSimulationBase):
+class TwoAreaReadinessSimulation(MiningSimulationBase):
+
     """Two-Area Discrete-Event Simulation with Area 2 Physical Readiness Tracking."""
     pass
 

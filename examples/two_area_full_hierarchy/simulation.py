@@ -22,24 +22,29 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-import drs
 import pandas as pd
 
 from drs_mining.config import FLEET_MODES
 from drs_mining.components import (
-    TwoAreaSimulationBase,
+    MiningSimulationBase,
     AreaReadinessTarget,
     StrategicYearTarget,
 )
 from drs_mining.components.allocation import solve_face_allocation_rates
 from drs_mining.components.plot import (
-    plot_two_area_dashboard,
+    MODE_PALETTE,
     prepare_history,
+    plot_full_hierarchy_dashboard,
+    plot_ore_with_modes,
+    plot_truck_idle_and_utilization,
+    plot_mode_distribution,
+    plot_two_area_dashboard,
     print_transition_log,
 )
 
 
-class TwoAreaFullHierarchyEngine(TwoAreaSimulationBase):
+class TwoAreaFullHierarchyEngine(MiningSimulationBase):
+
     """Full 3-Level Hierarchical Simulation Engine with dual development tracking & analytical blending."""
 
     def __init__(
@@ -48,108 +53,19 @@ class TwoAreaFullHierarchyEngine(TwoAreaSimulationBase):
         enable_analytical_blending: bool = True,
         **kwargs,
     ):
-        self.policy = policy
-        self.enable_analytical_blending = enable_analytical_blending
-        self.sustaining_development = drs.Level("sustaining_development", 0.0)
-
         if policy == 1:
             kwargs["development_priority_truck_reservation_fraction"] = 0.0
             kwargs["area2_redeploy_locked_face_trucks_to_development"] = False
-        super().__init__(**kwargs)
+            kwargs["policy_name"] = "POLICY_1_MYOPIC"
+        else:
+            kwargs["policy_name"] = "POLICY_2_VALUE_ORIENTED"
 
-    def compute_analytical_weights(self) -> Tuple[float, float]:
-        """Solves closed-form optimal face weights for current plant target draw rates."""
-        if self.is_area2_locked(self.gt.value / 86400.0):
-            return 1.0, 0.0
-
-        r_o1 = getattr(self.plant, "active_ore1_draw_rate", 3600.0)
-        r_o2 = getattr(self.plant, "active_ore2_draw_rate", 2400.0)
-        f1_ore1 = 1.0 - self.face1.current_ore_grade
-        f2_ore1 = 1.0 - self.face2.current_ore_grade
-
-        res = solve_face_allocation_rates(
-            target_ore1_rate=r_o1,
-            target_ore2_rate=r_o2,
-            face1_ore1_fraction=f1_ore1,
-            face2_ore1_fraction=f2_ore1,
+        super().__init__(
+            policy=policy,
+            enable_analytical_blending=enable_analytical_blending,
+            **kwargs,
         )
-        return res.face1_weight, res.face2_weight
 
-    def select_face_for_truck(self, tr: Optional[Any] = None) -> int:
-        if self.is_area2_locked(self.gt.value / 86400.0):
-            return 1
-
-        if self.enable_analytical_blending and self.policy == 2:
-            w1, _ = self.compute_analytical_weights()
-            return 1 if self.rng.random() < w1 else 2
-
-        return super().select_face_for_truck(tr)
-
-    def _calendar_update(self, t: float) -> None:
-        day = int(t // 86400.0)
-        if day != self._cur_day:
-            self._cur_day = day
-            self._holiday_today = (day % 365) in self.holidays
-
-            # Base sustaining development advance
-            sustaining_dev_step = 2.5
-            self.sustaining_development.value += sustaining_dev_step
-
-            # Capital development advance for Area 2
-            if self.policy == 1:
-                cap_dev_step = 1.0 if self.is_area2_locked(day) else 0.0
-            else:
-                cap_dev_step = self._compute_daily_development_meters()
-
-            a2_locked = self.is_area2_locked(day)
-            area2_dev = cap_dev_step if a2_locked else 0.0
-
-            self.face2.advance_development(area2_dev, current_day=float(day))
-
-            total_mine_dev = float(self.sustaining_development.value + self.face2.cumulative_development.value)
-
-            self.plant.step_daily_economics(
-                current_day=float(day),
-                ore1_mined_t=self.ore1_dumped_total.value,
-                ore2_mined_t=self.ore2_dumped_total.value,
-                development_units=total_mine_dev,
-            )
-
-            force_mode = FLEET_MODES["PRODUCTION"] if self.policy == 1 else None
-            self.tactical_controller.step_daily_tactical_review(
-                current_day=float(day),
-                cum_development=total_mine_dev,
-                cum_ore1=float(self.ore1_dumped_total.value),
-                cum_ore2=float(self.ore2_dumped_total.value),
-                area2_readiness_tracker=self.face2,
-                total_trucks=self.num_trucks,
-                force_mode=force_mode,
-            )
-
-        shift = int(t // 43200.0)
-        if shift != self._shift_marker:
-            self._shift_marker = shift
-            for tr in self.trucks:
-                tr.seat_used = 0.0
-                self._schedule_down_window(tr)
-            for op in self.operators:
-                op.used_seat = 0.0
-
-    def _record_telemetry(self, t: float) -> None:
-        super()._record_telemetry(t)
-        sust_dev = float(self.sustaining_development.value)
-        cap_dev = float(self.face2.cumulative_development.value)
-        tot_dev = sust_dev + cap_dev
-
-        self.telemetry_history[-1]["sustaining_cumulative_development"] = sust_dev
-        self.telemetry_history[-1]["area2_cumulative_development"] = cap_dev
-        self.telemetry_history[-1]["cumulative_mine_development"] = tot_dev
-        self.telemetry_history[-1]["cumulative_development"] = tot_dev
-
-        if self.enable_analytical_blending:
-            w1, w2 = self.compute_analytical_weights()
-            self.telemetry_history[-1]["analytical_face1_weight"] = w1
-            self.telemetry_history[-1]["analytical_face2_weight"] = w2
 
 
 def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> None:
@@ -162,12 +78,12 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     p2_last = df_p2.iloc[-1]
 
     days = p2_last.get("day", 0.0)
-    ore1_p1 = p1_last.get("ore1_mined", p1_last.get("ore1_dumped_total", 0.0))
-    ore1_p2 = p2_last.get("ore1_mined", p2_last.get("ore1_dumped_total", 0.0))
-    ore2_p1 = p1_last.get("ore2_mined", p1_last.get("ore2_dumped_total", 0.0))
-    ore2_p2 = p2_last.get("ore2_mined", p2_last.get("ore2_dumped_total", 0.0))
-    tot_ore_p1 = p1_last.get("total_mined", ore1_p1 + ore2_p1)
-    tot_ore_p2 = p2_last.get("total_mined", ore1_p2 + ore2_p2)
+    face1_p1 = p1_last.get("face1_mined", p1_last.get("area1_mined", 0.0))
+    face1_p2 = p2_last.get("face1_mined", p2_last.get("area1_mined", 0.0))
+    face2_p1 = p1_last.get("face2_mined", p1_last.get("area2_mined", 0.0))
+    face2_p2 = p2_last.get("face2_mined", p2_last.get("area2_mined", 0.0))
+    tot_ore_p1 = p1_last.get("total_mined", face1_p1 + face2_p1)
+    tot_ore_p2 = p2_last.get("total_mined", face1_p2 + face2_p2)
 
     dev_p1 = p1_last.get("cumulative_mine_development", p1_last.get("cumulative_development", 0.0))
     dev_p2 = p2_last.get("cumulative_mine_development", p2_last.get("cumulative_development", 0.0))
@@ -185,8 +101,8 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     print(f"{'Metric':<40} {'Policy 1 (Myopic)':<18} {'Policy 2 (Hierarchy)':<18}")
     print("-" * 78)
     print(f"{'Total Ore Mined (t)':<40} {tot_ore_p1:>16,.1f}  {tot_ore_p2:>16,.1f}")
-    print(f"{'  ↳ Area 1 Ore (t)':<40} {ore1_p1:>16,.1f}  {ore1_p2:>16,.1f}")
-    print(f"{'  ↳ Area 2 Ore (t)':<40} {ore2_p1:>16,.1f}  {ore2_p2:>16,.1f}")
+    print(f"{'  ↳ Face 1 Ore (Level 3) (t)':<40} {face1_p1:>16,.1f}  {face1_p2:>16,.1f}")
+    print(f"{'  ↳ Face 2 Ore (Level 6) (t)':<40} {face2_p1:>16,.1f}  {face2_p2:>16,.1f}")
     print(f"{'Area 2 Capital Dev Advance (m)':<40} {cap_dev_p1:>16,.1f}  {cap_dev_p2:>16,.1f}")
     print(f"{'Total Mine Development Advance (m)':<40} {dev_p1:>16,.1f}  {dev_p2:>16,.1f}")
     print(f"{'Cumulative Net NPV ($M)':<40} {npv_p1/1e6:>16.2f}M {npv_p2/1e6:>16.2f}M")
@@ -194,19 +110,6 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     print("=" * 78 + "\n")
 
 
-def plot_full_hierarchy_dashboard(
-    df_p1: pd.DataFrame,
-    df_p2: pd.DataFrame,
-    output_path: str = "plots/full_hierarchy_dashboard.png",
-    **kwargs,
-):
-    """Plots comparative metrics for full hierarchy simulation."""
-    return plot_two_area_dashboard(
-        df_p2,
-        output_path=output_path,
-        title="Three-Level Hierarchy: Policy 1 vs Policy 2 with Analytical Blending",
-        **kwargs,
-    )
 
 
 def run_full_hierarchy_study(

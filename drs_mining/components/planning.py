@@ -96,6 +96,8 @@ def select_fleet_mode(
     return largest_mode
 
 
+
+
 class TacticalReviewController(drs.Module):
     """Supervisory controller managing annual strategic cycles, progress tracking,
     and monthly tactical reviews to dynamically set fleet operating modes.
@@ -264,6 +266,11 @@ class TacticalReviewController(drs.Module):
     def active_fleet_mode(self) -> OperatingMode:
         """The currently active supervisory fleet operating mode."""
         return self.fleet_mode
+
+    @active_fleet_mode.setter
+    def active_fleet_mode(self, value: OperatingMode) -> None:
+        self.fleet_mode = value
+
 
     def step_daily_tactical_review(
         self,

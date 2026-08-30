@@ -25,7 +25,7 @@ if _REPO_ROOT not in sys.path:
 import pandas as pd
 
 from drs_mining.components import (
-    TwoAreaSimulationBase,
+    MiningSimulationBase,
     AreaReadinessTarget,
     StrategicYearTarget,
 )
@@ -38,7 +38,8 @@ from drs_mining.components.plot import (
 )
 
 
-class TwoAreaAnalyticalBlendingSimulation(TwoAreaSimulationBase):
+class TwoAreaAnalyticalBlendingSimulation(MiningSimulationBase):
+
     """Two-Area Discrete-Event Simulation with Closed-Form Analytical Blending Dispatch."""
 
     def compute_analytical_weights(self) -> Tuple[float, float]:

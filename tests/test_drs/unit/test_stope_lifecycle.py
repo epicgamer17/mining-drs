@@ -1,14 +1,14 @@
-"""Unit tests for StopeFace multi-phase lifecycle and TwoTierHierarchicalDispatchController."""
+"""Unit tests for MineFace multi-phase stope lifecycle and TwoTierHierarchicalDispatchController."""
 
 import pytest
 from drs_mining.components.generators import StochasticFaciesGenerator
-from drs_mining.components.mine_face import MineFace as StopeFace, FaceState as StopeState
+from drs_mining.components.mine_face import MineFace, FaceState
 from drs_mining.components.dispatch import TwoTierHierarchicalDispatchController
 
 
 def test_stope_face_initialization():
     gen = StochasticFaciesGenerator(mean_fraction=0.30, std_dev=0.02)
-    stope = StopeFace(
+    stope = MineFace(
         name="test_stope",
         face_id=1,
         area_id=1,
@@ -22,7 +22,7 @@ def test_stope_face_initialization():
         turnaround_dev_per_parcel_m=30.0,
     )
 
-    assert stope.state == StopeState.ORE_READY
+    assert stope.state == FaceState.ORE_READY
     assert stope.is_ore_available is True
     assert stope.is_in_turnaround is False
     assert stope.is_exhausted is False
@@ -32,7 +32,7 @@ def test_stope_face_initialization():
 
 def test_stope_face_extraction_and_turnaround_cycle():
     gen = StochasticFaciesGenerator(mean_fraction=0.30, std_dev=0.02)
-    stope = StopeFace(
+    stope = MineFace(
         name="stope_1",
         face_id=1,
         area_id=1,
@@ -49,14 +49,14 @@ def test_stope_face_extraction_and_turnaround_cycle():
     # 1. Extract partial ore (10,000 t)
     ext, o1, o2 = stope.extract_ore(10000.0)
     assert ext == 10000.0
-    assert stope.state == StopeState.ORE_READY
+    assert stope.state == FaceState.ORE_READY
     assert stope.remaining_parcel_ore == 20000.0
 
     # 2. Extract remaining 20,000 t in parcel
     ext2, _, _ = stope.extract_ore(20000.0)
     assert ext2 == 20000.0
     # Parcel ore exhausted -> stope enters DEVELOPMENT_TURNAROUND
-    assert stope.state == StopeState.DEVELOPMENT_TURNAROUND
+    assert stope.state == FaceState.DEVELOPMENT_TURNAROUND
     assert stope.is_ore_available is False
     assert stope.is_in_turnaround is True
     assert stope.remaining_turnaround_dev == 20.0
@@ -65,32 +65,33 @@ def test_stope_face_extraction_and_turnaround_cycle():
     dev_done, is_complete = stope.advance_turnaround_development(10.0)
     assert dev_done == 10.0
     assert is_complete is False
-    assert stope.state == StopeState.DEVELOPMENT_TURNAROUND
+    assert stope.state == FaceState.DEVELOPMENT_TURNAROUND
 
     dev_done2, is_complete2 = stope.advance_turnaround_development(10.0)
     assert dev_done2 == 10.0
     assert is_complete2 is True
     # Turnaround complete -> transitions back to ORE_READY (Parcel 2)
-    assert stope.state == StopeState.ORE_READY
+    assert stope.state == FaceState.ORE_READY
     assert stope.is_ore_available is True
     assert stope.remaining_reserve == 30000.0
 
     # 4. Extract last parcel -> stope should become EXHAUSTED
     stope.extract_ore(30000.0)
     assert stope.is_exhausted is True
-    assert stope.state == StopeState.EXHAUSTED
+    assert stope.state == FaceState.EXHAUSTED
 
 
 def test_two_tier_hierarchical_dispatch():
     gen1 = StochasticFaciesGenerator(mean_fraction=0.30, std_dev=0.02)
     gen2 = StochasticFaciesGenerator(mean_fraction=0.35, std_dev=0.02)
 
-    s1 = StopeFace(
+    s1 = MineFace(
         name="stope_1a", face_id=1, area_id=1, level_index=3, generator=gen1, mean_ore_fraction=0.30, std_dev_ore_fraction=0.02
     )
-    s2 = StopeFace(
+    s2 = MineFace(
         name="stope_2a", face_id=2, area_id=2, level_index=6, generator=gen2, mean_ore_fraction=0.35, std_dev_ore_fraction=0.02
     )
+
 
     disp = TwoTierHierarchicalDispatchController(stopes=[s1, s2], target_daily_ore_tonnes=6000.0)
 
@@ -117,7 +118,7 @@ def test_two_tier_hierarchical_dispatch():
     assert is_fallback2 is False
 
     # If Area 2 enters turnaround, dispatch falls back to Area 1 (Tier 3 fallback)
-    s2.state = StopeState.DEVELOPMENT_TURNAROUND
+    s2.state = FaceState.DEVELOPMENT_TURNAROUND
     selected3, is_fallback3 = disp.select_stope_for_truck(
         current_total_stock=50000.0,
         daily_hauled_so_far=1000.0,

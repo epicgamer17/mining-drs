@@ -24,7 +24,7 @@ import drs
 import pandas as pd
 
 from drs_mining.components import (
-    TwoAreaSimulationBase,
+    MiningSimulationBase,
     AreaReadinessTarget,
     StrategicYearTarget,
 )
@@ -36,7 +36,8 @@ from drs_mining.components.plot import (
 )
 
 
-class TwoAreaEconomicSimulation(TwoAreaSimulationBase):
+class TwoAreaEconomicSimulation(MiningSimulationBase):
+
     """Two-Area Strategic DES Simulation with Area 2 Readiness & Discounted Cash Flow Economics."""
     pass
 
@@ -89,15 +90,19 @@ def run_two_area_economic_simulation(
             required_development=area2_required_development,
             ready_by_day=area2_ready_by_day,
         )
+    warmup = 0.0 if total_days is not None else ore_to_be_extracted_during_warming_period
 
     # 1. Base Case: WITH Area 2
+    print("\n" + "=" * 70)
+    print(" RUNNING BASE CASE: WITH AREA 2 CAPITAL EXPANSION")
+    print("=" * 70)
     sim_with = TwoAreaEconomicSimulation(
         num_trucks=num_trucks,
         num_operators=num_operators,
         availability=availability,
         target_ore_stock_level=target_ore_stock_level,
         total_ore_to_extract=total_ore_to_extract,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+        ore_to_be_extracted_during_warming_period=warmup,
         strategic_targets=(strategic_target,),
         area2_readiness_target=area2_target,
         area2_physical_unlock_enabled=True,
@@ -123,7 +128,7 @@ def run_two_area_economic_simulation(
             availability=availability,
             target_ore_stock_level=target_ore_stock_level,
             total_ore_to_extract=total_ore_to_extract,
-            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
+            ore_to_be_extracted_during_warming_period=warmup,
             strategic_targets=(strategic_target,),
             area2_readiness_target=area2_target,
             area2_counterfactual_disable=True,

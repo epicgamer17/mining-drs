@@ -30,10 +30,10 @@ import pandas as pd
 
 from drs_mining.config import FLEET_MODES
 from drs_mining.components import (
-    TwoAreaSimulationBase,
+    MiningSimulationBase,
     AreaReadinessTarget,
     StrategicYearTarget,
-    StopeFace,
+    MineFace,
     StopeState,
     TwoTierHierarchicalDispatchController,
     StochasticFaciesGenerator,
@@ -47,7 +47,7 @@ from drs_mining.components.plot import (
 )
 
 
-class TwoAreaStopeLifecycleEngine(TwoAreaSimulationBase):
+class TwoAreaStopeLifecycleEngine(MiningSimulationBase):
     """Underground DES simulation module with multi-stope lifecycles, turnaround dev & two-tier dispatch."""
 
     def __init__(
@@ -68,7 +68,7 @@ class TwoAreaStopeLifecycleEngine(TwoAreaSimulationBase):
         super().__init__(**kwargs)
 
         # Multi-Stope Topology: 3 Stopes in Area 1 (Level 3), 3 Stopes in Area 2 (Level 6)
-        self.stopes: List[StopeFace] = []
+        self.stopes: List[MineFace] = []
         seed = self.seed
 
         # Area 1 Stopes (Level 3)
@@ -81,7 +81,7 @@ class TwoAreaStopeLifecycleEngine(TwoAreaSimulationBase):
                 prob_new_facies=0.3,
                 variation_same_facies=0.01,
             )
-            stope = StopeFace(
+            stope = MineFace(
                 name=f"stope_1{chr(64+i)}",
                 face_id=i,
                 area_id=1,
@@ -108,7 +108,7 @@ class TwoAreaStopeLifecycleEngine(TwoAreaSimulationBase):
                 prob_new_facies=0.3,
                 variation_same_facies=0.01,
             )
-            stope = StopeFace(
+            stope = MineFace(
                 name=f"stope_2{chr(64+i-3)}",
                 face_id=i,
                 area_id=2,
@@ -118,6 +118,7 @@ class TwoAreaStopeLifecycleEngine(TwoAreaSimulationBase):
                 std_dev_ore_fraction=0.03,
                 total_stope_reserve=1600000.0,
                 min_parcel_ore_mass=25000.0,
+
                 max_parcel_ore_mass=40000.0,
                 waste_to_ore_ratio=0.20,
                 turnaround_dev_per_parcel_m=5.0,
@@ -158,60 +159,12 @@ class TwoAreaStopeLifecycleEngine(TwoAreaSimulationBase):
 
         return res.selected_stope_id or 1
 
-    def _calendar_update(self, t: float) -> None:
-        day = int(t // 86400.0)
-        if day != self._cur_day:
-            self._cur_day = day
-            self._holiday_today = (day % 365) in self.holidays
-
-            # Stope turnaround advance step
-            turnaround_dev = 3.5
-            self.stope_turnaround_development.value += turnaround_dev
-
-            # Area 2 capital development step
-            if self.policy_name == "POLICY_1_MYOPIC":
-                cap_dev_step = 1.0 if self.is_area2_locked(day) else 0.0
-            else:
-                cap_dev_step = self._compute_daily_development_meters()
-
-            a2_locked = self.is_area2_locked(day)
-            area2_dev = cap_dev_step if a2_locked else 0.0
-
-            self.face2.advance_development(area2_dev, current_day=float(day))
-
-            total_mine_dev = float(self.face2.cumulative_development.value + self.stope_turnaround_development.value)
-
-            self.plant.step_daily_economics(
-                current_day=float(day),
-                ore1_mined_t=self.ore1_dumped_total.value,
-                ore2_mined_t=self.ore2_dumped_total.value,
-                development_units=total_mine_dev,
-            )
-
-            force_mode = FLEET_MODES["PRODUCTION"] if self.policy_name == "POLICY_1_MYOPIC" else None
-            self.tactical_controller.step_daily_tactical_review(
-                current_day=float(day),
-                cum_development=total_mine_dev,
-                cum_ore1=float(self.ore1_dumped_total.value),
-                cum_ore2=float(self.ore2_dumped_total.value),
-                area2_readiness_tracker=self.face2,
-                total_trucks=self.num_trucks,
-                force_mode=force_mode,
-            )
-
-        shift = int(t // 43200.0)
-        if shift != self._shift_marker:
-            self._shift_marker = shift
-            for tr in self.trucks:
-                tr.seat_used = 0.0
-                self._schedule_down_window(tr)
-            for op in self.operators:
-                op.used_seat = 0.0
 
     def _record_telemetry(self, t: float) -> None:
         super()._record_telemetry(t)
-        cap_dev = float(self.readiness_tracker.cumulative_development.value)
-        turn_dev = float(self.stope_turnaround_development.value)
+        cap_dev = float(self.area2_cumulative_development.value)
+        turn_dev = float(self.sustaining_cumulative_development.value)
+        self.stope_turnaround_development.value = turn_dev
         tot_dev = cap_dev + turn_dev
 
         record = self.telemetry_history[-1]
@@ -221,6 +174,7 @@ class TwoAreaStopeLifecycleEngine(TwoAreaSimulationBase):
         record["cumulative_development"] = tot_dev
         record["fallback_dispatch_count"] = float(self.fallback_dispatch_count.value)
         self.history_records = self.telemetry_history
+
 
 
 def plot_stope_lifecycle_dashboard(

@@ -41,17 +41,14 @@ from .allocation import (
     solve_face_allocation_rates,
 )
 from drs_mining.config.economics import EconomicParameters
-from .simulation_base import MiningSimulationBase, TwoAreaSimulationBase, ORE_PAYLOAD
+from .simulation_base import MiningSimulationBase, ORE_PAYLOAD
 
-# Alias for StopeFace
-StopeFace = MineFace
 
 __all__ = [
     "Storage",
     "Processor",
     "MineFace",
     "FaceState",
-    "StopeFace",
     "StopeState",
     "StopeParcel",
     "MetallurgicalPlant",
@@ -94,8 +91,8 @@ __all__ = [
     "SEAT_PHASES",
     "DUE_PHASES",
     "MiningSimulationBase",
-    "TwoAreaSimulationBase",
     "ORE_PAYLOAD",
 ]
+
 
 

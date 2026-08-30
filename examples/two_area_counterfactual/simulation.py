@@ -24,7 +24,7 @@ if _REPO_ROOT not in sys.path:
 import pandas as pd
 
 from drs_mining.components import (
-    TwoAreaSimulationBase,
+    MiningSimulationBase,
     AreaReadinessTarget,
     StrategicYearTarget,
 )
@@ -36,7 +36,8 @@ from drs_mining.components.plot import (
 )
 
 
-class TwoAreaCounterfactualSimulation(TwoAreaSimulationBase):
+class TwoAreaCounterfactualSimulation(MiningSimulationBase):
+
     """Two-Area Strategic DES Simulation for Counterfactual Incremental NPV Analysis."""
     pass
 

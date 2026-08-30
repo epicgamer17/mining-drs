@@ -1430,3 +1430,604 @@ def plot_two_area_dashboard(
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
 
+
+def plot_full_hierarchy_dashboard(
+    df_p1: pd.DataFrame,
+    df_p2: pd.DataFrame,
+    output_path: str = "plots/two_area_full_hierarchy.png",
+    palette: dict = None,
+    figsize: Tuple[int, int] = (18, 63),
+) -> Dashboard:
+    """Renders 14-panel comprehensive comparative visualization dashboard for full three-level hierarchy."""
+    import os
+    palette = palette or MODE_PALETTE
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    df_p1 = prepare_history(df_p1)
+    df_p2 = prepare_history(df_p2)
+
+    unlock_rows_p2 = df_p2[df_p2["area2_ready"] == True]
+    unlock_time_p2 = (
+        float(unlock_rows_p2["time"].iloc[0])
+        if not unlock_rows_p2.empty
+        else None
+    )
+
+    unlock_rows_p1 = df_p1[df_p1["area2_ready"] == True]
+    unlock_time_p1 = (
+        float(unlock_rows_p1["time"].iloc[0])
+        if not unlock_rows_p1.empty
+        else None
+    )
+
+    dash = Dashboard(
+        nrows=14,
+        ncols=1,
+        figsize=figsize,
+        sharex=False,
+        title="Three-Level Strategic, Tactical & Analytical Blending Mining Benchmark",
+    )
+    dash.link_xaxes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+
+    # 0. Cumulative Operating NPV Comparison (Policy 2 vs Policy 1)
+    ax0 = dash[0]
+    ax0.step(
+        df_p2["time"],
+        df_p2["operating_npv_proxy"] / 1e6,
+        label="Policy 2: Value-Oriented Control + Analytical Blending",
+        color="#2e7d32",
+        linewidth=2.4,
+        where="post",
+    )
+    ax0.step(
+        df_p1["time"],
+        df_p1["operating_npv_proxy"] / 1e6,
+        label="Policy 1: Local-Objective Myopic Baseline",
+        color="#c62828",
+        linestyle="--",
+        linewidth=2.0,
+        where="post",
+    )
+    if unlock_time_p2 is not None:
+        ax0.axvspan(
+            df_p2["time"].min(),
+            unlock_time_p2,
+            color="#ffebee",
+            alpha=0.35,
+            label="Policy 2: Area 2 Locked (Capital Phase)",
+        )
+        ax0.axvline(
+            unlock_time_p2,
+            color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Policy 2 Area 2 Unlocked (Day {unlock_time_p2:.1f})",
+        )
+        t_max = max(df_p2["time"].max(), df_p1["time"].max())
+        text_x = (
+            unlock_time_p2 + (t_max * 0.03)
+            if (unlock_time_p2 < t_max * 0.80)
+            else unlock_time_p2 - (t_max * 0.18)
+        )
+        y_pos = float(df_p2["operating_npv_proxy"].max() / 1e6) * 0.55
+        ax0.annotate(
+            f"* P2 AREA 2 UNLOCKED\nDay {unlock_time_p2:.1f}",
+            xy=(unlock_time_p2, y_pos),
+            xytext=(text_x, y_pos * 1.15),
+            arrowprops=dict(
+                facecolor="#2e7d32",
+                edgecolor="#2e7d32",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#e8f5e9",
+                edgecolor="#2e7d32",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#2e7d32",
+            zorder=10,
+        )
+
+    if unlock_time_p1 is not None:
+        ax0.axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle=":",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Policy 1 Area 2 Unlocked (Day {unlock_time_p1:.1f})",
+        )
+        t_max = max(df_p2["time"].max(), df_p1["time"].max())
+        text_x_p1 = (
+            unlock_time_p1 + (t_max * 0.03)
+            if (unlock_time_p1 < t_max * 0.80)
+            else unlock_time_p1 - (t_max * 0.18)
+        )
+        y_pos_p1 = float(df_p1["operating_npv_proxy"].max() / 1e6) * 0.45
+        ax0.annotate(
+            f"* P1 AREA 2 UNLOCKED\nDay {unlock_time_p1:.1f}",
+            xy=(unlock_time_p1, y_pos_p1),
+            xytext=(text_x_p1, y_pos_p1 * 0.85),
+            arrowprops=dict(
+                facecolor="#c62828",
+                edgecolor="#c62828",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#ffebee",
+                edgecolor="#c62828",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#c62828",
+            zorder=10,
+        )
+
+    ax0.set_title(
+        "Cumulative Operating NPV (@ 5% Discount Rate): Policy 2 vs Policy 1"
+    )
+    ax0.set_ylabel("Operating NPV (M$)")
+    ax0.grid(True, alpha=0.3)
+    ax0.legend(loc="lower right", framealpha=0.90)
+
+    # 1. Daily Discounted Cash Flow Rates Comparison
+    ax1 = dash[1]
+    ax1.plot(
+        df_p2["time"],
+        df_p2["current_discounted_cash_flow_rate"] / 1e3,
+        label="Discounted CF Rate: Policy 2 ($k/day)",
+        color="#2e7d32",
+        alpha=0.85,
+    )
+    ax1.plot(
+        df_p1["time"],
+        df_p1["current_discounted_cash_flow_rate"] / 1e3,
+        label="Discounted CF Rate: Policy 1 ($k/day)",
+        color="#c62828",
+        linestyle=":",
+        alpha=0.75,
+    )
+    if unlock_time_p2 is not None:
+        ax1.axvline(
+            unlock_time_p2,
+            color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    if unlock_time_p1 is not None:
+        ax1.axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle=":",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    ax1.set_title("Daily Discounted Cash Flow Rate ($k/day)")
+    ax1.set_ylabel("Rate ($k/day)")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="lower left", framealpha=0.90)
+
+    # 2. Stacked Development Metres: Policy 2 (Capital vs Sustaining)
+    ax2 = dash[2]
+    ax2.fill_between(
+        df_p2["time"],
+        0,
+        df_p2["area2_cumulative_development"],
+        label="Area 2 Capital Decline (0 → 4,000 m Target)",
+        color="#7b1fa2",
+        alpha=0.60,
+        step="post",
+    )
+    ax2.fill_between(
+        df_p2["time"],
+        df_p2["area2_cumulative_development"],
+        df_p2["cumulative_mine_development"],
+        label="General Sustaining Mine Development",
+        color="#2e7d32",
+        alpha=0.35,
+        step="post",
+    )
+    ax2.step(
+        df_p2["time"],
+        df_p2["cumulative_mine_development"],
+        label="Total Combined Development",
+        color="#1b5e20",
+        linewidth=2.0,
+        where="post",
+    )
+    ax2.axhline(
+        4000.0,
+        color="#7b1fa2",
+        linestyle=":",
+        linewidth=1.8,
+        label="Area 2 Unlock Threshold (4,000 m)",
+    )
+    if unlock_time_p2 is not None:
+        ax2.axvline(
+            unlock_time_p2,
+            color="#7b1fa2",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    ax2.set_title(
+        "Policy 2: Stacked Underground Development (Rapid Capital Advance & Timely Unlock)"
+    )
+    ax2.set_ylabel("Development (m)")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper left", framealpha=0.90)
+
+    # 3. Stacked Development Metres: Policy 1 (Myopic Neglect & Emergency Finish)
+    ax3 = dash[3]
+    ax3.fill_between(
+        df_p1["time"],
+        0,
+        df_p1["area2_cumulative_development"],
+        label="Area 2 Capital Decline (Emergency Finish on Depletion)",
+        color="#c2185b",
+        alpha=0.60,
+        step="post",
+    )
+    ax3.fill_between(
+        df_p1["time"],
+        df_p1["area2_cumulative_development"],
+        df_p1["cumulative_mine_development"],
+        label="General Sustaining Mine Development",
+        color="#e65100",
+        alpha=0.35,
+        step="post",
+    )
+    ax3.step(
+        df_p1["time"],
+        df_p1["cumulative_mine_development"],
+        label="Total Combined Development",
+        color="#b71c1c",
+        linewidth=2.0,
+        where="post",
+    )
+    ax3.axhline(
+        4000.0,
+        color="#c2185b",
+        linestyle=":",
+        linewidth=1.8,
+        label="Area 2 Unlock Threshold (4,000 m)",
+    )
+    if unlock_time_p1 is not None:
+        ax3.axvline(
+            unlock_time_p1,
+            color="#c2185b",
+            linestyle="-.",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Policy 1 Area 2 Unlocked (Day {unlock_time_p1:.1f})",
+        )
+        t_max_p1 = df_p1["time"].max()
+        text_x = (
+            unlock_time_p1 + (t_max_p1 * 0.03)
+            if (unlock_time_p1 < t_max_p1 * 0.80)
+            else unlock_time_p1 - (t_max_p1 * 0.18)
+        )
+        ax3.annotate(
+            f"* AREA 2 UNLOCKED\nDay {unlock_time_p1:.1f}",
+            xy=(unlock_time_p1, 4000.0),
+            xytext=(text_x, 15000.0),
+            arrowprops=dict(
+                facecolor="#c2185b",
+                edgecolor="#c2185b",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#ffebee",
+                edgecolor="#c2185b",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#c2185b",
+            zorder=10,
+        )
+    ax3.set_title(
+        "Policy 1: Stacked Underground Development (Emergency Decline Boring upon Area 1 Depletion)"
+    )
+    ax3.set_ylabel("Development (m)")
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(loc="upper left", framealpha=0.90)
+
+    # 4. Stockpiles: Policy 2
+    plot_ore_with_modes(
+        df_p2,
+        time_col="time",
+        ore_cols=["total_system_ore_mass", "Ore1Stock_mass", "Ore2Stock_mass"],
+        mode_col="active_operating_mode_name",
+        campaign_split_mode="SHUTDOWN",
+        title="Stockpiles & Campaigns: Policy 2 (Dual-Area Supply with Analytical Blending)",
+        palette=palette,
+        hlines=[
+            {
+                "y": 60000.0,
+                "color": "black",
+                "linestyle": "--",
+                "label": "Target Total (60k)",
+            },
+            {
+                "y": 20400.0,
+                "color": "red",
+                "linestyle": ":",
+                "label": "Critical Ore 2 (20.4k)",
+            },
+        ],
+        ax=dash[4],
+    )
+    if unlock_time_p2 is not None:
+        dash[4].axvspan(
+            df_p2["time"].min(),
+            unlock_time_p2,
+            color="#ffebee",
+            alpha=0.35,
+            label="Mine 2 Locked",
+        )
+        dash[4].axvline(
+            unlock_time_p2,
+            color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Mine 2 Unlocked (Day {unlock_time_p2:.1f})",
+        )
+        t_max = df_p2["time"].max()
+        text_x = (
+            unlock_time_p2 + (t_max * 0.03)
+            if (unlock_time_p2 < t_max * 0.80)
+            else unlock_time_p2 - (t_max * 0.18)
+        )
+        dash[4].annotate(
+            f"* MINE 2 UNLOCKED\nDay {unlock_time_p2:.1f}",
+            xy=(unlock_time_p2, 48000.0),
+            xytext=(text_x, 52000.0),
+            arrowprops=dict(
+                facecolor="#2e7d32",
+                edgecolor="#2e7d32",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#e8f5e9",
+                edgecolor="#2e7d32",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#2e7d32",
+            zorder=10,
+        )
+        dash[4].legend(loc="upper right", framealpha=0.90)
+
+    # 5. Stockpiles: Policy 1
+    plot_ore_with_modes(
+        df_p1,
+        time_col="time",
+        ore_cols=["total_system_ore_mass", "Ore1Stock_mass", "Ore2Stock_mass"],
+        mode_col="active_operating_mode_name",
+        campaign_split_mode="SHUTDOWN",
+        title="Stockpiles & Campaigns: Policy 1 (Severe Ore 2 Starvation & Mode B Trapping)",
+        palette=palette,
+        hlines=[
+            {
+                "y": 60000.0,
+                "color": "black",
+                "linestyle": "--",
+                "label": "Target Total (60k)",
+            },
+            {
+                "y": 20400.0,
+                "color": "red",
+                "linestyle": ":",
+                "label": "Critical Ore 2 (20.4k)",
+            },
+        ],
+        ax=dash[5],
+    )
+    if unlock_time_p1 is not None:
+        dash[5].axvspan(
+            df_p1["time"].min(),
+            unlock_time_p1,
+            color="#ffebee",
+            alpha=0.35,
+            label="Mine 2 Locked",
+        )
+        dash[5].axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle="-.",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Mine 2 Unlocked (Day {unlock_time_p1:.1f})",
+        )
+        t_max_p1 = df_p1["time"].max()
+        text_x_p1 = (
+            unlock_time_p1 + (t_max_p1 * 0.03)
+            if (unlock_time_p1 < t_max_p1 * 0.80)
+            else unlock_time_p1 - (t_max_p1 * 0.18)
+        )
+        dash[5].annotate(
+            f"* MINE 2 UNLOCKED\nDay {unlock_time_p1:.1f}",
+            xy=(unlock_time_p1, 48000.0),
+            xytext=(text_x_p1, 52000.0),
+            arrowprops=dict(
+                facecolor="#c62828",
+                edgecolor="#c62828",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#ffebee",
+                edgecolor="#c62828",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#c62828",
+            zorder=10,
+        )
+        dash[5].legend(loc="upper right", framealpha=0.90)
+
+    # 6. Policy 2: Analytical Operational Face Allocation Weights (Appendix A & B)
+    plot_time_series(
+        df_p2,
+        y_columns=["analytical_face1_weight", "analytical_face2_weight"],
+        title="Policy 2: Analytical Face Allocation Dispatch Weights w1 (Face 1) & w2 (Face 2) [Slide 29]",
+        is_step=True,
+        ax=dash[6],
+    )
+    if unlock_time_p2 is not None:
+        dash[6].axvline(
+            unlock_time_p2,
+            color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    dash[6].set_ylabel("Dispatch Weight (Fraction)")
+    dash[6].set_ylim(-0.05, 1.05)
+    dash[6].legend(loc="upper right")
+
+    # 7. Operating Modes Timeline: Policy 2
+    plot_time_series(
+        df_p2,
+        y_columns=["Mode A", "Mode B", "Shutdown"],
+        title="Operating Modes Timeline: Policy 2 (Balanced High-Grade Campaigns)",
+        is_step=True,
+        ax=dash[7],
+    )
+    if unlock_time_p2 is not None:
+        dash[7].axvline(
+            unlock_time_p2,
+            color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"* Policy 2 Unlocked (Day {unlock_time_p2:.1f})",
+        )
+        dash[7].legend(loc="upper right", framealpha=0.90)
+
+    # 8. Operating Modes Timeline: Policy 1
+    plot_time_series(
+        df_p1,
+        y_columns=["Mode A", "Mode B", "Shutdown"],
+        title="Operating Modes Timeline: Policy 1 (Permanently Trapped in Low-Throughput Mode B)",
+        is_step=True,
+        ax=dash[8],
+    )
+    if unlock_time_p1 is not None:
+        dash[8].axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"* Policy 1 Unlocked (Day {unlock_time_p1:.1f})",
+        )
+        dash[8].legend(loc="upper right", framealpha=0.90)
+
+    # 9. Strategic Trajectory Ratios: Policy 2
+    plot_time_series(
+        df_p2,
+        y_columns=[
+            "development_trajectory_ratio",
+            "area2_readiness_trajectory_ratio",
+            "ore1_trajectory_ratio",
+            "ore2_trajectory_ratio",
+        ],
+        title="Policy 2: Strategic & Area 2 Trajectory Progress Ratios (Level 2 Tactical Reviews)",
+        is_step=True,
+        ax=dash[9],
+    )
+    if unlock_time_p2 is not None:
+        dash[9].axvline(
+            unlock_time_p2,
+            color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    dash[9].axhline(
+        0.90, color="red", linestyle=":", label="Tolerance Threshold (0.90)"
+    )
+    dash[9].axhline(
+        1.00, color="gray", linestyle="--", label="Target Trajectory (1.00)"
+    )
+    dash[9].set_ylabel("Trajectory Ratio")
+    dash[9].legend(loc="upper right")
+
+    # 10. Fleet Utilization & Idle Time: Policy 2
+    plot_truck_idle_and_utilization(
+        df_p2,
+        title="Policy 2: Haul Fleet Utilization & Idle Time Breakdown",
+        ax=dash[10],
+    )
+
+    # 11. Fleet Utilization & Idle Time: Policy 1
+    plot_truck_idle_and_utilization(
+        df_p1,
+        title="Policy 1: Haul Fleet Utilization & Idle Time Breakdown",
+        ax=dash[11],
+    )
+    if unlock_time_p1 is not None:
+        dash[11].axvline(
+            unlock_time_p1,
+            color="#c62828",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+
+    # 12. Mode Distribution: Policy 2
+    plot_mode_distribution(
+        df_p2,
+        mode_col="active_operating_mode_name",
+        time_col="time",
+        title="Mode Distribution (% Time Spent - Policy 2 Hierarchical Value-Oriented Control)",
+        palette=palette,
+        ax=dash[12],
+    )
+
+    # 13. Mode Distribution: Policy 1
+    plot_mode_distribution(
+        df_p1,
+        mode_col="active_operating_mode_name",
+        time_col="time",
+        title="Mode Distribution (% Time Spent - Policy 1 Local Myopic Baseline)",
+        palette=palette,
+        ax=dash[13],
+    )
+
+    dash.save(output_path)
+    if output_path != "plots/full_hierarchy_dashboard.png":
+        dash.save("plots/full_hierarchy_dashboard.png")
+    print(f"Saved full hierarchy benchmark dashboard to '{output_path}'.")
+    return dash
+
+

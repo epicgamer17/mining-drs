@@ -183,6 +183,12 @@ class MineFace(Processor):
             return True
         return self.cumulative_development.value >= self.required_development - 1e-6
 
+    @is_ready.setter
+    def is_ready(self, value: bool) -> None:
+        if value:
+            self.state = FaceState.ORE_READY
+
+
     def is_locked(self, current_day: float = 0.0) -> bool:
         """Returns True if the face is still undergoing capital development and cannot be mined."""
         if self.counterfactual_disable:
