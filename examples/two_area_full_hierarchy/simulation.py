@@ -90,6 +90,18 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     cap_dev_p1 = p1_last.get("area2_cumulative_development", 0.0)
     cap_dev_p2 = p2_last.get("area2_cumulative_development", 0.0)
 
+    # Unlock days
+    u1 = df_p1[df_p1["area2_ready"] == True]
+    u1_day = f"{float(u1['time'].iloc[0]):.1f} d" if not u1.empty else "N/A"
+    u2 = df_p2[df_p2["area2_ready"] == True]
+    u2_day = f"{float(u2['time'].iloc[0]):.1f} d" if not u2.empty else "N/A"
+
+    # Depletion days
+    d1_p1 = df_p1[df_p1.get("area1_exhausted", False) == True]
+    d1_p1_day = f"{float(d1_p1['time'].iloc[0]):.1f} d" if not d1_p1.empty else "N/A"
+    d1_p2 = df_p2[df_p2.get("area1_exhausted", False) == True]
+    d1_p2_day = f"{float(d1_p2['time'].iloc[0]):.1f} d" if not d1_p2.empty else "N/A"
+
     npv_p1 = p1_last.get("cumulative_npv", 0.0)
     npv_p2 = p2_last.get("cumulative_npv", 0.0)
     npv_gain = npv_p2 - npv_p1
@@ -103,6 +115,8 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     print(f"{'Total Ore Mined (t)':<40} {tot_ore_p1:>16,.1f}  {tot_ore_p2:>16,.1f}")
     print(f"{'  ↳ Face 1 Ore (Level 3) (t)':<40} {face1_p1:>16,.1f}  {face1_p2:>16,.1f}")
     print(f"{'  ↳ Face 2 Ore (Level 6) (t)':<40} {face2_p1:>16,.1f}  {face2_p2:>16,.1f}")
+    print(f"{'Area 2 Unlock Day':<40} {u1_day:>16}  {u2_day:>16}")
+    print(f"{'Area 1 Depletion Day':<40} {d1_p1_day:>16}  {d1_p2_day:>16}")
     print(f"{'Area 2 Capital Dev Advance (m)':<40} {cap_dev_p1:>16,.1f}  {cap_dev_p2:>16,.1f}")
     print(f"{'Total Mine Development Advance (m)':<40} {dev_p1:>16,.1f}  {dev_p2:>16,.1f}")
     print(f"{'Cumulative Net NPV ($M)':<40} {npv_p1/1e6:>16.2f}M {npv_p2/1e6:>16.2f}M")
@@ -114,7 +128,7 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
 
 def run_full_hierarchy_study(
     total_days: Optional[float] = None,
-    total_ore_to_extract: float = 2000000.0,
+    total_ore_to_extract: float = 6600000.0,
     warmup_ore: float = 0.0,
     area2_required_dev: float = 4000.0,
     area2_ready_by_day: float = 365.0,
@@ -178,7 +192,7 @@ if __name__ == "__main__":
         description="Full Three-Level Hierarchy Simulation Study"
     )
     parser.add_argument("--total_days", type=float, default=None, help="Total days to simulate (default: run until Area 1 and Area 2 are both depleted)")
-    parser.add_argument("--total_ore", type=float, default=2000000.0, help="Total ore to extract across Area 1 and Area 2 (default: 2,000,000 t)")
+    parser.add_argument("--total_ore", type=float, default=6600000.0, help="Total ore to extract across Area 1 and Area 2 (default: 6,600,000 t)")
     parser.add_argument("--warmup_ore", type=float, default=0.0)
     parser.add_argument("--area2_required_dev", type=float, default=4000.0)
     parser.add_argument("--area2_ready_by_day", type=float, default=365.0)

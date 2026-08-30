@@ -800,6 +800,23 @@ def prepare_history(df):
     df["Total Ore Stockpile Level"] = df["total_system_ore_mass"] / 1000.0
     df["Ore 1 Stockpile Level"] = df["Ore1Stock_mass"] / 1000.0 if "Ore1Stock_mass" in df.columns else 0.0
     df["Ore 2 Stockpile Level"] = df["Ore2Stock_mass"] / 1000.0 if "Ore2Stock_mass" in df.columns else 0.0
+
+    # Campaign-level cash flow and daily variation ranges
+    cf_col = (
+        "current_discounted_cash_flow_rate"
+        if "current_discounted_cash_flow_rate" in df.columns
+        else ("current_cash_flow_rate" if "current_cash_flow_rate" in df.columns else None)
+    )
+    if cf_col is not None and "active_operating_mode_name" in df.columns:
+        campaign_id = (
+            df["active_operating_mode_name"] != df["active_operating_mode_name"].shift(1)
+        ).cumsum()
+        df["campaign_id"] = campaign_id
+        grouped = df.groupby("campaign_id")[cf_col]
+        df["campaign_cash_flow_rate"] = grouped.transform("mean")
+        df["daily_cash_flow_min"] = grouped.transform("min")
+        df["daily_cash_flow_max"] = grouped.transform("max")
+
     return df
 
 
@@ -1358,6 +1375,23 @@ def plot_two_area_dashboard(
     fig, axes = plt.subplots(6, 1, figsize=figsize, sharex=True)
     time_col = "day" if "day" in df.columns else "time"
 
+    unlock_rows = df[df.get("area2_ready", False) == True]
+    unlock_time = float(unlock_rows[time_col].iloc[0]) if not unlock_rows.empty else None
+
+    deplete_rows = df[df.get("area1_exhausted", False) == True]
+    deplete_time = float(deplete_rows[time_col].iloc[0]) if not deplete_rows.empty else None
+    if deplete_time is None and "area1_depleted_day" in df.columns:
+        valid_dep = df[df["area1_depleted_day"] >= 0.0]
+        if not valid_dep.empty:
+            deplete_time = float(valid_dep["area1_depleted_day"].iloc[0])
+
+    deplete2_rows = df[df.get("area2_exhausted", False) == True]
+    deplete2_time = float(deplete2_rows[time_col].iloc[0]) if not deplete2_rows.empty else None
+    if deplete2_time is None and "area2_depleted_day" in df.columns:
+        valid_dep2 = df[df["area2_depleted_day"] >= 0.0]
+        if not valid_dep2.empty:
+            deplete2_time = float(valid_dep2["area2_depleted_day"].iloc[0])
+
     # 1. Stockpiles
     ax = axes[0]
     if "ore1_stockpile" in df.columns:
@@ -1369,6 +1403,12 @@ def plot_two_area_dashboard(
         ax.plot(df[time_col], df["Ore2Stock_mass"], label="Ore 2 Stockpile (t)", color="#D32F2F")
         ax.plot(df[time_col], df["total_system_ore_mass"], label="Total Stockpile (t)", color="#388E3C", linestyle="--")
     ax.axhline(60000.0, color="black", linestyle=":", label="Buffer Target (60kt)")
+    if unlock_time is not None:
+        ax.axvline(unlock_time, color="#2E7D32", linestyle="-.", linewidth=1.8, label=f"Area 2 Unlocked (Day {unlock_time:.1f})")
+    if deplete_time is not None:
+        ax.axvline(deplete_time, color="#D32F2F", linestyle="--", linewidth=1.8, label=f"Area 1 Depleted (Day {deplete_time:.1f})")
+    if deplete2_time is not None:
+        ax.axvline(deplete2_time, color="#7B1FA2", linestyle="-.", linewidth=1.8, label=f"Area 2 Depleted (Day {deplete2_time:.1f})")
     ax.set_ylabel("Stockpile Mass (t)")
     ax.set_title(f"{title} - Surface Buffers")
     ax.legend(loc="upper right")
@@ -1382,6 +1422,12 @@ def plot_two_area_dashboard(
         ax.plot(df[time_col], df[o1_col] / 1000.0, label="Ore 1 Mined (kt)", color="#1976D2")
     if o2_col in df.columns:
         ax.plot(df[time_col], df[o2_col] / 1000.0, label="Ore 2 Mined (kt)", color="#D32F2F")
+    if unlock_time is not None:
+        ax.axvline(unlock_time, color="#2E7D32", linestyle="-.", linewidth=1.8)
+    if deplete_time is not None:
+        ax.axvline(deplete_time, color="#D32F2F", linestyle="--", linewidth=1.8)
+    if deplete2_time is not None:
+        ax.axvline(deplete2_time, color="#7B1FA2", linestyle="-.", linewidth=1.8)
     ax.set_ylabel("Cumulative Ore (kt)")
     ax.legend(loc="upper left")
     ax.grid(True, alpha=0.3)
@@ -1392,6 +1438,12 @@ def plot_two_area_dashboard(
     if dev_col in df.columns:
         ax.plot(df[time_col], df[dev_col], label="Cumulative Development (m)", color="#7B1FA2")
         ax.axhline(4000.0, color="red", linestyle="--", label="Area 2 Target (4,000 m)")
+    if unlock_time is not None:
+        ax.axvline(unlock_time, color="#7B1FA2", linestyle="-.", linewidth=1.8, label=f"Area 2 Unlocked (Day {unlock_time:.1f})")
+    if deplete_time is not None:
+        ax.axvline(deplete_time, color="#D32F2F", linestyle="--", linewidth=1.8, label=f"Area 1 Depleted (Day {deplete_time:.1f})")
+    if deplete2_time is not None:
+        ax.axvline(deplete2_time, color="#1B5E20", linestyle="-.", linewidth=1.8, label=f"Area 2 Depleted (Day {deplete2_time:.1f})")
     ax.set_ylabel("Development (m)")
     ax.legend(loc="upper left")
     ax.grid(True, alpha=0.3)
@@ -1404,6 +1456,12 @@ def plot_two_area_dashboard(
         ax.plot(df[time_col], df[npv_col] / 1e6, label="Discounted NPV ($M, r=5%)", color="#2E7D32", linewidth=2)
     if cf_col in df.columns:
         ax.plot(df[time_col], df[cf_col] / 1e6, label="Undiscounted Cash Flow ($M)", color="#0288D1", linestyle="--")
+    if unlock_time is not None:
+        ax.axvline(unlock_time, color="#2E7D32", linestyle="-.", linewidth=1.8, label=f"Area 2 Unlocked (Day {unlock_time:.1f})")
+    if deplete_time is not None:
+        ax.axvline(deplete_time, color="#D32F2F", linestyle="--", linewidth=1.8, label=f"Area 1 Depleted (Day {deplete_time:.1f})")
+    if deplete2_time is not None:
+        ax.axvline(deplete2_time, color="#7B1FA2", linestyle="-.", linewidth=1.8, label=f"Area 2 Depleted (Day {deplete2_time:.1f})")
     ax.set_ylabel("Economics ($M)")
     ax.legend(loc="upper left")
     ax.grid(True, alpha=0.3)
@@ -1460,6 +1518,78 @@ def plot_full_hierarchy_dashboard(
         else None
     )
 
+    deplete_rows_p2 = df_p2[df_p2.get("area1_exhausted", False) == True]
+    deplete_time_p2 = (
+        float(deplete_rows_p2["time"].iloc[0])
+        if not deplete_rows_p2.empty
+        else None
+    )
+
+    deplete_rows_p1 = df_p1[df_p1.get("area1_exhausted", False) == True]
+    deplete_time_p1 = (
+        float(deplete_rows_p1["time"].iloc[0])
+        if not deplete_rows_p1.empty
+        else None
+    )
+
+    if deplete_time_p2 is None and "face1_mined" in df_p2.columns and len(df_p2) > 1:
+        f1_max_p2 = df_p2["face1_mined"].max()
+        if f1_max_p2 > 100.0:
+            sub_p2 = df_p2[df_p2["face1_mined"] >= f1_max_p2 - 1e-3]
+            if not sub_p2.empty and sub_p2["time"].iloc[0] < df_p2["time"].iloc[-1] - 1.0:
+                deplete_time_p2 = float(sub_p2["time"].iloc[0])
+
+    if deplete_time_p2 is None and "area1_depleted_day" in df_p2.columns:
+        valid_d2 = df_p2[df_p2["area1_depleted_day"] >= 0.0]
+        if not valid_d2.empty:
+            deplete_time_p2 = float(valid_d2["area1_depleted_day"].iloc[0])
+
+    if deplete_time_p1 is None and "face1_mined" in df_p1.columns and len(df_p1) > 1:
+        f1_max_p1 = df_p1["face1_mined"].max()
+        if f1_max_p1 > 100.0:
+            sub_p1 = df_p1[df_p1["face1_mined"] >= f1_max_p1 - 1e-3]
+            if not sub_p1.empty and sub_p1["time"].iloc[0] < df_p1["time"].iloc[-1] - 1.0:
+                deplete_time_p1 = float(sub_p1["time"].iloc[0])
+
+    if deplete_time_p1 is None and "area1_depleted_day" in df_p1.columns:
+        valid_d1 = df_p1[df_p1["area1_depleted_day"] >= 0.0]
+        if not valid_d1.empty:
+            deplete_time_p1 = float(valid_d1["area1_depleted_day"].iloc[0])
+
+    deplete2_rows_p2 = df_p2[df_p2.get("area2_exhausted", False) == True]
+    deplete2_time_p2 = (
+        float(deplete2_rows_p2["time"].iloc[0])
+        if not deplete2_rows_p2.empty
+        else None
+    )
+    if deplete2_time_p2 is None and "area2_depleted_day" in df_p2.columns:
+        valid_d2_2 = df_p2[df_p2["area2_depleted_day"] >= 0.0]
+        if not valid_d2_2.empty:
+            deplete2_time_p2 = float(valid_d2_2["area2_depleted_day"].iloc[0])
+    if deplete2_time_p2 is None and "face2_mined" in df_p2.columns and len(df_p2) > 1:
+        f2_max_p2 = df_p2["face2_mined"].max()
+        if f2_max_p2 > 100.0:
+            sub2_p2 = df_p2[df_p2["face2_mined"] >= f2_max_p2 - 1e-3]
+            if not sub2_p2.empty and sub2_p2["time"].iloc[0] < df_p2["time"].iloc[-1] - 1.0:
+                deplete2_time_p2 = float(sub2_p2["time"].iloc[0])
+
+    deplete2_rows_p1 = df_p1[df_p1.get("area2_exhausted", False) == True]
+    deplete2_time_p1 = (
+        float(deplete2_rows_p1["time"].iloc[0])
+        if not deplete2_rows_p1.empty
+        else None
+    )
+    if deplete2_time_p1 is None and "area2_depleted_day" in df_p1.columns:
+        valid_d2_1 = df_p1[df_p1["area2_depleted_day"] >= 0.0]
+        if not valid_d2_1.empty:
+            deplete2_time_p1 = float(valid_d2_1["area2_depleted_day"].iloc[0])
+    if deplete2_time_p1 is None and "face2_mined" in df_p1.columns and len(df_p1) > 1:
+        f2_max_p1 = df_p1["face2_mined"].max()
+        if f2_max_p1 > 100.0:
+            sub2_p1 = df_p1[df_p1["face2_mined"] >= f2_max_p1 - 1e-3]
+            if not sub2_p1.empty and sub2_p1["time"].iloc[0] < df_p1["time"].iloc[-1] - 1.0:
+                deplete2_time_p1 = float(sub2_p1["time"].iloc[0])
+
     dash = Dashboard(
         nrows=14,
         ncols=1,
@@ -1484,7 +1614,7 @@ def plot_full_hierarchy_dashboard(
         df_p1["operating_npv_proxy"] / 1e6,
         label="Policy 1: Local-Objective Myopic Baseline",
         color="#c62828",
-        linestyle="--",
+        linestyle="-",
         linewidth=2.0,
         where="post",
     )
@@ -1575,6 +1705,105 @@ def plot_full_hierarchy_dashboard(
             zorder=10,
         )
 
+    if deplete_time_p2 is not None:
+        ax0.axvline(
+            deplete_time_p2,
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Policy 2 Area 1 Depleted (Day {deplete_time_p2:.1f})",
+        )
+        t_max = max(df_p2["time"].max(), df_p1["time"].max())
+        text_x_p2_dep = (
+            deplete_time_p2 - (t_max * 0.18)
+            if (deplete_time_p2 > t_max * 0.70)
+            else deplete_time_p2 + (t_max * 0.03)
+        )
+        y_pos_p2_dep = float(df_p2["operating_npv_proxy"].max() / 1e6) * 0.85
+        ax0.annotate(
+            f"* P2 AREA 1 DEPLETED\nDay {deplete_time_p2:.1f}",
+            xy=(deplete_time_p2, y_pos_p2_dep),
+            xytext=(text_x_p2_dep, y_pos_p2_dep * 0.90),
+            arrowprops=dict(
+                facecolor="#2e7d32",
+                edgecolor="#2e7d32",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#e8f5e9",
+                edgecolor="#2e7d32",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#2e7d32",
+            zorder=10,
+        )
+
+    if deplete_time_p1 is not None:
+        ax0.axvline(
+            deplete_time_p1,
+            color="#c62828",
+            linestyle="--",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Policy 1 Area 1 Depleted (Day {deplete_time_p1:.1f})",
+        )
+        t_max = max(df_p2["time"].max(), df_p1["time"].max())
+        text_x_p1_dep = (
+            deplete_time_p1 + (t_max * 0.03)
+            if (deplete_time_p1 < t_max * 0.80)
+            else deplete_time_p1 - (t_max * 0.18)
+        )
+        y_pos_p1_dep = float(df_p1["operating_npv_proxy"].max() / 1e6) * 0.70
+        ax0.annotate(
+            f"* P1 AREA 1 DEPLETED\nDay {deplete_time_p1:.1f}",
+            xy=(deplete_time_p1, y_pos_p1_dep),
+            xytext=(text_x_p1_dep, y_pos_p1_dep * 1.10),
+            arrowprops=dict(
+                facecolor="#c62828",
+                edgecolor="#c62828",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#ffebee",
+                edgecolor="#c62828",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#c62828",
+            zorder=10,
+        )
+
+    if deplete2_time_p2 is not None:
+        ax0.axvline(
+            deplete2_time_p2,
+            color="#1b5e20",
+            linestyle="-.",
+            linewidth=2.2,
+            alpha=0.95,
+            label=f"* Policy 2 Area 2 Depleted (Day {deplete2_time_p2:.1f})",
+        )
+    if deplete2_time_p1 is not None:
+        ax0.axvline(
+            deplete2_time_p1,
+            color="#b71c1c",
+            linestyle="-.",
+            linewidth=2.2,
+            alpha=0.95,
+            label=f"* Policy 1 Area 2 Depleted (Day {deplete2_time_p1:.1f})",
+        )
+
     ax0.set_title(
         "Cumulative Operating NPV (@ 5% Discount Rate): Policy 2 vs Policy 1"
     )
@@ -1582,23 +1811,68 @@ def plot_full_hierarchy_dashboard(
     ax0.grid(True, alpha=0.3)
     ax0.legend(loc="lower right", framealpha=0.90)
 
-    # 1. Daily Discounted Cash Flow Rates Comparison
+    # 1. Campaign Discounted Cash Flow Rates & Daily Variation Comparison
     ax1 = dash[1]
-    ax1.plot(
-        df_p2["time"],
-        df_p2["current_discounted_cash_flow_rate"] / 1e3,
-        label="Discounted CF Rate: Policy 2 ($k/day)",
-        color="#2e7d32",
-        alpha=0.85,
-    )
-    ax1.plot(
-        df_p1["time"],
-        df_p1["current_discounted_cash_flow_rate"] / 1e3,
-        label="Discounted CF Rate: Policy 1 ($k/day)",
-        color="#c62828",
-        linestyle=":",
-        alpha=0.75,
-    )
+    if "campaign_cash_flow_rate" in df_p2.columns:
+        ax1.step(
+            df_p2["time"],
+            df_p2["campaign_cash_flow_rate"] / 1e3,
+            label="Campaign Discounted CF Rate: Policy 2 ($k/day)",
+            color="#2e7d32",
+            linewidth=2.2,
+            where="post",
+        )
+        if "daily_cash_flow_min" in df_p2.columns and "daily_cash_flow_max" in df_p2.columns:
+            ax1.fill_between(
+                df_p2["time"],
+                df_p2["daily_cash_flow_min"] / 1e3,
+                df_p2["daily_cash_flow_max"] / 1e3,
+                color="#2e7d32",
+                alpha=0.18,
+                step="post",
+                label="Daily CF Range (Policy 2)",
+            )
+    else:
+        ax1.plot(
+            df_p2["time"],
+            df_p2["current_discounted_cash_flow_rate"] / 1e3,
+            label="Discounted CF Rate: Policy 2 ($k/day)",
+            color="#2e7d32",
+            alpha=0.85,
+        )
+
+    if "campaign_cash_flow_rate" in df_p1.columns:
+        ax1.step(
+            df_p1["time"],
+            df_p1["campaign_cash_flow_rate"] / 1e3,
+            label="Campaign Discounted CF Rate: Policy 1 ($k/day)",
+            color="#c62828",
+            linestyle="--",
+            linewidth=1.8,
+            where="post",
+        )
+        if "daily_cash_flow_min" in df_p1.columns and "daily_cash_flow_max" in df_p1.columns:
+            ax1.fill_between(
+                df_p1["time"],
+                df_p1["daily_cash_flow_min"] / 1e3,
+                df_p1["daily_cash_flow_max"] / 1e3,
+                color="#c62828",
+                alpha=0.12,
+                step="post",
+                label="Daily CF Range (Policy 1)",
+            )
+    else:
+        ax1.plot(
+            df_p1["time"],
+            df_p1["current_discounted_cash_flow_rate"] / 1e3,
+            label="Discounted CF Rate: Policy 1 ($k/day)",
+            color="#c62828",
+            linestyle=":",
+            alpha=0.75,
+        )
+
+    ax1.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6)
+
     if unlock_time_p2 is not None:
         ax1.axvline(
             unlock_time_p2,
@@ -1615,7 +1889,39 @@ def plot_full_hierarchy_dashboard(
             linewidth=2.0,
             alpha=0.85,
         )
-    ax1.set_title("Daily Discounted Cash Flow Rate ($k/day)")
+    if deplete_time_p2 is not None:
+        ax1.axvline(
+            deplete_time_p2,
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=1.8,
+            alpha=0.75,
+        )
+    if deplete_time_p1 is not None:
+        ax1.axvline(
+            deplete_time_p1,
+            color="#c62828",
+            linestyle="--",
+            linewidth=1.8,
+            alpha=0.75,
+        )
+    if deplete2_time_p2 is not None:
+        ax1.axvline(
+            deplete2_time_p2,
+            color="#1b5e20",
+            linestyle="-.",
+            linewidth=1.8,
+            alpha=0.75,
+        )
+    if deplete2_time_p1 is not None:
+        ax1.axvline(
+            deplete2_time_p1,
+            color="#b71c1c",
+            linestyle="-.",
+            linewidth=1.8,
+            alpha=0.75,
+        )
+    ax1.set_title("Campaign Discounted Cash Flow Rate & Daily Variation Range ($k/day)")
     ax1.set_ylabel("Rate ($k/day)")
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="lower left", framealpha=0.90)
@@ -1662,6 +1968,53 @@ def plot_full_hierarchy_dashboard(
             linestyle="-.",
             linewidth=2.0,
             alpha=0.85,
+        )
+    if deplete_time_p2 is not None:
+        ax2.axvline(
+            deplete_time_p2,
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Policy 2 Area 1 Depleted (Day {deplete_time_p2:.1f})",
+        )
+        t_max_p2 = df_p2["time"].max()
+        text_x_p2_dep = (
+            deplete_time_p2 - (t_max_p2 * 0.18)
+            if (deplete_time_p2 > t_max_p2 * 0.70)
+            else deplete_time_p2 + (t_max_p2 * 0.03)
+        )
+        ax2.annotate(
+            f"* AREA 1 DEPLETED\nDay {deplete_time_p2:.1f}",
+            xy=(deplete_time_p2, df_p2["cumulative_mine_development"].max() * 0.85),
+            xytext=(text_x_p2_dep, df_p2["cumulative_mine_development"].max() * 0.70),
+            arrowprops=dict(
+                facecolor="#2e7d32",
+                edgecolor="#2e7d32",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#e8f5e9",
+                edgecolor="#2e7d32",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#2e7d32",
+            zorder=10,
+        )
+    if deplete2_time_p2 is not None:
+        ax2.axvline(
+            deplete2_time_p2,
+            color="#1b5e20",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.90,
+            label=f"* Policy 2 Area 2 Depleted (Day {deplete2_time_p2:.1f})",
         )
     ax2.set_title(
         "Policy 2: Stacked Underground Development (Rapid Capital Advance & Timely Unlock)"
@@ -1734,7 +2087,7 @@ def plot_full_hierarchy_dashboard(
             bbox=dict(
                 boxstyle="round,pad=0.5",
                 facecolor="#ffebee",
-                edgecolor="#c2185b",
+                edgecolor="#c62828",
                 linewidth=1.8,
                 alpha=0.95,
             ),
@@ -1742,6 +2095,53 @@ def plot_full_hierarchy_dashboard(
             fontweight="bold",
             color="#c2185b",
             zorder=10,
+        )
+    if deplete_time_p1 is not None:
+        ax3.axvline(
+            deplete_time_p1,
+            color="#c62828",
+            linestyle="--",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Policy 1 Area 1 Depleted (Day {deplete_time_p1:.1f})",
+        )
+        t_max_p1 = df_p1["time"].max()
+        text_x_p1_dep = (
+            deplete_time_p1 + (t_max_p1 * 0.03)
+            if (deplete_time_p1 < t_max_p1 * 0.80)
+            else deplete_time_p1 - (t_max_p1 * 0.18)
+        )
+        ax3.annotate(
+            f"* AREA 1 DEPLETED\nDay {deplete_time_p1:.1f}",
+            xy=(deplete_time_p1, 20000.0),
+            xytext=(text_x_p1_dep, 30000.0),
+            arrowprops=dict(
+                facecolor="#c62828",
+                edgecolor="#c62828",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#ffebee",
+                edgecolor="#c62828",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#c62828",
+            zorder=10,
+        )
+    if deplete2_time_p1 is not None:
+        ax3.axvline(
+            deplete2_time_p1,
+            color="#b71c1c",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.90,
+            label=f"* Policy 1 Area 2 Depleted (Day {deplete2_time_p1:.1f})",
         )
     ax3.set_title(
         "Policy 1: Stacked Underground Development (Emergency Decline Boring upon Area 1 Depletion)"
@@ -1820,7 +2220,54 @@ def plot_full_hierarchy_dashboard(
             color="#2e7d32",
             zorder=10,
         )
-        dash[4].legend(loc="upper right", framealpha=0.90)
+    if deplete_time_p2 is not None:
+        dash[4].axvline(
+            deplete_time_p2,
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=2.5,
+            alpha=0.95,
+            label=f"* Area 1 Depleted (Day {deplete_time_p2:.1f})",
+        )
+        t_max_p2 = df_p2["time"].max()
+        text_x_p2_dep = (
+            deplete_time_p2 - (t_max_p2 * 0.18)
+            if (deplete_time_p2 > t_max_p2 * 0.70)
+            else deplete_time_p2 + (t_max_p2 * 0.03)
+        )
+        dash[4].annotate(
+            f"* AREA 1 DEPLETED\nDay {deplete_time_p2:.1f}",
+            xy=(deplete_time_p2, 40000.0),
+            xytext=(text_x_p2_dep, 45000.0),
+            arrowprops=dict(
+                facecolor="#2e7d32",
+                edgecolor="#2e7d32",
+                shrink=0.08,
+                width=2.0,
+                headwidth=8,
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#e8f5e9",
+                edgecolor="#2e7d32",
+                linewidth=1.8,
+                alpha=0.95,
+            ),
+            fontsize=10,
+            fontweight="bold",
+            color="#2e7d32",
+            zorder=10,
+        )
+    if deplete2_time_p2 is not None:
+        dash[4].axvline(
+            deplete2_time_p2,
+            color="#1b5e20",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.90,
+            label=f"* Area 2 Depleted (Day {deplete2_time_p2:.1f})",
+        )
+    dash[4].legend(loc="upper right", framealpha=0.90)
 
     # 5. Stockpiles: Policy 1
     plot_ore_with_modes(
@@ -1892,7 +2339,25 @@ def plot_full_hierarchy_dashboard(
             color="#c62828",
             zorder=10,
         )
-        dash[5].legend(loc="upper right", framealpha=0.90)
+    if deplete_time_p1 is not None:
+        dash[5].axvline(
+            deplete_time_p1,
+            color="#c62828",
+            linestyle="--",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"* Area 1 Depleted (Day {deplete_time_p1:.1f})",
+        )
+    if deplete2_time_p1 is not None:
+        dash[5].axvline(
+            deplete2_time_p1,
+            color="#b71c1c",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.90,
+            label=f"* Area 2 Depleted (Day {deplete2_time_p1:.1f})",
+        )
+    dash[5].legend(loc="upper right", framealpha=0.90)
 
     # 6. Policy 2: Analytical Operational Face Allocation Weights (Appendix A & B)
     plot_time_series(
@@ -1906,6 +2371,22 @@ def plot_full_hierarchy_dashboard(
         dash[6].axvline(
             unlock_time_p2,
             color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    if deplete_time_p2 is not None:
+        dash[6].axvline(
+            deplete_time_p2,
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    if deplete2_time_p2 is not None:
+        dash[6].axvline(
+            deplete2_time_p2,
+            color="#1b5e20",
             linestyle="-.",
             linewidth=2.0,
             alpha=0.85,
@@ -1931,7 +2412,25 @@ def plot_full_hierarchy_dashboard(
             alpha=0.85,
             label=f"* Policy 2 Unlocked (Day {unlock_time_p2:.1f})",
         )
-        dash[7].legend(loc="upper right", framealpha=0.90)
+    if deplete_time_p2 is not None:
+        dash[7].axvline(
+            deplete_time_p2,
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"* Policy 2 Area 1 Depleted (Day {deplete_time_p2:.1f})",
+        )
+    if deplete2_time_p2 is not None:
+        dash[7].axvline(
+            deplete2_time_p2,
+            color="#1b5e20",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"* Policy 2 Area 2 Depleted (Day {deplete2_time_p2:.1f})",
+        )
+    dash[7].legend(loc="upper right", framealpha=0.90)
 
     # 8. Operating Modes Timeline: Policy 1
     plot_time_series(
@@ -1950,7 +2449,25 @@ def plot_full_hierarchy_dashboard(
             alpha=0.85,
             label=f"* Policy 1 Unlocked (Day {unlock_time_p1:.1f})",
         )
-        dash[8].legend(loc="upper right", framealpha=0.90)
+    if deplete_time_p1 is not None:
+        dash[8].axvline(
+            deplete_time_p1,
+            color="#c62828",
+            linestyle="--",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"* Policy 1 Area 1 Depleted (Day {deplete_time_p1:.1f})",
+        )
+    if deplete2_time_p1 is not None:
+        dash[8].axvline(
+            deplete2_time_p1,
+            color="#b71c1c",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+            label=f"* Policy 1 Area 2 Depleted (Day {deplete2_time_p1:.1f})",
+        )
+    dash[8].legend(loc="upper right", framealpha=0.90)
 
     # 9. Strategic Trajectory Ratios: Policy 2
     plot_time_series(
@@ -1973,6 +2490,22 @@ def plot_full_hierarchy_dashboard(
             linewidth=2.0,
             alpha=0.85,
         )
+    if deplete_time_p2 is not None:
+        dash[9].axvline(
+            deplete_time_p2,
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    if deplete2_time_p2 is not None:
+        dash[9].axvline(
+            deplete2_time_p2,
+            color="#1b5e20",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
     dash[9].axhline(
         0.90, color="red", linestyle=":", label="Tolerance Threshold (0.90)"
     )
@@ -1988,6 +2521,30 @@ def plot_full_hierarchy_dashboard(
         title="Policy 2: Haul Fleet Utilization & Idle Time Breakdown",
         ax=dash[10],
     )
+    if unlock_time_p2 is not None:
+        dash[10].axvline(
+            unlock_time_p2,
+            color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    if deplete_time_p2 is not None:
+        dash[10].axvline(
+            deplete_time_p2,
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    if deplete2_time_p2 is not None:
+        dash[10].axvline(
+            deplete2_time_p2,
+            color="#1b5e20",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
 
     # 11. Fleet Utilization & Idle Time: Policy 1
     plot_truck_idle_and_utilization(
@@ -1999,6 +2556,22 @@ def plot_full_hierarchy_dashboard(
         dash[11].axvline(
             unlock_time_p1,
             color="#c62828",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    if deplete_time_p1 is not None:
+        dash[11].axvline(
+            deplete_time_p1,
+            color="#c62828",
+            linestyle="--",
+            linewidth=2.0,
+            alpha=0.85,
+        )
+    if deplete2_time_p1 is not None:
+        dash[11].axvline(
+            deplete2_time_p1,
+            color="#b71c1c",
             linestyle="-.",
             linewidth=2.0,
             alpha=0.85,

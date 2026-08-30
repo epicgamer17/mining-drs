@@ -254,7 +254,7 @@ class MiningSimulationBase(drs.Module):
             face_capacity = (
                 total_ore_to_extract / 2.0
                 if total_ore_to_extract is not None
-                else 1000000.0
+                else 3300000.0
             )
             warmup_cap = (
                 ore_to_be_extracted_during_warming_period / 2.0
@@ -400,7 +400,11 @@ class MiningSimulationBase(drs.Module):
             "area2_readiness_fraction", 0.0
         )
         self.area2_ready_day = drs.Level("area2_ready_day", -1.0)
+        self.area1_depleted_day = drs.Level("area1_depleted_day", -1.0)
+        self.area2_depleted_day = drs.Level("area2_depleted_day", -1.0)
         self._area2_unlocked = False
+        self._face1_depleted = False
+        self._face2_depleted = False
 
         # Analytical Blending Levels (Level 3 Operational Control)
         self.analytical_face1_weight = drs.Level("analytical_face1_weight", 1.0)
@@ -454,6 +458,28 @@ class MiningSimulationBase(drs.Module):
             self.face2.state = FaceState.ORE_READY
             print(
                 f"\n >>> [{self.policy_name} UNLOCK] Area 2 (Face 2) UNLOCKED on Strategic Day {day:.2f}! <<<\n"
+            )
+
+    def _on_face1_exhausted(self, day: float = 0.0) -> None:
+        """Callback triggered when Area 1 (Face 1) is fully exhausted."""
+        if not self._face1_depleted:
+            self._face1_depleted = True
+            self.area1_depleted_day.value = day
+            if hasattr(self, "face1"):
+                self.face1.state = FaceState.EXHAUSTED
+            print(
+                f"\n >>> [{self.policy_name} DEPLETED] Area 1 (Face 1) DEPLETED on Strategic Day {day:.2f}! <<<\n"
+            )
+
+    def _on_face2_exhausted(self, day: float = 0.0) -> None:
+        """Callback triggered when Area 2 (Face 2) is fully exhausted."""
+        if not self._face2_depleted:
+            self._face2_depleted = True
+            self.area2_depleted_day.value = day
+            if hasattr(self, "face2"):
+                self.face2.state = FaceState.EXHAUSTED
+            print(
+                f"\n >>> [{self.policy_name} DEPLETED] Area 2 (Face 2) DEPLETED on Strategic Day {day:.2f}! <<<\n"
             )
 
 
@@ -726,6 +752,21 @@ class MiningSimulationBase(drs.Module):
             1.0 - ore2_frac
         )
         self.ore2_hauled_by_face[tr.target_face_id] += ORE_PAYLOAD * ore2_frac
+
+        if tr.target_face_id == 1 and not self._face1_depleted and self.is_face1_exhausted():
+            day = (
+                float(self.tactical_controller.strategic_year_index.value)
+                * self.strategic_period_days
+                + float(self.tactical_controller.strategic_year_timer.value)
+            ) if hasattr(self, "tactical_controller") else (self.gt.value / 86400.0)
+            self._on_face1_exhausted(day)
+        elif tr.target_face_id == 2 and not self._face2_depleted and self.is_face2_exhausted():
+            day = (
+                float(self.tactical_controller.strategic_year_index.value)
+                * self.strategic_period_days
+                + float(self.tactical_controller.strategic_year_timer.value)
+            ) if hasattr(self, "tactical_controller") else (self.gt.value / 86400.0)
+            self._on_face2_exhausted(day)
 
         # Free loader
         self.face_lhds_busy[tr.target_face_id] = max(
@@ -1280,12 +1321,6 @@ class MiningSimulationBase(drs.Module):
         elif hasattr(self, "face1"):
             if self.is_face1_exhausted():
                 return True
-        total_extracted = sum(
-            float(f.cumulative_extracted_mass.value)
-            for f in getattr(self, "faces", [self.face1])
-        )
-        if total_extracted >= self.total_ore_to_extract - 1e-6:
-            return True
         return self.gt.value >= self.horizon_sec - 1e-6
 
     def step(self, dt: float) -> None:
@@ -1478,8 +1513,14 @@ class MiningSimulationBase(drs.Module):
             "ore1_trajectory_ratio": float(self.ore1_trajectory_ratio.value),
             "ore2_trajectory_ratio": float(self.ore2_trajectory_ratio.value),
             "area2_ready_day": float(self.area2_ready_day.value),
+            "area1_depleted_day": float(self.area1_depleted_day.value),
+            "area2_depleted_day": float(self.area2_depleted_day.value),
             "area2_is_locked": float(a2_locked),
             "area2_ready": not a2_locked,
+            "area1_exhausted": bool(self.is_face1_exhausted()),
+            "area2_exhausted": bool(self.is_face2_exhausted()),
+            "face1_exhausted": bool(self.is_face1_exhausted()),
+            "face2_exhausted": bool(self.is_face2_exhausted()),
             "analytical_face1_weight": float(
                 self.analytical_face1_weight.value
             ),
