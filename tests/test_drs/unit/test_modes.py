@@ -79,7 +79,6 @@ def test_config_fleet_mode_instances():
         assert name in FLEET_MODE_CONFIGS
 
     assert FLEET_MODES["DEVELOPMENT"].metadata["dev_reservation_fraction"] == 0.20
-    assert FLEET_MODES["BALANCED"].metadata["area2_dev_share"] == 0.60
     assert FLEET_MODES["PRODUCTION"].metadata["dev_reservation_fraction"] == 0.0
 
 

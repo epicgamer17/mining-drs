@@ -92,7 +92,7 @@ def select_fleet_mode(
 
     largest_mode, largest_deficit = max(deficits.items(), key=lambda item: item[1])
     if largest_deficit <= (1.0 - tolerance):
-        return FLEET_MODES["BALANCED"]
+        return FLEET_MODES["PRODUCTION"]
     return largest_mode
 
 
@@ -146,7 +146,7 @@ class TacticalReviewController(drs.Module):
         )
 
         self.fleet_mode: OperatingMode = (
-            initial_fleet_mode or FLEET_MODES["BALANCED"]
+            initial_fleet_mode or FLEET_MODES["PRODUCTION"]
         )
         self.development_priority_reserved_trucks = drs.Level(
             "development_priority_reserved_trucks", initial_value=0.0

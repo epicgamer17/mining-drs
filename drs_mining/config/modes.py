@@ -79,21 +79,14 @@ FLEET_MODE_CONFIGS: Dict[str, FleetModeConfig] = {
         id=0,
         dev_reservation_fraction=0.0,
         area2_dev_share=0.35,
-        description="Maximize ore haulage throughput",
-    ),
-    "BALANCED": FleetModeConfig(
-        name="BALANCED",
-        id=1,
-        dev_reservation_fraction=0.0,
-        area2_dev_share=0.60,
-        description="Standard haulage with surplus to development",
+        description="Maximize ore haulage throughput; surplus to stope development",
     ),
     "DEVELOPMENT": FleetModeConfig(
         name="DEVELOPMENT",
-        id=2,
+        id=1,
         dev_reservation_fraction=0.20,
         area2_dev_share=0.85,
-        description="Reserve haulage capacity for development advance",
+        description="Prioritize capital decline development for surplus trucks",
     ),
 }
 

@@ -46,10 +46,10 @@ def test_trajectory_progress_ratio():
 
 
 def test_select_fleet_mode():
-    # All on track -> BALANCED
+    # All on track -> PRODUCTION
     mode = select_fleet_mode(development_ratio=1.0, ore1_ratio=1.0, ore2_ratio=1.0, tolerance=0.90)
-    assert mode == FLEET_MODES["BALANCED"]
-    assert mode.name == "BALANCED"
+    assert mode == FLEET_MODES["PRODUCTION"]
+    assert mode.name == "PRODUCTION"
     assert mode.category == "fleet"
 
     # Development lagging -> DEVELOPMENT
@@ -100,7 +100,7 @@ def test_tactical_review_controller_lifecycle():
     controller.record_production(ore1_mass=5000.0, ore2_mass=3000.0)
 
     mode = controller.update_review(current_cumulative_dev=200.0, total_trucks=10)
-    assert mode == FLEET_MODES["BALANCED"]
+    assert mode == FLEET_MODES["PRODUCTION"]
     assert controller.development_priority_reserved_trucks.value == 0.0
 
     # Simulate development lagging significantly while production is on track -> Triggers DEVELOPMENT mode

@@ -18,6 +18,7 @@ from .topology import RoadSegment, MineTopology, DEFAULT_SPEEDS
 from .bays import LoadingBay, DumpingBay
 from .mine_face import MineFace, FaceState, StopeState, StopeParcel
 from .plant import MetallurgicalPlant, PlantDrawRates
+from .fleet_controller import FleetOperatingMode, FleetModeController
 from .controllers import OperatingModeController, FleetController
 from .stockpiles import Stockpile
 from .dispatch import ShelswellDispatchController, TwoTierHierarchicalDispatchController
@@ -55,6 +56,8 @@ __all__ = [
     "StopeParcel",
     "MetallurgicalPlant",
     "PlantDrawRates",
+    "FleetOperatingMode",
+    "FleetModeController",
     "OperatingModeController",
     "FleetController",
     "Stockpile",
