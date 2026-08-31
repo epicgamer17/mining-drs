@@ -356,6 +356,26 @@ class MineFace(Processor):
             else:
                 self._load_next_batch()
 
+    def extract_turnaround_waste(
+        self, payload_tonnes: float
+    ) -> Tuple[float, float, bool]:
+        """Extracts turnaround waste rock from heading, advances dev metres, returns (waste_extracted, dev_m, is_turnaround_complete)."""
+        if self.state != FaceState.DEVELOPMENT_TURNAROUND:
+            return 0.0, 0.0, False
+
+        dev_m = payload_tonnes / (20.0 * 2.7)
+        self.cumulative_waste_extracted.value += payload_tonnes
+        self.parcel_waste_extracted.value += dev_m
+        self.cumulative_stope_dev_m.value += dev_m
+
+        req = float(self.required_turnaround_dev_m.value)
+        is_complete = False
+        if float(self.parcel_waste_extracted.value) >= req - 1e-6:
+            self._load_next_batch()
+            is_complete = True
+
+        return payload_tonnes, dev_m, is_complete
+
     def advance_turnaround(
         self, dev_advance_m: float = 0.0, waste_tonnes: float = 0.0
     ) -> bool:

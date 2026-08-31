@@ -156,7 +156,7 @@ def run_full_hierarchy_study(
     warmup_ore: float = 0.0,
     area2_required_dev: float = 4000.0,
     area2_ready_by_day: float = 365.0,
-    num_trucks: int = 18,
+    num_trucks: int = 8,
     seed: int = 42,
     plot: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -220,7 +220,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_ore", type=float, default=0.0)
     parser.add_argument("--area2_required_dev", type=float, default=4000.0)
     parser.add_argument("--area2_ready_by_day", type=float, default=365.0)
-    parser.add_argument("--trucks", type=int, default=18)
+    parser.add_argument("--trucks", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_plot", action="store_true")
     args = parser.parse_args()

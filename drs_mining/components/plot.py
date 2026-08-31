@@ -692,36 +692,50 @@ def plot_fleet_activity_distribution(
     if total_time <= 0:
         total_time = 1.0
 
-    op1 = df_sorted.get("trucks_area1_operating", pd.Series(0, index=df_sorted.index))
-    op2 = df_sorted.get("trucks_area2_operating", pd.Series(0, index=df_sorted.index))
+    op1 = df_sorted.get("trucks_area1_operating", df_sorted.get("trucks_operating_face1", pd.Series(0, index=df_sorted.index)))
+    op2 = df_sorted.get("trucks_area2_operating", df_sorted.get("trucks_operating_face2", pd.Series(0, index=df_sorted.index)))
     refuel = df_sorted.get("trucks_refueling", pd.Series(0, index=df_sorted.index))
-    dev = df_sorted.get("trucks_dev_reserved", pd.Series(0, index=df_sorted.index))
+    cap_dev = df_sorted.get("trucks_capital_dev", pd.Series(0, index=df_sorted.index))
+    stope_dev = df_sorted.get("trucks_stope_dev", pd.Series(0, index=df_sorted.index))
     idle = df_sorted.get("trucks_idle", pd.Series(0, index=df_sorted.index))
-
-    if total_trucks is None:
-        total_trucks = int((op1 + op2 + refuel + idle).max()) if not df_sorted.empty else 18
-        if total_trucks <= 0:
-            total_trucks = 18
 
     # Time-weighted average truck counts
     mean_op1 = (op1 * dt).sum() / total_time
     mean_op2 = (op2 * dt).sum() / total_time
-    mean_dev = (dev * dt).sum() / total_time
+    mean_cap_dev = (cap_dev * dt).sum() / total_time if not cap_dev.empty else 0.0
+    mean_stope_dev = (stope_dev * dt).sum() / total_time if not stope_dev.empty else 0.0
     mean_refuel = (refuel * dt).sum() / total_time
     mean_idle = (idle * dt).sum() / total_time
 
+    if total_trucks is None:
+        total_trucks = int((op1 + op2 + cap_dev + stope_dev + refuel + idle).max()) if not df_sorted.empty else 18
+        if total_trucks <= 0:
+            total_trucks = 18
+
     # Ensure sum does not exceed total_trucks
-    active_tot = mean_op1 + mean_op2 + mean_dev + mean_refuel
+    active_tot = mean_op1 + mean_op2 + mean_cap_dev + mean_stope_dev + mean_refuel
     if mean_idle + active_tot > total_trucks + 0.1:
         mean_idle = max(0.0, total_trucks - active_tot)
 
-    activities = {
-        "Area 1 Stope Ore Haulage": (mean_op1, "#1976D2"),
-        "Area 2 Stope Ore Haulage": (mean_op2, "#388E3C"),
-        "Mine Development Priority Fleet": (mean_dev, "#7B1FA2"),
-        "Refueling & Service": (mean_refuel, "#F57C00"),
-        "Idle / Standby (Buffer Pacing)": (mean_idle, "#78909C"),
-    }
+    if (not cap_dev.empty and cap_dev.max() > 0) or (not stope_dev.empty and stope_dev.max() > 0):
+        activities = {
+            "Area 1 Stope Ore Haulage": (mean_op1, "#1976D2"),
+            "Area 2 Stope Ore Haulage": (mean_op2, "#388E3C"),
+            "Area 2 Capital Decline Dev": (mean_cap_dev, "#7B1FA2"),
+            "Stope Turnaround Dev": (mean_stope_dev, "#FF9800"),
+            "Refueling & Service": (mean_refuel, "#F57C00"),
+            "Idle / Standby (Pacing)": (mean_idle, "#78909C"),
+        }
+    else:
+        dev = df_sorted.get("trucks_dev_reserved", pd.Series(0, index=df_sorted.index))
+        mean_dev = (dev * dt).sum() / total_time
+        activities = {
+            "Area 1 Stope Ore Haulage": (mean_op1, "#1976D2"),
+            "Area 2 Stope Ore Haulage": (mean_op2, "#388E3C"),
+            "Mine Development Priority Fleet": (mean_dev, "#7B1FA2"),
+            "Refueling & Service": (mean_refuel, "#F57C00"),
+            "Idle / Standby (Buffer Pacing)": (mean_idle, "#78909C"),
+        }
 
     # Convert to percentages
     labels = []

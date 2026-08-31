@@ -43,12 +43,13 @@ from drs_mining.components.planning import (
     select_fleet_mode,
     TacticalReviewController,
 )
-from drs_mining.components.allocation import solve_face_allocation_rates
 from drs_mining.components.fleet import (
     TruckPhase,
+    MissionType,
     Operator,
     Truck,
     SurfaceDumpStation,
+    SurfaceWasteDumpStation,
     OPERATING_PHASES,
     SEAT_PHASES,
     DUE_PHASES,
@@ -96,11 +97,8 @@ def _tri(rng: random.Random, mid: float, tol: float) -> float:
 
 
 def _in_shift_window(t: float) -> bool:
-    """Two 10.5 h shifts per day separated by two 1.5 h off-shift gaps."""
-    hod = t % 86400.0
-    return (0.0 <= hod < SHIFT_WORK_HOURS * 3600.0) or (
-        12.0 * 3600.0 <= hod < 22.5 * 3600.0
-    )
+    """Continuous 12.0 h shifts across 24/7 operations without artificial off-shift gaps."""
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +116,8 @@ class MiningSimulationBase(drs.Module):
         config: Optional[SimulationConfig] = None,
         faces: Optional[Sequence[MineFace]] = None,
         topology: Optional[MineTopology] = None,
-        num_trucks: int = 18,
-        num_operators: int = 18,
+        num_trucks: int = 8,
+        num_operators: int = 8,
         num_lhds_per_face: int = 2,
         availability: float = 0.85,
         target_ore_stock_level: float = 60000.0,
@@ -210,8 +208,8 @@ class MiningSimulationBase(drs.Module):
         self.rng = random.Random(seed)
         self.seed = seed
 
-        self.truck_seat_credit = availability * SEAT_PER_SHIFT_SEC
-        self._down_dur = max(0.0, (1.0 - availability) * SEAT_PER_SHIFT_SEC)
+        self.truck_seat_credit = SHIFT_SECONDS
+        self._down_dur = 0.0
 
         # Calendar setup
         self.holidays: Set[int] = set()
@@ -351,8 +349,20 @@ class MiningSimulationBase(drs.Module):
 
         # 5. Discrete Entities
         self.dump_station = SurfaceDumpStation(capacity=SURFACE_TIP_SITES)
+        self.waste_dump_station = SurfaceWasteDumpStation(capacity=SURFACE_TIP_SITES)
         self.face_queues: Dict[int, list] = defaultdict(list)
         self.face_lhds_busy: Dict[int, int] = defaultdict(int)
+        self.decline_heading_queue: list = []
+        self.decline_heading_lhds_busy: int = 0
+        self.num_lhds_per_decline: int = 1
+
+        # Physical Heading Advance Parameters
+        self.heading_cross_section_m2: float = 20.0
+        self.rock_density_t_per_m3: float = 2.7
+        self.dev_m_per_tonne_waste: float = 1.0 / (
+            self.heading_cross_section_m2 * self.rock_density_t_per_m3
+        )
+        self._delta_dev_accum: float = 0.0
 
         self.trucks = [
             Truck(f"T{i+1:02d}", drs.Timer(f"tr_tmr_{i}", 0.0, rate=-1.0))
@@ -507,51 +517,6 @@ class MiningSimulationBase(drs.Module):
         )
 
     # -----------------------------------------------------------------------
-    # Analytical Operational Face Allocation (Appendix A & B, Slide 29)
-    # -----------------------------------------------------------------------
-    def _compute_analytical_face_allocation(self, plant_draw: PlantDrawRates):
-        if self.is_area2_locked():
-            self.analytical_face1_weight.value = 1.0
-            self.analytical_face2_weight.value = 0.0
-            self.analytical_face1_rate_target.value = plant_draw.total
-            self.analytical_face2_rate_target.value = 0.0
-            self.analytical_blend_feasible.value = 1.0
-            return
-
-        f1_done = self.is_face1_exhausted()
-        f2_done = self.is_face2_exhausted()
-        if f1_done and not f2_done:
-            self.analytical_face1_weight.value = 0.0
-            self.analytical_face2_weight.value = 1.0
-            self.analytical_face1_rate_target.value = 0.0
-            self.analytical_face2_rate_target.value = plant_draw.total
-            self.analytical_blend_feasible.value = 1.0
-            return
-        if f2_done and not f1_done:
-            self.analytical_face1_weight.value = 1.0
-            self.analytical_face2_weight.value = 0.0
-            self.analytical_face1_rate_target.value = plant_draw.total
-            self.analytical_face2_rate_target.value = 0.0
-            self.analytical_blend_feasible.value = 1.0
-            return
-
-        f1_ore1 = 1.0 - float(self.face1.active_parcel_ore_fraction.value)
-        f2_ore1 = 1.0 - float(self.face2.active_parcel_ore_fraction.value)
-
-        alloc = solve_face_allocation_rates(
-            target_ore1_rate=plant_draw.ore1,
-            target_ore2_rate=plant_draw.ore2,
-            face1_ore1_fraction=f1_ore1,
-            face2_ore1_fraction=f2_ore1,
-        )
-
-        self.analytical_face1_weight.value = alloc.face1_weight
-        self.analytical_face2_weight.value = alloc.face2_weight
-        self.analytical_face1_rate_target.value = alloc.face1_rate
-        self.analytical_face2_rate_target.value = alloc.face2_rate
-        self.analytical_blend_feasible.value = 1.0 if alloc.is_feasible else 0.0
-
-
     # -----------------------------------------------------------------------
     # Operator & Shift Mechanics
     # -----------------------------------------------------------------------
@@ -604,7 +569,7 @@ class MiningSimulationBase(drs.Module):
     # Dispatch Face Selection
     # -----------------------------------------------------------------------
     def select_face_for_truck(self, tr: Optional[Truck] = None) -> int:
-        """Selects target face for haulage dispatch using analytical blending or heuristic."""
+        """Selects target face for haulage dispatch using mode-based routing matching Shelswell baseline."""
         if self.is_area2_locked():
             return 1
 
@@ -617,15 +582,9 @@ class MiningSimulationBase(drs.Module):
         if f1_done and f2_done:
             return 1
 
-        if self.enable_analytical_blending and self.policy != 1:
-            # Policy 2: Analytical Operational Face-Allocation (Slide 29)
-            w2 = float(self.analytical_face2_weight.value)
-            return 2 if self.rng.random() < w2 else 1
-        else:
-            # Policy 1: Fixed heuristic dispatch
-            mode_name = self.plant.active_operating_mode.value.name
-            p_face2 = 0.65 if "MODE_A" in mode_name else 0.35
-            return 2 if self.rng.random() < p_face2 else 1
+        mode_name = self.plant.active_operating_mode.value.name
+        p_face2 = 0.65 if "MODE_A" in mode_name else 0.35
+        return 2 if self.rng.random() < p_face2 else 1
 
     # -----------------------------------------------------------------------
     # Discrete State Machine Flow & Haulage Dispatch
@@ -649,60 +608,166 @@ class MiningSimulationBase(drs.Module):
                 return True
             return False
 
-        # If all accessible faces are exhausted, trucks cannot dispatch for ore
-        if self.is_area2_locked():
-            if self.is_face1_exhausted():
-                self._release_operator(tr)
-                return False
-        else:
-            if self.is_face1_exhausted() and self.is_face2_exhausted():
-                self._release_operator(tr)
-                return False
+        mode_name = self.plant.active_operating_mode.value.name
+        is_shutdown = mode_name == "SHUTDOWN"
+        is_surging = "SURGING" in mode_name
 
         total_stock = float(self.ore1_stock.level + self.ore2_stock.level)
-        mode_name = self.plant.active_operating_mode.value.name
-        if mode_name == "SHUTDOWN":
-            self._release_operator(tr)
-            return False
+        if is_shutdown:
+            stock_full = True
+        elif is_surging:
+            # During deficit-driven surging, allow total stockpile to exceed target to resolve deficit
+            stock_full = total_stock >= self.target_ore_stock_level * 1.5
+        else:
+            # In normal modes, strictly enforce 60kt buffer cap
+            stock_full = total_stock >= self.target_ore_stock_level
 
-        # Check production fleet quota vs reserved development trucks
-        reserved_trucks = int(
-            float(self.development_priority_reserved_trucks.value)
+        # Active mission counts
+        active_capital_dev = sum(
+            1
+            for trk in self.trucks
+            if getattr(trk, "mission_type", None) == MissionType.CAPITAL_DECLINE_DEV
+            and trk.phase in OPERATING_PHASES
         )
-        max_production_trucks = max(1, len(self.trucks) - reserved_trucks)
-        active_prod_trucks = sum(
-            1 for trk in self.trucks if trk.phase in OPERATING_PHASES
+        active_prod = sum(
+            1
+            for trk in self.trucks
+            if getattr(trk, "mission_type", None) == MissionType.ORE_HAUL
+            and trk.phase in OPERATING_PHASES
         )
-        if active_prod_trucks >= max_production_trucks:
-            self._release_operator(tr)
-            return False
 
-        # Mill-Demand Dispatch Throttling (Slide 15 & Shelswell baseline)
-        day_progress = (t % 86400.0) / 86400.0
-        expected_hauled_by_now = self.daily_target_ore * day_progress
-        if (
-            total_stock >= self.target_ore_stock_level
-            and self.daily_hauled_ore > expected_hauled_by_now + 100.0
+        can_mine_ore = False
+        if not is_shutdown and not stock_full:
+            if self.is_area2_locked():
+                if not self.is_face1_exhausted():
+                    can_mine_ore = True
+            else:
+                if not (self.is_face1_exhausted() and self.is_face2_exhausted()):
+                    can_mine_ore = True
+
+        need_capital_dev = self.is_area2_locked()
+        reserved_dev = int(float(self.development_priority_reserved_trucks.value))
+
+        # -------------------------------------------------------------------
+        # 1. Mission Assignment: Ore Production Haulage (Primary Priority when stock < target)
+        # -------------------------------------------------------------------
+        if can_mine_ore and (not need_capital_dev or active_capital_dev >= max(1, reserved_dev) or active_prod < 4):
+            if not self._acquire_operator(tr):
+                self._release_operator(tr)
+                return False
+
+            target_face_id = self.select_face_for_truck(tr)
+            face = self.get_face_by_id(target_face_id)
+            if face.state == FaceState.DEVELOPMENT_TURNAROUND:
+                tr.mission_type = MissionType.STOPE_TURNAROUND_DEV
+                tr.is_waste = True
+            else:
+                tr.mission_type = MissionType.ORE_HAUL
+                tr.is_waste = False
+
+            tr.target_face_id = target_face_id
+            tr.target_level = self.face_levels.get(
+                target_face_id,
+                AREA2_LEVEL if target_face_id == 2 else AREA1_LEVEL,
+            )
+            tr.trip_start = t
+            tr.phase = TruckPhase.EMPTY
+            dur = self._travel_time(tr, loaded=False)
+            tr.timer.value = dur
+            tr.timer.rate = -1.0
+            return True
+
+        # -------------------------------------------------------------------
+        # 2. Mission Assignment: Capital Decline Development (Level 6 Heading)
+        # -------------------------------------------------------------------
+        should_dispatch_capital_dev = False
+        if need_capital_dev:
+            if self.policy == 1 or self.policy_name == "POLICY_1_MYOPIC":
+                if self.is_face1_exhausted() or stock_full:
+                    should_dispatch_capital_dev = True
+            else:
+                if active_capital_dev < max(1, reserved_dev) or stock_full or not can_mine_ore:
+                    should_dispatch_capital_dev = True
+
+        if should_dispatch_capital_dev:
+            if not self._acquire_operator(tr):
+                self._release_operator(tr)
+                return False
+            tr.mission_type = MissionType.CAPITAL_DECLINE_DEV
+            tr.target_face_id = -1
+            tr.target_level = AREA2_LEVEL  # Level 6 decline face
+            tr.is_waste = True
+            tr.trip_start = t
+            tr.phase = TruckPhase.EMPTY
+            dur = self._travel_time(tr, loaded=False)
+            tr.timer.value = dur
+            tr.timer.rate = -1.0
+            return True
+
+        # -------------------------------------------------------------------
+        # 3. Mission Assignment: Stope Turnaround Development
+        # -------------------------------------------------------------------
+        stope_in_turnaround = None
+        if hasattr(self, "faces"):
+            for f in self.faces:
+                if f.state == FaceState.DEVELOPMENT_TURNAROUND:
+                    stope_in_turnaround = f
+                    break
+        elif hasattr(self, "face1") and self.face1.state == FaceState.DEVELOPMENT_TURNAROUND:
+            stope_in_turnaround = self.face1
+        elif (
+            hasattr(self, "face2")
+            and not self.is_area2_locked()
+            and self.face2.state == FaceState.DEVELOPMENT_TURNAROUND
         ):
-            self._release_operator(tr)
-            return False
+            stope_in_turnaround = self.face2
 
-        if not self._acquire_operator(tr):
-            self._release_operator(tr)
-            return False
+        if stope_in_turnaround is not None:
+            if not self._acquire_operator(tr):
+                self._release_operator(tr)
+                return False
+            tr.mission_type = MissionType.STOPE_TURNAROUND_DEV
+            tr.target_face_id = stope_in_turnaround.face_id
+            tr.target_level = self.face_levels.get(
+                stope_in_turnaround.face_id, AREA1_LEVEL
+            )
+            tr.is_waste = True
+            tr.trip_start = t
+            tr.phase = TruckPhase.EMPTY
+            dur = self._travel_time(tr, loaded=False)
+            tr.timer.value = dur
+            tr.timer.rate = -1.0
+            return True
 
-        target_face_id = self.select_face_for_truck(tr)
-        tr.target_face_id = target_face_id
-        tr.target_level = self.face_levels.get(
-            target_face_id,
-            AREA2_LEVEL if target_face_id == 2 else AREA1_LEVEL,
-        )
-        tr.trip_start = t
-        tr.phase = TruckPhase.EMPTY
-        dur = self._travel_time(tr, loaded=False)
-        tr.timer.value = dur
-        tr.timer.rate = -1.0
-        return True
+        # Fallback to ore if still can mine ore
+        if can_mine_ore:
+            if not self._acquire_operator(tr):
+                self._release_operator(tr)
+                return False
+
+            target_face_id = self.select_face_for_truck(tr)
+            face = self.get_face_by_id(target_face_id)
+            if face.state == FaceState.DEVELOPMENT_TURNAROUND:
+                tr.mission_type = MissionType.STOPE_TURNAROUND_DEV
+                tr.is_waste = True
+            else:
+                tr.mission_type = MissionType.ORE_HAUL
+                tr.is_waste = False
+
+            tr.target_face_id = target_face_id
+            tr.target_level = self.face_levels.get(
+                target_face_id,
+                AREA2_LEVEL if target_face_id == 2 else AREA1_LEVEL,
+            )
+            tr.trip_start = t
+            tr.phase = TruckPhase.EMPTY
+            dur = self._travel_time(tr, loaded=False)
+            tr.timer.value = dur
+            tr.timer.rate = -1.0
+            return True
+
+        self._release_operator(tr)
+        return False
 
     def _enter_face_loadout(self, tr: Truck, face_id: int) -> None:
         tr.phase = TruckPhase.WAIT_LOAD
@@ -715,6 +780,24 @@ class MiningSimulationBase(drs.Module):
         while q and self.face_lhds_busy[face_id] < self.num_lhds_per_face:
             nxt = q.pop(0)
             self.face_lhds_busy[face_id] += 1
+            nxt.phase = TruckPhase.SPOT_LOAD
+            spot = _tri(self.rng, TRUCK_LOAD_SPOT_MIN * 60.0, 0.15)
+            nxt.timer.value = spot
+            nxt.timer.rate = -1.0
+
+    def _enter_decline_loadout(self, tr: Truck) -> None:
+        tr.phase = TruckPhase.WAIT_LOAD
+        tr.timer.rate = 0.0
+        self.decline_heading_queue.append(tr)
+        self._service_decline_queue()
+
+    def _service_decline_queue(self) -> None:
+        while (
+            self.decline_heading_queue
+            and self.decline_heading_lhds_busy < self.num_lhds_per_decline
+        ):
+            nxt = self.decline_heading_queue.pop(0)
+            self.decline_heading_lhds_busy += 1
             nxt.phase = TruckPhase.SPOT_LOAD
             spot = _tri(self.rng, TRUCK_LOAD_SPOT_MIN * 60.0, 0.15)
             nxt.timer.value = spot
@@ -736,10 +819,41 @@ class MiningSimulationBase(drs.Module):
 
     def _finish_loading(self, tr: Truck) -> None:
         t = self.gt.value
+        if tr.mission_type == MissionType.CAPITAL_DECLINE_DEV:
+            tr.current_payload = ORE_PAYLOAD  # 54t development waste
+            tr.payload_ore_fraction = 0.0
+            tr.is_waste = True
+            self.decline_heading_lhds_busy = max(
+                0, self.decline_heading_lhds_busy - 1
+            )
+            self._service_decline_queue()
+            tr.phase = TruckPhase.LOADED
+            dur = self._travel_time(tr, loaded=True)
+            tr.timer.value = dur
+            tr.timer.rate = -1.0
+            return
+
+        if tr.mission_type == MissionType.STOPE_TURNAROUND_DEV:
+            face = self.get_face_by_id(tr.target_face_id)
+            w_mass, d_m, is_complete = face.extract_turnaround_waste(ORE_PAYLOAD)
+            tr.current_payload = w_mass if w_mass > 0 else ORE_PAYLOAD
+            tr.payload_ore_fraction = 0.0
+            tr.is_waste = True
+            self.face_lhds_busy[tr.target_face_id] = max(
+                0, self.face_lhds_busy[tr.target_face_id] - 1
+            )
+            self._service_face_queue(tr.target_face_id)
+            tr.phase = TruckPhase.LOADED
+            dur = self._travel_time(tr, loaded=True)
+            tr.timer.value = dur
+            tr.timer.rate = -1.0
+            return
+
         face = self.get_face_by_id(tr.target_face_id)
         ore2_frac = float(face.active_parcel_ore_fraction.value)
         tr.current_payload = ORE_PAYLOAD
         tr.payload_ore_fraction = ore2_frac
+        tr.is_waste = False
 
         # Update face extraction counters
         face.cumulative_extracted_mass.value += ORE_PAYLOAD
@@ -753,14 +867,22 @@ class MiningSimulationBase(drs.Module):
         )
         self.ore2_hauled_by_face[tr.target_face_id] += ORE_PAYLOAD * ore2_frac
 
-        if tr.target_face_id == 1 and not self._face1_depleted and self.is_face1_exhausted():
+        if (
+            tr.target_face_id == 1
+            and not self._face1_depleted
+            and self.is_face1_exhausted()
+        ):
             day = (
                 float(self.tactical_controller.strategic_year_index.value)
                 * self.strategic_period_days
                 + float(self.tactical_controller.strategic_year_timer.value)
             ) if hasattr(self, "tactical_controller") else (self.gt.value / 86400.0)
             self._on_face1_exhausted(day)
-        elif tr.target_face_id == 2 and not self._face2_depleted and self.is_face2_exhausted():
+        elif (
+            tr.target_face_id == 2
+            and not self._face2_depleted
+            and self.is_face2_exhausted()
+        ):
             day = (
                 float(self.tactical_controller.strategic_year_index.value)
                 * self.strategic_period_days
@@ -839,6 +961,76 @@ class MiningSimulationBase(drs.Module):
         self.trips += 1
         self._cycle_sum += t - tr.trip_start
         tr.current_payload = 0.0
+        self._release_operator(tr)
+
+        # Check refueling requirement
+        if tr.fuel <= tr.refuel_threshold:
+            self._enter_refuel(tr)
+        else:
+            tr.phase = TruckPhase.IDLE
+            tr.timer.value = 0.0
+            tr.timer.rate = 0.0
+
+    def _enter_waste_dump(self, tr: Truck) -> None:
+        tr.phase = TruckPhase.WAIT_DUMP
+        tr.timer.rate = 0.0
+        self.waste_dump_station.queue.append(tr)
+        self._service_waste_dump_queue()
+
+    def _service_waste_dump_queue(self) -> None:
+        while (
+            self.waste_dump_station.queue
+            and self.waste_dump_station.in_use < self.waste_dump_station.capacity
+        ):
+            nxt = self.waste_dump_station.queue.pop(0)
+            self._start_waste_dump(nxt)
+
+    def _start_waste_dump(self, tr: Truck) -> None:
+        self.waste_dump_station.in_use += 1
+        tr.phase = TruckPhase.DUMPING
+        spot = _tri(self.rng, DUMP_SPOT_MIN * 60.0, 0.15)
+        dump = _tri(self.rng, DUMP_MIN * 60.0, 0.15)
+        tr.dump_dur = spot + dump
+        tr.timer.value = tr.dump_dur
+        tr.timer.rate = -1.0
+
+    def _finish_waste_dumping(self, tr: Truck) -> None:
+        t = self.gt.value
+        dev_m = tr.current_payload * self.dev_m_per_tonne_waste
+        self._delta_dev_accum += dev_m
+
+        if tr.mission_type == MissionType.CAPITAL_DECLINE_DEV:
+            self.area2_cumulative_development.value += dev_m
+            self.face2.cumulative_development.value = float(
+                self.area2_cumulative_development.value
+            )
+            self.cumulative_mine_development.value += dev_m
+            if (
+                float(self.area2_cumulative_development.value) >= 4000.0
+                and not self._area2_unlocked
+            ):
+                day = (
+                    float(self.tactical_controller.strategic_year_index.value)
+                    * self.strategic_period_days
+                    + float(self.tactical_controller.strategic_year_timer.value)
+                ) if hasattr(self, "tactical_controller") else (self.gt.value / 86400.0)
+                self._on_area2_unlocked(day)
+        elif tr.mission_type == MissionType.STOPE_TURNAROUND_DEV:
+            self.sustaining_cumulative_development.value += dev_m
+            self.cumulative_mine_development.value += dev_m
+        else:
+            self.sustaining_cumulative_development.value += dev_m
+            self.cumulative_mine_development.value += dev_m
+
+        self.waste_dump_station.in_use = max(
+            0, self.waste_dump_station.in_use - 1
+        )
+        self._service_waste_dump_queue()
+
+        self.trips += 1
+        self._cycle_sum += t - tr.trip_start
+        tr.current_payload = 0.0
+        tr.is_waste = False
         self._release_operator(tr)
 
         # Check refueling requirement
@@ -1200,8 +1392,6 @@ class MiningSimulationBase(drs.Module):
             stockpile2_routing_fraction=f_blend,
         )
 
-        self._compute_analytical_face_allocation(plant_draw)
-
         ore1_draw_rate_sec = plant_draw.ore1 / 86400.0
         ore2_draw_rate_sec = plant_draw.ore2 / 86400.0
 
@@ -1213,58 +1403,9 @@ class MiningSimulationBase(drs.Module):
         self.plant.process(out1 + out2)
         self.plant.cumulative_milled_mass.step(dt)
 
-        # 4. Policy-Driven Development Calculation (Slide 22 vs Slide 23)
-        n_operating_trucks = sum(
-            1 for tr in self.trucks if tr.phase in OPERATING_PHASES
-        )
-        total_trucks = len(self.trucks)
-        available_extra = max(0, total_trucks - n_operating_trucks)
-
-        if self.policy == 1 or self.policy_name == "POLICY_1_MYOPIC":
-            dev_trucks = max(2.0, float(available_extra))
-            if self.is_area2_locked() and self.is_face1_exhausted():
-                frac_to_area2 = 1.0
-            else:
-                frac_to_area2 = 0.05
-        else:
-            reserved_trucks = float(
-                self.development_priority_reserved_trucks.value
-            )
-            locked_boost = (
-                (total_trucks * 0.35)
-                if (
-                    self.is_area2_locked()
-                    and self.area2_redeploy_locked_face_trucks_to_development
-                )
-                else 0.0
-            )
-            dev_trucks = (
-                max(reserved_trucks, float(available_extra)) + locked_boost
-            )
-            prio = self.tactical_controller.active_fleet_mode.name
-            frac_to_area2 = (
-                0.85
-                if prio == "DEVELOPMENT"
-                else (0.60 if prio == "BALANCED" else 0.35)
-            )
-
-        self.development_rate_m_per_day.value = (
-            dev_trucks * DEVELOPMENT_METRES_PER_EXTRA_TRUCK_PER_DAY
-        )
-        delta_dev = self.development_rate_m_per_day.value * dt_days
-        self.cumulative_mine_development.value += delta_dev
-
-        # Dual Development Accounting: Capital Decline vs Sustaining Mine Dev
-        if self.is_area2_locked() and self.tactical_controller.planning_started:
-            capital_advance = delta_dev * frac_to_area2
-            sustaining_advance = delta_dev * (1.0 - frac_to_area2)
-            self.area2_cumulative_development.value += capital_advance
-            self.sustaining_cumulative_development.value += sustaining_advance
-            self.face2.cumulative_development.value = float(
-                self.area2_cumulative_development.value
-            )
-        else:
-            self.sustaining_cumulative_development.value += delta_dev
+        # 4. Discrete Development Capex Stepping
+        delta_dev = self._delta_dev_accum
+        self._delta_dev_accum = 0.0
 
         self._update_area2_readiness()
 
@@ -1285,7 +1426,10 @@ class MiningSimulationBase(drs.Module):
     def _advance_truck_state(self, tr: Truck) -> bool:
         ph = tr.phase
         if ph == TruckPhase.EMPTY:
-            self._enter_face_loadout(tr, tr.target_face_id)
+            if tr.is_waste and tr.mission_type == MissionType.CAPITAL_DECLINE_DEV:
+                self._enter_decline_loadout(tr)
+            else:
+                self._enter_face_loadout(tr, tr.target_face_id)
             return True
         if ph == TruckPhase.SPOT_LOAD:
             tr.phase = TruckPhase.ACQUIRE
@@ -1303,10 +1447,16 @@ class MiningSimulationBase(drs.Module):
             self._finish_loading(tr)
             return True
         if ph == TruckPhase.LOADED:
-            self._enter_dump(tr)
+            if tr.is_waste:
+                self._enter_waste_dump(tr)
+            else:
+                self._enter_dump(tr)
             return True
         if ph == TruckPhase.DUMPING:
-            self._finish_dumping(tr)
+            if tr.is_waste:
+                self._finish_waste_dumping(tr)
+            else:
+                self._finish_dumping(tr)
             return True
         if ph == TruckPhase.REFUELING:
             self._finish_refuel(tr)
@@ -1445,21 +1595,34 @@ class MiningSimulationBase(drs.Module):
             1
             for tr in self.trucks
             if tr.phase in OPERATING_PHASES
-            and tr.phase not in (TruckPhase.IDLE, TruckPhase.PARKED)
+            and not tr.is_waste
             and getattr(tr, "target_face_id", 1) == 1
         )
         n_operating_f2 = sum(
             1
             for tr in self.trucks
             if tr.phase in OPERATING_PHASES
-            and tr.phase not in (TruckPhase.IDLE, TruckPhase.PARKED)
+            and not tr.is_waste
             and getattr(tr, "target_face_id", 1) == 2
         )
+        n_capital_dev = sum(
+            1
+            for tr in self.trucks
+            if tr.phase in OPERATING_PHASES
+            and getattr(tr, "mission_type", None) == MissionType.CAPITAL_DECLINE_DEV
+        )
+        n_stope_dev = sum(
+            1
+            for tr in self.trucks
+            if tr.phase in OPERATING_PHASES
+            and getattr(tr, "mission_type", None) == MissionType.STOPE_TURNAROUND_DEV
+        )
+        n_dev_total = n_capital_dev + n_stope_dev
         n_operating = n_operating_f1 + n_operating_f2
         n_refueling = sum(
             1 for tr in self.trucks if tr.phase == TruckPhase.REFUELING
         )
-        n_idle = max(0, len(self.trucks) - (n_operating + n_refueling))
+        n_idle = max(0, len(self.trucks) - (n_operating + n_dev_total + n_refueling))
         n_dev_reserved = float(self.development_priority_reserved_trucks.value)
 
         record = {
@@ -1580,6 +1743,9 @@ class MiningSimulationBase(drs.Module):
             "trucks_operating_face2": n_operating_f2,
             "trucks_area1_operating": n_operating_f1,
             "trucks_area2_operating": n_operating_f2,
+            "trucks_capital_dev": n_capital_dev,
+            "trucks_stope_dev": n_stope_dev,
+            "trucks_dev_total": n_dev_total,
             "trucks_refueling": n_refueling,
             "trucks_dev_reserved": n_dev_reserved,
             "truck_idle_fraction": n_idle / max(1, len(self.trucks)),
@@ -1594,6 +1760,8 @@ class MiningSimulationBase(drs.Module):
 
     def results(self) -> Dict[str, Any]:
         """Returns structured simulation summary outputs and time-series dataframe."""
+        if not self.telemetry_history or self.telemetry_history[-1]["time_sec"] < self.gt.value - 1e-6:
+            self._record_telemetry(self.gt.value)
         df = pd.DataFrame(self.telemetry_history)
         return {
             "df": df,

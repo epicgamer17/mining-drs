@@ -295,9 +295,6 @@ class MetallurgicalPlant(Processor):
 
         if not current_name.startswith(c_name):
             current_name = c_name
-            if total_stock > self.target_ore_stock_level + 1e-6:
-                return MILL_MODES[c_name + "_MINE_SURGING"]
-            return MILL_MODES[c_name]
 
         if "_CONTINGENCY" in current_name:
             if self._contingency_complete():
@@ -310,8 +307,10 @@ class MetallurgicalPlant(Processor):
             return MILL_MODES[current_name]
 
         if "_MINE_SURGING" in current_name:
-            if total_stock <= self.target_ore_stock_level + 1e-6:
-                return MILL_MODES[c_name]
+            if c_name == "MODE_A" and ore1 > 500.0:
+                return MILL_MODES["MODE_A"]
+            elif c_name == "MODE_B" and ore2 > 500.0:
+                return MILL_MODES["MODE_B"]
             return MILL_MODES[current_name]
 
         if c_name == "MODE_A":

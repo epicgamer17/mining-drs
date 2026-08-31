@@ -134,6 +134,7 @@ class TwoAreaStopeLifecycleEngine(MiningSimulationBase):
             seed=seed,
         )
 
+        self.faces = self.stopes
         self.stope_turnaround_development = drs.Level("stope_turnaround_development", 0.0)
         self.fallback_dispatch_count = drs.Level("fallback_dispatch_count", 0.0)
         self.history_records: List[Dict[str, Any]] = []

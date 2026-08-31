@@ -13,6 +13,17 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 import drs
 
 
+class MissionType(Enum):
+    """Specific physical haulage mission assigned to a truck."""
+
+    STANDBY = "standby"
+    ORE_HAUL = "ore_haul"
+    CAPITAL_DECLINE_DEV = "capital_decline_dev"
+    STOPE_TURNAROUND_DEV = "stope_turnaround_dev"
+    REFUELING = "refueling"
+    MAINTENANCE = "maintenance"
+
+
 class TruckPhase(Enum):
     """Discrete execution phases of a haul truck in the DES state machine."""
 
@@ -73,11 +84,14 @@ class Truck:
     truck_id: str
     timer: Optional[drs.Timer] = None
     phase: TruckPhase = TruckPhase.PARKED
+    mission_type: MissionType = MissionType.STANDBY
     target_face_id: int = 1
     target_loadout: int = -1
     target_level: int = 4
     current_payload: float = 0.0
     payload_ore_fraction: float = 0.30
+    is_waste: bool = False
+    target_heading_name: str = ""
     seat_used: float = 0.0
     fuel: float = 100.0
     refuel_threshold: float = 30.0
@@ -128,6 +142,16 @@ class SurfaceDumpStation:
     queue: List[Truck] = field(default_factory=list)
     _active_ore1_rate: float = 0.0
     _active_ore2_rate: float = 0.0
+
+
+@dataclass
+class SurfaceWasteDumpStation:
+    """Surface waste rock dump facility with finite tipping bays."""
+
+    name: str = "SURFACE_WASTE_DUMP"
+    capacity: int = 2
+    in_use: int = 0
+    queue: List[Truck] = field(default_factory=list)
 
 
 @dataclass

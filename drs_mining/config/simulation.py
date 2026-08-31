@@ -16,8 +16,8 @@ class CalendarConfig:
     days_in_year: float = 365.0
     non_production_days: int = 0
     shift_seconds: float = 12.0 * 3600.0  # 12 hours
-    shift_work_hours: float = 10.5
-    haulage_seat_fraction: float = 0.5417
+    shift_work_hours: float = 12.0
+    haulage_seat_fraction: float = 0.85
     holidays: Tuple[int, ...] = (1, 100, 200, 300)
 
     @property
@@ -42,8 +42,8 @@ class TopologyConfig:
 class HaulageFleetConfig:
     """Haul truck fleet specifications, spotting/dumping durations, and traffic congestion."""
 
-    num_trucks: int = 14
-    num_operators: int = 14
+    num_trucks: int = 8
+    num_operators: int = 8
     num_lhds: int = 2
     truck_payload: float = 26.1
     availability: float = 0.85
