@@ -847,6 +847,110 @@ def plot_truck_idle_and_utilization(
     return ax
 
 
+def plot_fleet_mode_decision_panel(
+    df,
+    time_col: str = "time",
+    ratio_col: str = "area2_readiness_trajectory_ratio",
+    mode_col: str = "fleet_operating_mode_name",
+    title: str = "Policy 2: Fleet Operating Mode Decision & Schedule Trajectory (Level 2 Tactical Control)",
+    unlock_time: Optional[float] = None,
+    deplete_time: Optional[float] = None,
+    ax=None,
+):
+    """Plots the Area 2 schedule trajectory ratio R(t) alongside shaded active Fleet Operating Mode intervals."""
+    ax = _get_ax(ax, figsize=(14, 5))
+
+    t = df[time_col]
+    r = df[ratio_col] if ratio_col in df.columns else pd.Series(1.0, index=df.index)
+
+    # 1. Shaded Background for Active Fleet Operating Mode
+    modes = df[mode_col] if mode_col in df.columns else pd.Series("PRODUCTION", index=df.index)
+    change_idx = df.index[modes != modes.shift(1)].tolist()
+
+    has_dev_label = False
+    has_prod_label = False
+
+    for i, start_idx in enumerate(change_idx):
+        f_mode = str(modes.loc[start_idx]).upper()
+        t_start = df.loc[start_idx, time_col]
+        t_end = (
+            df.loc[change_idx[i + 1], time_col]
+            if i + 1 < len(change_idx)
+            else df[time_col].iloc[-1]
+        )
+
+        if "DEVELOPMENT" in f_mode:
+            lbl = "Fleet Mode: DEVELOPMENT (Extra Trucks -> Capital Dev)" if not has_dev_label else None
+            ax.axvspan(t_start, t_end, color="#ede7f6", alpha=0.85, label=lbl, zorder=1)
+            has_dev_label = True
+        else:
+            lbl = "Fleet Mode: PRODUCTION (Extra Trucks -> Stope Dev)" if not has_prod_label else None
+            ax.axvspan(t_start, t_end, color="#e8f5e9", alpha=0.55, label=lbl, zorder=1)
+            has_prod_label = True
+
+    # 2. Reference Lines and Schedule Baseline
+    ax.axhline(
+        1.0,
+        color="#37474f",
+        linestyle="--",
+        linewidth=1.5,
+        alpha=0.85,
+        label="Target Schedule Pace (R = 1.0)",
+        zorder=2,
+    )
+    ax.axhline(
+        0.90,
+        color="#d32f2f",
+        linestyle=":",
+        linewidth=1.2,
+        alpha=0.75,
+        label="Lagging Schedule Deficit (R < 1.0)",
+        zorder=2,
+    )
+
+    # 3. Trajectory Ratio Curve
+    ax.step(
+        t,
+        r,
+        color="#1565c0",
+        linewidth=2.2,
+        label="Area 2 Schedule Trajectory Ratio R(t)",
+        where="post",
+        zorder=3,
+    )
+
+    # 4. Milestone Markers
+    if unlock_time is not None:
+        ax.axvline(
+            unlock_time,
+            color="#2e7d32",
+            linestyle="-.",
+            linewidth=2.0,
+            alpha=0.95,
+            label=f"* Area 2 Unlocked (Day {unlock_time:.1f})",
+            zorder=4,
+        )
+    if deplete_time is not None:
+        ax.axvline(
+            deplete_time,
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=2.0,
+            alpha=0.90,
+            label=f"* Area 1 Depleted (Day {deplete_time:.1f})",
+            zorder=4,
+        )
+
+    ax.set_title(title, fontsize=12, pad=10)
+    ax.set_ylabel("Trajectory Ratio R(t)")
+    ax.set_xlabel("Simulation Time (Days)")
+    ax.set_ylim(0.0, 1.8)
+    ax.grid(True, alpha=0.3, zorder=0)
+    ax.legend(loc="upper right", framealpha=0.92)
+
+    return ax
+
+
 # ============================================================
 # Shared diagnostics palette / assumptions
 # ============================================================
@@ -952,6 +1056,18 @@ def prepare_history(df):
                 w2 = np.where(a2_ready, np.where(mode_a, 0.65, 0.35), 0.0)
                 df["trucks_area2_operating"] = df["trucks_operating"] * w2
                 df["trucks_area1_operating"] = df["trucks_operating"] - df["trucks_area2_operating"]
+
+    # Fleet Operating Mode formatting
+    if "fleet_operating_mode" in df.columns:
+        df["fleet_operating_mode_name"] = df["fleet_operating_mode"].apply(
+            lambda x: x.name if hasattr(x, "name") else str(x)
+        )
+    elif "fleet_mode" in df.columns:
+        df["fleet_operating_mode_name"] = df["fleet_mode"].apply(
+            lambda x: x.name if hasattr(x, "name") else str(x)
+        )
+    else:
+        df["fleet_operating_mode_name"] = "PRODUCTION"
 
     return df
 
@@ -2649,51 +2765,17 @@ def plot_full_hierarchy_dashboard(
         )
     dash[8].legend(loc="upper right", framealpha=0.90)
 
-    # 9. Strategic Trajectory Ratios: Policy 2
-    plot_time_series(
+    # 9. Fleet Operating Mode Decision & Schedule Trajectory: Policy 2
+    plot_fleet_mode_decision_panel(
         df_p2,
-        y_columns=[
-            "development_trajectory_ratio",
-            "area2_readiness_trajectory_ratio",
-            "ore1_trajectory_ratio",
-            "ore2_trajectory_ratio",
-        ],
-        title="Policy 2: Strategic & Area 2 Trajectory Progress Ratios (Level 2 Tactical Reviews)",
-        is_step=True,
+        time_col="time",
+        ratio_col="area2_readiness_trajectory_ratio",
+        mode_col="fleet_operating_mode_name",
+        title="Policy 2: Fleet Operating Mode Decision & Schedule Trajectory (Level 2 Tactical Control)",
+        unlock_time=unlock_time_p2,
+        deplete_time=deplete_time_p2,
         ax=dash[9],
     )
-    if unlock_time_p2 is not None:
-        dash[9].axvline(
-            unlock_time_p2,
-            color="#2e7d32",
-            linestyle="-.",
-            linewidth=2.0,
-            alpha=0.85,
-        )
-    if deplete_time_p2 is not None:
-        dash[9].axvline(
-            deplete_time_p2,
-            color="#2e7d32",
-            linestyle="--",
-            linewidth=2.0,
-            alpha=0.85,
-        )
-    if deplete2_time_p2 is not None:
-        dash[9].axvline(
-            deplete2_time_p2,
-            color="#1b5e20",
-            linestyle="-.",
-            linewidth=2.0,
-            alpha=0.85,
-        )
-    dash[9].axhline(
-        0.90, color="red", linestyle=":", label="Tolerance Threshold (0.90)"
-    )
-    dash[9].axhline(
-        1.00, color="gray", linestyle="--", label="Target Trajectory (1.00)"
-    )
-    dash[9].set_ylabel("Trajectory Ratio")
-    dash[9].legend(loc="upper right")
 
     # 10. Fleet Activity Distribution: Policy 2
     plot_fleet_activity_distribution(
