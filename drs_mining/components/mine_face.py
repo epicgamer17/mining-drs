@@ -71,6 +71,8 @@ class MineFace(Processor):
         max_parcel_ore_mass: Optional[float] = None,
         waste_to_ore_ratio: float = 0.0,
         turnaround_dev_per_parcel_m: float = 0.0,
+        heading_cross_section_m2: float = 16.0,
+        rock_density_t_per_m3: float = 2.7,
         seed: Optional[int] = None,
     ):
         super().__init__(name=name, max_rate=max_rate)
@@ -81,6 +83,11 @@ class MineFace(Processor):
         self.std_dev_ore_fraction = std_dev_ore_fraction
         self.prob_new_facies = prob_new_facies
         self.variation_same_facies = variation_same_facies
+        self.heading_cross_section_m2 = heading_cross_section_m2
+        self.rock_density_t_per_m3 = rock_density_t_per_m3
+        self.dev_m_per_tonne_waste = 1.0 / (
+            self.heading_cross_section_m2 * self.rock_density_t_per_m3
+        )
 
         self.min_ore_mass = min_parcel_ore_mass or min_ore_mass
         self.max_ore_mass = max_parcel_ore_mass or max_ore_mass

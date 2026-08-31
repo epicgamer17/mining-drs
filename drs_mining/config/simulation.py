@@ -35,6 +35,9 @@ class TopologyConfig:
     area2_level: int = 6
     level_drift_m: float = 60.0
     surface_m: float = 300.0
+    capital_decline_cross_section_m2: float = 25.0
+    stope_cross_section_m2: float = 16.0
+    rock_density_t_per_m3: float = 2.7
     speeds: Dict[str, Dict[str, float]] = field(default_factory=lambda: dict(DEFAULT_SPEEDS))
 
 
@@ -42,8 +45,8 @@ class TopologyConfig:
 class HaulageFleetConfig:
     """Haul truck fleet specifications, spotting/dumping durations, and traffic congestion."""
 
-    num_trucks: int = 8
-    num_operators: int = 8
+    num_trucks: int = 9
+    num_operators: int = 9
     num_lhds: int = 2
     truck_payload: float = 26.1
     availability: float = 0.85
@@ -73,10 +76,12 @@ class PlantConfig:
     duration_of_shutdowns: float = 1.0
     duration_of_contingency_segments: float = 1.0
     mode_a_ore1_milling_rate: float = 540.0 * 24.0
-    mode_a_ore2_milling_rate: float = 60.0 * 24.0
+    mode_a_ore2_milling_rate: float = 2400.0
     mode_a_contingency_ore1_milling_rate: float = 500.0 * 24.0
-    mode_b_ore1_milling_rate: float = 300.0 * 24.0
-    mode_b_ore2_milling_rate: float = 300.0 * 24.0
+    mode_a_contingency_ore2_milling_rate: float = 2300.0
+    mode_b_ore1_milling_rate: float = 540.0 * 24.0
+    mode_b_ore2_milling_rate: float = 800.0
+    mode_b_contingency_ore1_milling_rate: float = 500.0 * 24.0
     mode_b_contingency_ore2_milling_rate: float = 650.0 * 24.0
 
 
@@ -93,13 +98,14 @@ class GeologyConfig:
     min_parcel_mass: float = 30000.0
     max_parcel_mass: float = 50000.0
     initial_parcel_mass: float = 40000.0
+    stope_turnaround_dev_per_parcel_m: float = 75.0
 
 
 @dataclass(frozen=True)
 class StrategicPlanningConfig:
     """Strategic annual targets, capital readiness requirements, and review tolerances."""
 
-    area2_required_development: float = 4000.0
+    area2_required_development: float = 6000.0
     area2_ready_by_day: float = 365.0
     strategic_period_days: float = 365.0
     tactical_review_period_days: float = 30.0

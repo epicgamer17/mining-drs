@@ -120,8 +120,8 @@ class MiningSimulationBase(drs.Module):
         config: Optional[SimulationConfig] = None,
         faces: Optional[Sequence[MineFace]] = None,
         topology: Optional[MineTopology] = None,
-        num_trucks: int = 8,
-        num_operators: int = 8,
+        num_trucks: int = 9,
+        num_operators: int = 9,
         num_lhds_per_face: int = 2,
         availability: float = 0.85,
         target_ore_stock_level: float = 60000.0,
@@ -190,7 +190,7 @@ class MiningSimulationBase(drs.Module):
             ),
         )
         self.area2_readiness_target = area2_readiness_target or AreaReadinessTarget(
-            required_development=4000.0,
+            required_development=6000.0,
             ready_by_day=365.0,
         )
         self.area2_physical_unlock_enabled = area2_physical_unlock_enabled
@@ -280,7 +280,8 @@ class MiningSimulationBase(drs.Module):
                 initial_parcel_mass=40000.0,
                 required_development=0.0,
                 waste_to_ore_ratio=0.10,
-                turnaround_dev_per_parcel_m=5.0,
+                turnaround_dev_per_parcel_m=75.0,
+                heading_cross_section_m2=16.0,
             )
 
             self.gen2 = StochasticFaciesGenerator(
@@ -309,7 +310,8 @@ class MiningSimulationBase(drs.Module):
                 counterfactual_disable=self.area2_counterfactual_disable,
                 on_unlock_callback=self._on_area2_unlocked,
                 waste_to_ore_ratio=0.10,
-                turnaround_dev_per_parcel_m=5.0,
+                turnaround_dev_per_parcel_m=75.0,
+                heading_cross_section_m2=16.0,
             )
             self.faces = [self.face1, self.face2]
 
@@ -368,12 +370,18 @@ class MiningSimulationBase(drs.Module):
         self.decline_heading_lhds_busy: int = 0
         self.num_lhds_per_decline: int = 1
 
-        # Physical Heading Advance Parameters
-        self.heading_cross_section_m2: float = 20.0
+        # Physical Heading Advance Parameters (Geometry Independence)
+        self.capital_decline_cross_section_m2: float = 25.0
+        self.stope_cross_section_m2: float = 16.0
         self.rock_density_t_per_m3: float = 2.7
-        self.dev_m_per_tonne_waste: float = 1.0 / (
-            self.heading_cross_section_m2 * self.rock_density_t_per_m3
+        self.heading_cross_section_m2: float = self.stope_cross_section_m2
+        self.decline_dev_m_per_tonne_waste: float = 1.0 / (
+            self.capital_decline_cross_section_m2 * self.rock_density_t_per_m3
         )
+        self.stope_dev_m_per_tonne_waste: float = 1.0 / (
+            self.stope_cross_section_m2 * self.rock_density_t_per_m3
+        )
+        self.dev_m_per_tonne_waste: float = self.stope_dev_m_per_tonne_waste
         self._delta_dev_accum: float = 0.0
 
         self.trucks = [
@@ -916,17 +924,22 @@ class MiningSimulationBase(drs.Module):
 
     def _finish_waste_dumping(self, tr: Truck) -> None:
         t = self.gt.value
-        dev_m = tr.current_payload * self.dev_m_per_tonne_waste
-        self._delta_dev_accum += dev_m
 
         if tr.mission_type == MissionType.CAPITAL_DECLINE_DEV:
+            dev_m = tr.current_payload * self.decline_dev_m_per_tonne_waste
+            self._delta_dev_accum += dev_m
             self.area2_cumulative_development.value += dev_m
             self.face2.cumulative_development.value = float(
                 self.area2_cumulative_development.value
             )
             self.cumulative_mine_development.value += dev_m
+            req_dev = (
+                self.area2_readiness_target.required_development
+                if self.area2_readiness_target
+                else 6000.0
+            )
             if (
-                float(self.area2_cumulative_development.value) >= 4000.0
+                float(self.area2_cumulative_development.value) >= req_dev - 1e-6
                 and not self._area2_unlocked
             ):
                 day = (
@@ -936,9 +949,16 @@ class MiningSimulationBase(drs.Module):
                 ) if hasattr(self, "tactical_controller") else (self.gt.value / 86400.0)
                 self._on_area2_unlocked(day)
         elif tr.mission_type == MissionType.STOPE_TURNAROUND_DEV:
+            face = self.get_face_by_id(tr.target_face_id)
+            face_cs = getattr(face, "heading_cross_section_m2", self.stope_cross_section_m2)
+            dev_m = tr.current_payload / (face_cs * self.rock_density_t_per_m3)
+            self._delta_dev_accum += dev_m
             self.sustaining_cumulative_development.value += dev_m
             self.cumulative_mine_development.value += dev_m
+            face.advance_turnaround(dev_advance_m=dev_m, waste_tonnes=tr.current_payload)
         else:
+            dev_m = tr.current_payload * self.stope_dev_m_per_tonne_waste
+            self._delta_dev_accum += dev_m
             self.sustaining_cumulative_development.value += dev_m
             self.cumulative_mine_development.value += dev_m
 

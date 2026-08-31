@@ -154,9 +154,9 @@ def run_full_hierarchy_study(
     total_days: Optional[float] = None,
     total_ore_to_extract: float = 6600000.0,
     warmup_ore: float = 0.0,
-    area2_required_dev: float = 4000.0,
+    area2_required_dev: float = 6000.0,
     area2_ready_by_day: float = 365.0,
-    num_trucks: int = 8,
+    num_trucks: int = 9,
     seed: int = 42,
     plot: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -218,9 +218,9 @@ if __name__ == "__main__":
     parser.add_argument("--total_days", type=float, default=None, help="Total days to simulate (default: run until Area 1 and Area 2 are both depleted)")
     parser.add_argument("--total_ore", type=float, default=6600000.0, help="Total ore to extract across Area 1 and Area 2 (default: 6,600,000 t)")
     parser.add_argument("--warmup_ore", type=float, default=0.0)
-    parser.add_argument("--area2_required_dev", type=float, default=4000.0)
+    parser.add_argument("--area2_required_dev", type=float, default=6000.0)
     parser.add_argument("--area2_ready_by_day", type=float, default=365.0)
-    parser.add_argument("--trucks", type=int, default=8)
+    parser.add_argument("--trucks", type=int, default=9)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_plot", action="store_true")
     args = parser.parse_args()
