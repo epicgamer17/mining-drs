@@ -262,6 +262,8 @@ class MiningSimulationBase(drs.Module):
             self.face1 = MineFace(
                 name="mine_face_1",
                 face_id=1,
+                area_id=1,
+                level_index=3,
                 generator=self.gen1,
                 min_ore_mass=30000.0,
                 max_ore_mass=50000.0,
@@ -273,6 +275,8 @@ class MiningSimulationBase(drs.Module):
                 variation_same_facies=0.01,
                 initial_parcel_mass=40000.0,
                 required_development=0.0,
+                waste_to_ore_ratio=0.10,
+                turnaround_dev_per_parcel_m=5.0,
             )
 
             self.gen2 = StochasticFaciesGenerator(
@@ -284,6 +288,8 @@ class MiningSimulationBase(drs.Module):
             self.face2 = MineFace(
                 name="mine_face_2",
                 face_id=2,
+                area_id=2,
+                level_index=6,
                 generator=self.gen2,
                 min_ore_mass=30000.0,
                 max_ore_mass=50000.0,
@@ -298,6 +304,8 @@ class MiningSimulationBase(drs.Module):
                 ready_by_day=self.area2_readiness_target.ready_by_day,
                 counterfactual_disable=self.area2_counterfactual_disable,
                 on_unlock_callback=self._on_area2_unlocked,
+                waste_to_ore_ratio=0.10,
+                turnaround_dev_per_parcel_m=5.0,
             )
             self.faces = [self.face1, self.face2]
 
