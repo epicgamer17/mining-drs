@@ -1025,18 +1025,43 @@ def prepare_history(df):
     df["Ore 2 Stockpile Level"] = df["Ore2Stock_mass"] / 1000.0 if "Ore2Stock_mass" in df.columns else 0.0
 
     # Campaign-level cash flow and daily variation ranges
-    cf_col = (
-        "current_discounted_cash_flow_rate"
-        if "current_discounted_cash_flow_rate" in df.columns
-        else ("current_cash_flow_rate" if "current_cash_flow_rate" in df.columns else None)
-    )
+    if ("cumulative_discounted_cash_flow" in df.columns or "cumulative_npv" in df.columns) and "time" in df.columns and len(df) > 1:
+        npv_col = "cumulative_discounted_cash_flow" if "cumulative_discounted_cash_flow" in df.columns else "cumulative_npv"
+        dt_s = df["time"].diff()
+        d_npv_s = df[npv_col].diff()
+        raw_rates = np.where(dt_s > 1e-9, d_npv_s / dt_s, df.get("current_discounted_cash_flow_rate", 0.0))
+        if len(raw_rates) > 1 and (np.isnan(raw_rates[0]) or raw_rates[0] == 0.0):
+            raw_rates[0] = raw_rates[1]
+        df["interval_discounted_cash_flow_rate"] = raw_rates
+        cf_col = "interval_discounted_cash_flow_rate"
+    else:
+        cf_col = (
+            "current_discounted_cash_flow_rate"
+            if "current_discounted_cash_flow_rate" in df.columns
+            else ("current_cash_flow_rate" if "current_cash_flow_rate" in df.columns else None)
+        )
+
     if cf_col is not None and "active_operating_mode_name" in df.columns:
         campaign_id = (
             df["active_operating_mode_name"] != df["active_operating_mode_name"].shift(1)
         ).cumsum()
         df["campaign_id"] = campaign_id
+
+        # Calculate true campaign-level time-integrated cash flow rate: delta(NPV_campaign) / delta(time_campaign)
+        if ("cumulative_discounted_cash_flow" in df.columns or "cumulative_npv" in df.columns) and "time" in df.columns:
+            npv_col = "cumulative_discounted_cash_flow" if "cumulative_discounted_cash_flow" in df.columns else "cumulative_npv"
+            camp_dt = df.groupby("campaign_id")["time"].transform(
+                lambda s: (s.iloc[-1] - s.iloc[0]) if len(s) > 1 else (df["time"].diff().median() if len(df) > 1 else 1.0)
+            )
+            camp_dnpv = df.groupby("campaign_id")[npv_col].transform(
+                lambda s: (s.iloc[-1] - s.iloc[0]) if len(s) > 1 else 0.0
+            )
+            df["campaign_cash_flow_rate"] = np.where(camp_dt > 1e-6, camp_dnpv / camp_dt, df[cf_col])
+        else:
+            grouped = df.groupby("campaign_id")[cf_col]
+            df["campaign_cash_flow_rate"] = grouped.transform("mean")
+
         grouped = df.groupby("campaign_id")[cf_col]
-        df["campaign_cash_flow_rate"] = grouped.transform("mean")
         df["daily_cash_flow_min"] = grouped.transform("min")
         df["daily_cash_flow_max"] = grouped.transform("max")
 

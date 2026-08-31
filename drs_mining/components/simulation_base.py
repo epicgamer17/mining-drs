@@ -573,6 +573,9 @@ class MiningSimulationBase(drs.Module):
         self.telemetry_history: List[Dict[str, Any]] = []
         self._telemetry_dt = cfg.telemetry_dt  # Log interval from config
         self._next_telemetry_t = 0.0
+        self._last_telemetry_t = 0.0
+        self._last_telemetry_net_cf = 0.0
+        self._last_telemetry_npv = 0.0
 
     def _on_area2_unlocked(self, day: float = 0.0) -> None:
         """Callback triggered when Area 2 physical development reaches 100%."""
@@ -1697,6 +1700,21 @@ class MiningSimulationBase(drs.Module):
         tot_processed = float(self.plant.cumulative_milled_mass.value)
         a2_locked = self.is_area2_locked(day)
 
+        curr_cf = float(self.plant.cumulative_net_cash_flow.value)
+        curr_npv = float(self.plant.cumulative_npv.value)
+        dt_telemetry_days = (t - self._last_telemetry_t) / 86400.0 if t > self._last_telemetry_t else 0.0
+
+        if dt_telemetry_days > 1e-9:
+            interval_cf_rate = (curr_cf - self._last_telemetry_net_cf) / dt_telemetry_days
+            interval_dcf_rate = (curr_npv - self._last_telemetry_npv) / dt_telemetry_days
+        else:
+            interval_cf_rate = float(self.plant.cash_flow_rate_per_day.value)
+            interval_dcf_rate = float(self.plant.discounted_cash_flow_rate_per_day.value)
+
+        self._last_telemetry_t = t
+        self._last_telemetry_net_cf = curr_cf
+        self._last_telemetry_npv = curr_npv
+
         n_operating_f1 = sum(
             1
             for tr in self.trucks
@@ -1823,17 +1841,11 @@ class MiningSimulationBase(drs.Module):
                 self.plant.cumulative_npv.value
             ),
             "discount_factor": float(self.plant._discount_factor.value),
-            "current_cash_flow_rate": float(
-                self.plant.cash_flow_rate_per_day.value
-            ),
-            "current_discounted_cash_flow_rate": float(
-                self.plant.discounted_cash_flow_rate_per_day.value
-            ),
+            "current_cash_flow_rate": interval_cf_rate,
+            "current_discounted_cash_flow_rate": interval_dcf_rate,
             "daily_revenue": float(self.plant.daily_revenue_rate.value),
             "daily_cost": float(self.plant.daily_cost_rate.value),
-            "daily_net_cash_flow": float(
-                self.plant.cash_flow_rate_per_day.value
-            ),
+            "daily_net_cash_flow": interval_cf_rate,
             "current_campaign_duration": float(
                 self.mode_controller.current_campaign_duration.value
             ),
