@@ -107,3 +107,15 @@ FLEET_MODES: Dict[str, OperatingMode] = {
     )
     for name, cfg in FLEET_MODE_CONFIGS.items()
 }
+
+# 4. Standard Policy 2 Mill-to-Fleet Mode Mapping Table
+POLICY_2_FLEET_MODE_MAP: Dict[str, str] = {
+    "MODE_A": "PRODUCTION",
+    "MODE_A_CONTINGENCY": "PRODUCTION",
+    "MODE_A_MINE_SURGING": "PRODUCTION",
+    "MODE_B": "DEVELOPMENT",
+    "MODE_B_CONTINGENCY": "PRODUCTION",
+    "MODE_B_MINE_SURGING": "PRODUCTION",
+    "SHUTDOWN": "PRODUCTION",
+}
+

@@ -674,6 +674,11 @@ class MiningSimulationBase(drs.Module):
             face_levels=self.face_levels,
             default_area1_level=AREA1_LEVEL,
             default_area2_level=AREA2_LEVEL,
+            daily_target_ore=self.daily_target_ore,
+            daily_hauled_ore=self.daily_hauled_ore,
+            is_surging=is_surging,
+            area1_exhausted=self.is_face1_exhausted(),
+            reserved_dev_trucks=int(max(2, round(len(self.trucks) * 0.33))),
         )
 
         if mission_res is None:
@@ -1210,6 +1215,7 @@ class MiningSimulationBase(drs.Module):
             required_dev_m=required,
             deadline_day=ready_by_day,
             area2_locked=not self._area2_unlocked,
+            plant_operating_mode=self.plant.active_operating_mode.value.name,
         )
 
     # -----------------------------------------------------------------------
