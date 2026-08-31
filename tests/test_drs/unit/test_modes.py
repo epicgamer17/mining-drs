@@ -2,7 +2,7 @@
 
 import pytest
 from drs_mining.components.modes import OperatingMode, RequireDecision
-from drs_mining.config.modes import (
+from drs_mining.config import (
     MILL_MODES,
     FLEET_MODES,
     MILL_MODE_CONFIGS,

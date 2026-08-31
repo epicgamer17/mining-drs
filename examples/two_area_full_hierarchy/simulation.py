@@ -24,7 +24,11 @@ if _REPO_ROOT not in sys.path:
 
 import pandas as pd
 
-from drs_mining.config import FLEET_MODES
+from drs_mining.config import (
+    SimulationConfig,
+    DEFAULT_CONFIG,
+    FLEET_MODES,
+)
 from drs_mining.components import (
     MiningSimulationBase,
     AreaReadinessTarget,
@@ -44,7 +48,6 @@ from drs_mining.components.plot import (
 
 
 class TwoAreaFullHierarchyEngine(MiningSimulationBase):
-
     """Full 3-Level Hierarchical Simulation Engine with dual development tracking & analytical blending."""
 
     def __init__(
@@ -65,7 +68,6 @@ class TwoAreaFullHierarchyEngine(MiningSimulationBase):
             enable_analytical_blending=enable_analytical_blending,
             **kwargs,
         )
-
 
 
 def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> None:
@@ -148,39 +150,45 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     print("=" * 78 + "\n")
 
 
-
-
 def run_full_hierarchy_study(
+    config: Optional[SimulationConfig] = None,
     total_days: Optional[float] = None,
-    total_ore_to_extract: float = 6600000.0,
-    warmup_ore: float = 0.0,
-    area2_required_dev: float = 6000.0,
-    area2_ready_by_day: float = 365.0,
-    num_trucks: int = 9,
-    seed: int = 42,
+    total_ore_to_extract: Optional[float] = None,
+    warmup_ore: Optional[float] = None,
+    area2_required_dev: Optional[float] = None,
+    area2_ready_by_day: Optional[float] = None,
+    num_trucks: Optional[int] = None,
+    seed: Optional[int] = None,
     plot: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Executes Policy 1 and Policy 2 full hierarchy study until Area 1 and Area 2 are both exhausted (or total_days)."""
+    cfg = config or DEFAULT_CONFIG
+
     strat_target = StrategicYearTarget(
-        min_development=10000.0,
-        min_ore1_production=1300000.0,
-        min_ore2_production=850000.0,
+        min_development=cfg.planning.annual_min_development_m,
+        min_ore1_production=cfg.planning.annual_min_ore1_production_t,
+        min_ore2_production=cfg.planning.annual_min_ore2_production_t,
     )
+    req_dev = area2_required_dev if area2_required_dev is not None else cfg.planning.area2_required_development
+    rdy_day = area2_ready_by_day if area2_ready_by_day is not None else cfg.planning.area2_ready_by_day
     area2_target = AreaReadinessTarget(
-        required_development=area2_required_dev,
-        ready_by_day=area2_ready_by_day,
+        required_development=req_dev,
+        ready_by_day=rdy_day,
     )
 
     duration_p1 = (total_days * 86400.0) if total_days is not None else float("inf")
     duration_p2 = (total_days * 86400.0) if total_days is not None else float("inf")
+    tot_ore = total_ore_to_extract if total_ore_to_extract is not None else cfg.plant.total_ore_to_extract
+    warm = warmup_ore if warmup_ore is not None else 0.0
 
     print("Running Policy 1 (Myopic Baseline)...")
     sim_p1 = TwoAreaFullHierarchyEngine(
+        config=cfg,
         policy=1,
         enable_analytical_blending=False,
         num_trucks=num_trucks,
-        total_ore_to_extract=total_ore_to_extract,
-        ore_to_be_extracted_during_warming_period=warmup_ore,
+        total_ore_to_extract=tot_ore,
+        ore_to_be_extracted_during_warming_period=warm,
         strategic_targets=(strat_target,),
         area2_readiness_target=area2_target,
         seed=seed,
@@ -190,11 +198,12 @@ def run_full_hierarchy_study(
 
     print("Running Policy 2 (Three-Level Hierarchical Control)...")
     sim_p2 = TwoAreaFullHierarchyEngine(
+        config=cfg,
         policy=2,
         enable_analytical_blending=True,
         num_trucks=num_trucks,
-        total_ore_to_extract=total_ore_to_extract,
-        ore_to_be_extracted_during_warming_period=warmup_ore,
+        total_ore_to_extract=tot_ore,
+        ore_to_be_extracted_during_warming_period=warm,
         strategic_targets=(strat_target,),
         area2_readiness_target=area2_target,
         seed=seed,
@@ -205,7 +214,7 @@ def run_full_hierarchy_study(
     print_full_hierarchy_summary(df_p1, df_p2)
 
     if plot and len(df_p2) > 0:
-        print(f"Generating dashboard plot...")
+        print("Generating dashboard plot...")
         plot_full_hierarchy_dashboard(df_p1, df_p2)
 
     return df_p1, df_p2
@@ -216,12 +225,12 @@ if __name__ == "__main__":
         description="Full Three-Level Hierarchy Simulation Study"
     )
     parser.add_argument("--total_days", type=float, default=None, help="Total days to simulate (default: run until Area 1 and Area 2 are both depleted)")
-    parser.add_argument("--total_ore", type=float, default=6600000.0, help="Total ore to extract across Area 1 and Area 2 (default: 6,600,000 t)")
+    parser.add_argument("--total_ore", type=float, default=DEFAULT_CONFIG.plant.total_ore_to_extract, help=f"Total ore to extract across Area 1 and Area 2 (default: {DEFAULT_CONFIG.plant.total_ore_to_extract:,.1f} t)")
     parser.add_argument("--warmup_ore", type=float, default=0.0)
-    parser.add_argument("--area2_required_dev", type=float, default=6000.0)
-    parser.add_argument("--area2_ready_by_day", type=float, default=365.0)
-    parser.add_argument("--trucks", type=int, default=9)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--area2_required_dev", type=float, default=DEFAULT_CONFIG.planning.area2_required_development)
+    parser.add_argument("--area2_ready_by_day", type=float, default=DEFAULT_CONFIG.planning.area2_ready_by_day)
+    parser.add_argument("--trucks", type=int, default=DEFAULT_CONFIG.fleet.num_trucks)
+    parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG.seed)
     parser.add_argument("--no_plot", action="store_true")
     args = parser.parse_args()
 

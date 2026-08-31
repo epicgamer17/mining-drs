@@ -3,7 +3,7 @@ from typing import List, Dict, Mapping, Sequence, Optional, Union, Tuple
 import drs
 from .modes import OperatingMode, RequireDecision
 from .mine_face import MineFace
-from drs_mining.config.modes import MILL_MODES
+from drs_mining.config import MILL_MODES
 
 
 class OperatingModeController(drs.Module):

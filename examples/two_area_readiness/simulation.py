@@ -21,6 +21,10 @@ if _REPO_ROOT not in sys.path:
 
 import pandas as pd
 
+from drs_mining.config import (
+    SimulationConfig,
+    DEFAULT_CONFIG,
+)
 from drs_mining.components import (
     MiningSimulationBase,
     AreaReadinessTarget,
@@ -34,7 +38,6 @@ from drs_mining.components.plot import (
 
 
 class TwoAreaReadinessSimulation(MiningSimulationBase):
-
     """Two-Area Discrete-Event Simulation with Area 2 Physical Readiness Tracking."""
     pass
 
@@ -54,34 +57,40 @@ def plot_two_area_readiness_dashboard(
 
 
 def run_two_area_readiness_simulation(
-    total_ore_to_extract: float = 6600000.0,
-    ore_to_be_extracted_during_warming_period: float = 600000.0,
+    config: Optional[SimulationConfig] = None,
+    total_ore_to_extract: Optional[float] = None,
+    ore_to_be_extracted_during_warming_period: Optional[float] = None,
     total_days: Optional[float] = None,
-    num_trucks: int = 18,
-    num_operators: int = 18,
-    availability: float = 0.85,
-    target_ore_stock_level: float = 60000.0,
+    num_trucks: Optional[int] = None,
+    num_operators: Optional[int] = None,
+    availability: Optional[float] = None,
+    target_ore_stock_level: Optional[float] = None,
     strategic_target: Optional[StrategicYearTarget] = None,
     area2_target: Optional[AreaReadinessTarget] = None,
-    area2_required_development: float = 4000.0,
-    area2_ready_by_day: float = 365.0,
-    seed: int = 42,
+    area2_required_development: Optional[float] = None,
+    area2_ready_by_day: Optional[float] = None,
+    seed: Optional[int] = None,
     plot: bool = True,
 ) -> Tuple[TwoAreaReadinessSimulation, pd.DataFrame]:
     """Runs the two-area readiness simulation."""
+    cfg = config or DEFAULT_CONFIG
+
     if strategic_target is None:
         strategic_target = StrategicYearTarget(
-            min_development=10000.0,
-            min_ore1_production=1300000.0,
-            min_ore2_production=850000.0,
+            min_development=cfg.planning.annual_min_development_m,
+            min_ore1_production=cfg.planning.annual_min_ore1_production_t,
+            min_ore2_production=cfg.planning.annual_min_ore2_production_t,
         )
     if area2_target is None:
+        req_dev = area2_required_development if area2_required_development is not None else cfg.planning.area2_required_development
+        rdy_day = area2_ready_by_day if area2_ready_by_day is not None else cfg.planning.area2_ready_by_day
         area2_target = AreaReadinessTarget(
-            required_development=area2_required_development,
-            ready_by_day=area2_ready_by_day,
+            required_development=req_dev,
+            ready_by_day=rdy_day,
         )
 
     sim = TwoAreaReadinessSimulation(
+        config=cfg,
         num_trucks=num_trucks,
         num_operators=num_operators,
         availability=availability,
@@ -94,15 +103,16 @@ def run_two_area_readiness_simulation(
         seed=seed,
     )
 
-    days_to_run = total_days if total_days is not None else 365.0
+    days_to_run = total_days if total_days is not None else cfg.total_days
     sim.step(days_to_run * 86400.0)
     df = pd.DataFrame(sim.telemetry_history)
 
+    stock_target = target_ore_stock_level if target_ore_stock_level is not None else cfg.plant.target_ore_stock_level
     df_prepared = prepare_history(df)
     print_transition_log(
         df_prepared,
         critical_ore2_level=sim.critical_ore2_level,
-        target_ore_stock_level=target_ore_stock_level,
+        target_ore_stock_level=stock_target,
         label="Two-Area Readiness Simulation",
     )
 
@@ -119,14 +129,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--total_ore_to_extract",
         type=float,
-        default=6600000.0,
-        help="Total production ore tonnage to extract (default: 6,600,000.0 t)",
+        default=DEFAULT_CONFIG.plant.total_ore_to_extract,
+        help=f"Total production ore tonnage to extract (default: {DEFAULT_CONFIG.plant.total_ore_to_extract:,.1f} t)",
     )
     parser.add_argument(
         "--warmup_ore",
         type=float,
-        default=600000.0,
-        help="Warmup period ore tonnage to extract (default: 600,000.0 t)",
+        default=DEFAULT_CONFIG.plant.ore_to_be_extracted_during_warming_period,
+        help=f"Warmup period ore tonnage to extract (default: {DEFAULT_CONFIG.plant.ore_to_be_extracted_during_warming_period:,.1f} t)",
     )
     parser.add_argument(
         "--total_days",
@@ -137,44 +147,44 @@ if __name__ == "__main__":
     parser.add_argument(
         "--trucks",
         type=int,
-        default=18,
-        help="Number of AD30 haulage trucks (default: 18)",
+        default=DEFAULT_CONFIG.fleet.num_trucks,
+        help=f"Number of haulage trucks (default: {DEFAULT_CONFIG.fleet.num_trucks})",
     )
     parser.add_argument(
         "--operators",
         type=int,
-        default=18,
-        help="Number of operators per shift (default: 18)",
+        default=DEFAULT_CONFIG.fleet.num_operators,
+        help=f"Number of operators per shift (default: {DEFAULT_CONFIG.fleet.num_operators})",
     )
     parser.add_argument(
         "--availability",
         type=float,
-        default=0.85,
-        help="Mechanical availability fraction (default: 0.85)",
+        default=DEFAULT_CONFIG.fleet.availability,
+        help=f"Mechanical availability fraction (default: {DEFAULT_CONFIG.fleet.availability})",
     )
     parser.add_argument(
         "--stockpile_target",
         type=float,
-        default=60000.0,
-        help="Target total ore stockpile buffer (default: 60000.0 t)",
+        default=DEFAULT_CONFIG.plant.target_ore_stock_level,
+        help=f"Target total ore stockpile buffer (default: {DEFAULT_CONFIG.plant.target_ore_stock_level:,.1f} t)",
     )
     parser.add_argument(
         "--area2_required_dev",
         type=float,
-        default=4000.0,
-        help="Required development metres to unlock Area 2 (default: 4,000.0 m)",
+        default=DEFAULT_CONFIG.planning.area2_required_development,
+        help=f"Required development metres to unlock Area 2 (default: {DEFAULT_CONFIG.planning.area2_required_development:,.1f} m)",
     )
     parser.add_argument(
         "--area2_ready_by_day",
         type=float,
-        default=365.0,
-        help="Target schedule deadline for Area 2 (default: 365.0 d)",
+        default=DEFAULT_CONFIG.planning.area2_ready_by_day,
+        help=f"Target schedule deadline for Area 2 (default: {DEFAULT_CONFIG.planning.area2_ready_by_day:,.1f} d)",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Random seed for reproducibility (default: 42)",
+        default=DEFAULT_CONFIG.seed,
+        help=f"Random seed for reproducibility (default: {DEFAULT_CONFIG.seed})",
     )
     parser.add_argument(
         "--no_plot",

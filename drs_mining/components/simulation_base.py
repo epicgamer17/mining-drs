@@ -27,6 +27,7 @@ from drs_mining.config import (
     GeologyConfig,
     StrategicPlanningConfig,
     SimulationConfig,
+    DEFAULT_CONFIG,
 )
 from drs_mining.components.modes import OperatingMode
 from drs_mining.components.plant import MetallurgicalPlant, PlantDrawRates
@@ -62,7 +63,7 @@ from drs_mining.components.fleet import (
 # ---------------------------------------------------------------------------
 # Default Constants (Mapped to Centralized Configs)
 # ---------------------------------------------------------------------------
-_DEFAULT_CONFIG = SimulationConfig()
+_DEFAULT_CONFIG = DEFAULT_CONFIG
 DAYS_IN_YEAR = _DEFAULT_CONFIG.calendar.days_in_year
 NON_PRODUCTION_DAYS = _DEFAULT_CONFIG.calendar.non_production_days
 SHIFT_SECONDS = _DEFAULT_CONFIG.calendar.shift_seconds
@@ -88,8 +89,8 @@ SURFACE_TIP_SITES = _DEFAULT_CONFIG.fleet.surface_tip_sites
 FUEL_BURN_PCT_PER_SEC = _DEFAULT_CONFIG.fleet.fuel_burn_pct_per_sec
 REFUEL_DUR_MIN = _DEFAULT_CONFIG.fleet.refuel_dur_min
 N_FUEL_PUMPS = _DEFAULT_CONFIG.fleet.num_fuel_pumps
-BASE_PASS_BAY_DELAY_SEC = _DEFAULT_CONFIG.fleet.base_pass_bay_delay_sec
-PER_TRUCK_PASS_BAY_DELAY_SEC = _DEFAULT_CONFIG.fleet.per_truck_pass_bay_delay_sec
+BASE_PASS_BAY_DELAY_SEC = _DEFAULT_CONFIG.topology.base_pass_bay_delay_sec
+PER_TRUCK_PASS_BAY_DELAY_SEC = _DEFAULT_CONFIG.topology.per_truck_pass_bay_delay_sec
 
 DEVELOPMENT_METRES_PER_EXTRA_TRUCK_PER_DAY = _DEFAULT_CONFIG.fleet.dev_m_per_extra_truck_day
 DT_MAX = _DEFAULT_CONFIG.dt_max
@@ -120,45 +121,46 @@ class MiningSimulationBase(drs.Module):
         config: Optional[SimulationConfig] = None,
         faces: Optional[Sequence[MineFace]] = None,
         topology: Optional[MineTopology] = None,
-        num_trucks: int = 9,
-        num_operators: int = 9,
-        num_lhds_per_face: int = 2,
-        availability: float = 0.85,
-        target_ore_stock_level: float = 60000.0,
-        critical_ore2_level: float = 20400.0,
-        total_ore_to_extract: float = 6600000.0,
-        ore_to_be_extracted_during_warming_period: float = 600000.0,
-        duration_of_production_campaigns: float = 34.0,
-        duration_of_shutdowns: float = 1.0,
-        duration_of_contingency_segments: float = 1.0,
-        strategic_period_days: float = 365.0,
-        tactical_review_period_days: float = 30.0,
-        tactical_progress_tolerance: float = 0.90,
+        num_trucks: Optional[int] = None,
+        num_operators: Optional[int] = None,
+        num_lhds_per_face: Optional[int] = None,
+        availability: Optional[float] = None,
+        target_ore_stock_level: Optional[float] = None,
+        critical_ore2_level: Optional[float] = None,
+        total_ore_to_extract: Optional[float] = None,
+        ore_to_be_extracted_during_warming_period: Optional[float] = None,
+        duration_of_production_campaigns: Optional[float] = None,
+        duration_of_shutdowns: Optional[float] = None,
+        duration_of_contingency_segments: Optional[float] = None,
+        strategic_period_days: Optional[float] = None,
+        tactical_review_period_days: Optional[float] = None,
+        tactical_progress_tolerance: Optional[float] = None,
         strategic_targets: Optional[Tuple[StrategicYearTarget, ...]] = None,
         area2_readiness_target: Optional[AreaReadinessTarget] = None,
         area2_physical_unlock_enabled: bool = True,
         area2_counterfactual_disable: bool = False,
         area2_redeploy_locked_face_trucks_to_development: bool = True,
-        development_priority_truck_reservation_fraction: float = 0.33,
-        annual_discount_rate: float = 0.05,
-        ore1_net_value_per_processed_tonne: float = 577.48,
-        ore2_net_value_per_processed_tonne: float = 709.83,
-        production_cost_per_tonne: float = 135.0,
-        development_cost_per_unit: float = 15000.0,
-        fixed_cost_per_day: float = 74460.0,
-        mode_a_ore1_milling_rate: float = 3600.0,
-        mode_a_ore2_milling_rate: float = 2400.0,
-        mode_a_contingency_ore1_milling_rate: float = 3900.0,
-        mode_b_ore1_milling_rate: float = 4600.0,
-        mode_b_ore2_milling_rate: float = 800.0,
-        mode_b_contingency_ore2_milling_rate: float = 2500.0,
+        development_priority_truck_reservation_fraction: Optional[float] = None,
+        annual_discount_rate: Optional[float] = None,
+        ore1_net_value_per_processed_tonne: Optional[float] = None,
+        ore2_net_value_per_processed_tonne: Optional[float] = None,
+        production_cost_per_tonne: Optional[float] = None,
+        development_cost_per_unit: Optional[float] = None,
+        fixed_cost_per_day: Optional[float] = None,
+        mode_a_ore1_milling_rate: Optional[float] = None,
+        mode_a_ore2_milling_rate: Optional[float] = None,
+        mode_a_contingency_ore1_milling_rate: Optional[float] = None,
+        mode_b_ore1_milling_rate: Optional[float] = None,
+        mode_b_ore2_milling_rate: Optional[float] = None,
+        mode_b_contingency_ore2_milling_rate: Optional[float] = None,
         policy: int = 2,
         policy_name: Optional[str] = None,
         enable_analytical_blending: bool = True,
-        seed: int = 42,
+        seed: Optional[int] = None,
     ):
         super().__init__()
-        self.config = config or _DEFAULT_CONFIG
+        cfg = config or _DEFAULT_CONFIG
+        self.config = cfg
         self.policy = policy
         if policy_name is not None:
             self.policy_name = policy_name
@@ -168,30 +170,44 @@ class MiningSimulationBase(drs.Module):
             )
         self.enable_analytical_blending = enable_analytical_blending
 
-        self.num_trucks = num_trucks
-        self.num_operators = num_operators
-        self.num_lhds_per_face = num_lhds_per_face
-        self.availability = availability
-        self.target_ore_stock_level = target_ore_stock_level
-        self.critical_ore2_level = critical_ore2_level
-        self.total_ore_to_extract = total_ore_to_extract
+        self.num_trucks = num_trucks if num_trucks is not None else cfg.fleet.num_trucks
+        self.num_operators = num_operators if num_operators is not None else cfg.fleet.num_operators
+        self.num_lhds_per_face = num_lhds_per_face if num_lhds_per_face is not None else cfg.fleet.num_lhds_per_face
+        self.availability = availability if availability is not None else cfg.fleet.availability
+        self.target_ore_stock_level = target_ore_stock_level if target_ore_stock_level is not None else cfg.plant.target_ore_stock_level
+        self.critical_ore2_level = critical_ore2_level if critical_ore2_level is not None else cfg.plant.critical_ore2_level
+        self.total_ore_to_extract = total_ore_to_extract if total_ore_to_extract is not None else cfg.plant.total_ore_to_extract
         self.ore_to_be_extracted_during_warming_period = (
             ore_to_be_extracted_during_warming_period
+            if ore_to_be_extracted_during_warming_period is not None
+            else cfg.plant.ore_to_be_extracted_during_warming_period
         )
 
-        self.strategic_period_days = strategic_period_days
-        self.tactical_review_period_days = tactical_review_period_days
-        self.tactical_progress_tolerance = tactical_progress_tolerance
+        self.strategic_period_days = (
+            strategic_period_days
+            if strategic_period_days is not None
+            else cfg.planning.strategic_period_days
+        )
+        self.tactical_review_period_days = (
+            tactical_review_period_days
+            if tactical_review_period_days is not None
+            else cfg.planning.tactical_review_period_days
+        )
+        self.tactical_progress_tolerance = (
+            tactical_progress_tolerance
+            if tactical_progress_tolerance is not None
+            else cfg.planning.tactical_progress_tolerance
+        )
         self.strategic_targets = strategic_targets or (
             StrategicYearTarget(
-                min_development=10000.0,
-                min_ore1_production=1300000.0,
-                min_ore2_production=850000.0,
+                min_development=cfg.planning.annual_min_development_m,
+                min_ore1_production=cfg.planning.annual_min_ore1_production_t,
+                min_ore2_production=cfg.planning.annual_min_ore2_production_t,
             ),
         )
         self.area2_readiness_target = area2_readiness_target or AreaReadinessTarget(
-            required_development=6000.0,
-            ready_by_day=365.0,
+            required_development=cfg.planning.area2_required_development,
+            ready_by_day=cfg.planning.area2_ready_by_day,
         )
         self.area2_physical_unlock_enabled = area2_physical_unlock_enabled
         self.area2_counterfactual_disable = area2_counterfactual_disable
@@ -200,23 +216,49 @@ class MiningSimulationBase(drs.Module):
         )
         self.development_priority_truck_reservation_fraction = (
             development_priority_truck_reservation_fraction
+            if development_priority_truck_reservation_fraction is not None
+            else cfg.planning.development_priority_truck_reservation_fraction
         )
 
-        self.annual_discount_rate = annual_discount_rate
-        self.ore1_net_value_per_processed_tonne = ore1_net_value_per_processed_tonne
-        self.ore2_net_value_per_processed_tonne = ore2_net_value_per_processed_tonne
-        self.production_cost_per_tonne = production_cost_per_tonne
-        self.development_cost_per_unit = development_cost_per_unit
-        self.fixed_cost_per_day = fixed_cost_per_day
+        self.annual_discount_rate = (
+            annual_discount_rate
+            if annual_discount_rate is not None
+            else cfg.economics.annual_discount_rate
+        )
+        self.ore1_net_value_per_processed_tonne = (
+            ore1_net_value_per_processed_tonne
+            if ore1_net_value_per_processed_tonne is not None
+            else cfg.economics.ore1_net_value_per_processed_tonne
+        )
+        self.ore2_net_value_per_processed_tonne = (
+            ore2_net_value_per_processed_tonne
+            if ore2_net_value_per_processed_tonne is not None
+            else cfg.economics.ore2_net_value_per_processed_tonne
+        )
+        self.production_cost_per_tonne = (
+            production_cost_per_tonne
+            if production_cost_per_tonne is not None
+            else cfg.economics.production_cost_per_tonne
+        )
+        self.development_cost_per_unit = (
+            development_cost_per_unit
+            if development_cost_per_unit is not None
+            else cfg.economics.development_cost_per_unit
+        )
+        self.fixed_cost_per_day = (
+            fixed_cost_per_day
+            if fixed_cost_per_day is not None
+            else cfg.economics.fixed_cost_per_day
+        )
 
-        self.rng = random.Random(seed)
-        self.seed = seed
+        self.seed = seed if seed is not None else cfg.seed
+        self.rng = random.Random(self.seed)
 
-        self.truck_seat_credit = SHIFT_SECONDS
+        self.truck_seat_credit = cfg.calendar.shift_seconds
         self._down_dur = 0.0
 
         # Calendar setup
-        self.holidays: Set[int] = set()
+        self.holidays: Set[int] = set(cfg.calendar.holidays)
         self._cur_day = -1
         self._shift_marker = -1
         self._holiday_today = False
@@ -229,14 +271,18 @@ class MiningSimulationBase(drs.Module):
             self.topology = topology
         else:
             self.topology = MineTopology(
-                decline_m=DECLINE_M,
-                level_spacing_m=LEVEL_SPACING_M,
-                level_drift_m=LEVEL_DRIFT_M,
-                surface_m=SURFACE_M,
-                level_depths={AREA1_LEVEL: 900.0, AREA2_LEVEL: 1800.0},
-                speeds=DEFAULT_SPEEDS,
-                base_pass_bay_delay_sec=BASE_PASS_BAY_DELAY_SEC,
-                per_truck_pass_bay_delay_sec=PER_TRUCK_PASS_BAY_DELAY_SEC,
+                decline_m=cfg.topology.decline_m,
+                level_spacing_m=cfg.topology.level_spacing_m,
+                level_drift_m=cfg.topology.level_drift_m,
+                surface_m=cfg.topology.surface_m,
+                level_depths={
+                    cfg.topology.area1_level: cfg.topology.level_spacing_m * cfg.topology.area1_level,
+                    cfg.topology.area2_level: cfg.topology.level_spacing_m * cfg.topology.area2_level,
+                },
+                speeds=cfg.topology.speeds,
+                base_pass_bay_delay_sec=cfg.topology.base_pass_bay_delay_sec,
+                per_truck_pass_bay_delay_sec=cfg.topology.per_truck_pass_bay_delay_sec,
+                traffic_variation_tol=cfg.topology.traffic_variation_tol,
             )
 
         # 2. Mine Faces
@@ -248,132 +294,175 @@ class MiningSimulationBase(drs.Module):
             self.gen2 = getattr(self.face2, "generator", None)
         else:
             self.gen1 = StochasticFaciesGenerator(
-                mean_fraction=0.30,
-                std_dev=0.05,
-                prob_new_facies=0.3,
-                variation_same_facies=0.01,
+                mean_fraction=cfg.geology.area1_mean_fraction,
+                std_dev=cfg.geology.area1_std_dev,
+                prob_new_facies=cfg.geology.prob_new_facies,
+                variation_same_facies=cfg.geology.variation_same_facies,
             )
             face_capacity = (
-                total_ore_to_extract / 2.0
-                if total_ore_to_extract is not None
+                self.total_ore_to_extract / 2.0
+                if self.total_ore_to_extract is not None
                 else 3300000.0
             )
             warmup_cap = (
-                ore_to_be_extracted_during_warming_period / 2.0
-                if ore_to_be_extracted_during_warming_period is not None
+                self.ore_to_be_extracted_during_warming_period / 2.0
+                if self.ore_to_be_extracted_during_warming_period is not None
                 else 0.0
             )
             self.face1 = MineFace(
                 name="mine_face_1",
                 face_id=1,
                 area_id=1,
-                level_index=3,
+                level_index=cfg.topology.area1_level,
                 generator=self.gen1,
-                min_ore_mass=30000.0,
-                max_ore_mass=50000.0,
+                min_ore_mass=cfg.geology.min_parcel_mass,
+                max_ore_mass=cfg.geology.max_parcel_mass,
                 total_ore_to_extract=face_capacity,
                 ore_to_be_extracted_during_warming_period=warmup_cap,
-                mean_ore_fraction=0.30,
-                std_dev_ore_fraction=0.05,
-                prob_new_facies=0.3,
-                variation_same_facies=0.01,
-                initial_parcel_mass=40000.0,
+                mean_ore_fraction=cfg.geology.area1_mean_fraction,
+                std_dev_ore_fraction=cfg.geology.area1_std_dev,
+                prob_new_facies=cfg.geology.prob_new_facies,
+                variation_same_facies=cfg.geology.variation_same_facies,
+                initial_parcel_mass=cfg.geology.initial_parcel_mass,
                 required_development=0.0,
-                waste_to_ore_ratio=0.10,
-                turnaround_dev_per_parcel_m=75.0,
-                heading_cross_section_m2=16.0,
+                waste_to_ore_ratio=cfg.geology.waste_to_ore_ratio,
+                turnaround_dev_per_parcel_m=cfg.geology.turnaround_dev_per_parcel_m,
+                heading_cross_section_m2=cfg.topology.stope_cross_section_m2,
+                rock_density_t_per_m3=cfg.topology.rock_density_t_per_m3,
             )
 
             self.gen2 = StochasticFaciesGenerator(
-                mean_fraction=0.35,
-                std_dev=0.05,
-                prob_new_facies=0.3,
-                variation_same_facies=0.01,
+                mean_fraction=cfg.geology.area2_mean_fraction,
+                std_dev=cfg.geology.area2_std_dev,
+                prob_new_facies=cfg.geology.prob_new_facies,
+                variation_same_facies=cfg.geology.variation_same_facies,
             )
             self.face2 = MineFace(
                 name="mine_face_2",
                 face_id=2,
                 area_id=2,
-                level_index=6,
+                level_index=cfg.topology.area2_level,
                 generator=self.gen2,
-                min_ore_mass=30000.0,
-                max_ore_mass=50000.0,
+                min_ore_mass=cfg.geology.min_parcel_mass,
+                max_ore_mass=cfg.geology.max_parcel_mass,
                 total_ore_to_extract=face_capacity,
                 ore_to_be_extracted_during_warming_period=warmup_cap,
-                mean_ore_fraction=0.35,
-                std_dev_ore_fraction=0.05,
-                prob_new_facies=0.3,
-                variation_same_facies=0.01,
-                initial_parcel_mass=40000.0,
+                mean_ore_fraction=cfg.geology.area2_mean_fraction,
+                std_dev_ore_fraction=cfg.geology.area2_std_dev,
+                prob_new_facies=cfg.geology.prob_new_facies,
+                variation_same_facies=cfg.geology.variation_same_facies,
+                initial_parcel_mass=cfg.geology.initial_parcel_mass,
                 required_development=self.area2_readiness_target.required_development,
                 ready_by_day=self.area2_readiness_target.ready_by_day,
                 counterfactual_disable=self.area2_counterfactual_disable,
                 on_unlock_callback=self._on_area2_unlocked,
-                waste_to_ore_ratio=0.10,
-                turnaround_dev_per_parcel_m=75.0,
-                heading_cross_section_m2=16.0,
+                waste_to_ore_ratio=cfg.geology.waste_to_ore_ratio,
+                turnaround_dev_per_parcel_m=cfg.geology.turnaround_dev_per_parcel_m,
+                heading_cross_section_m2=cfg.topology.stope_cross_section_m2,
+                rock_density_t_per_m3=cfg.topology.rock_density_t_per_m3,
             )
             self.faces = [self.face1, self.face2]
 
-        self.face_levels = {1: AREA1_LEVEL, 2: AREA2_LEVEL}
+        self.face_levels = {1: cfg.topology.area1_level, 2: cfg.topology.area2_level}
 
         # 3. Stockpiles
+        init_fill = self.target_ore_stock_level * cfg.plant.initial_stock_fraction
         self.ore1_stock = Stockpile(
             name="Ore1Stock",
             expected_attributes=["ore_grade"],
-            initial_mass=self.target_ore_stock_level * 0.50,
+            initial_mass=init_fill,
             initial_attributes={"ore_grade": 0.0},
-            capacity=120000.0,
+            capacity=cfg.plant.stockpile_capacity,
         )
         self.ore2_stock = Stockpile(
             name="Ore2Stock",
             expected_attributes=["ore_grade"],
-            initial_mass=self.target_ore_stock_level * 0.50,
+            initial_mass=init_fill,
             initial_attributes={"ore_grade": 1.0},
-            capacity=120000.0,
+            capacity=cfg.plant.stockpile_capacity,
         )
 
         # 4. Plant & Campaign Mode Controller
+        campaign_dur = (
+            duration_of_production_campaigns
+            if duration_of_production_campaigns is not None
+            else cfg.plant.duration_of_production_campaigns
+        )
+        shutdown_dur = (
+            duration_of_shutdowns
+            if duration_of_shutdowns is not None
+            else cfg.plant.duration_of_shutdowns
+        )
+        contingency_dur = (
+            duration_of_contingency_segments
+            if duration_of_contingency_segments is not None
+            else cfg.plant.duration_of_contingency_segments
+        )
+
         self.mode_controller = OperatingModeController(
-            duration_of_production_campaigns=duration_of_production_campaigns,
-            duration_of_shutdowns=duration_of_shutdowns,
-            critical_ore2_level=critical_ore2_level,
-            target_ore_stock_level=target_ore_stock_level,
-            total_ore_to_extract=total_ore_to_extract,
+            duration_of_production_campaigns=campaign_dur,
+            duration_of_shutdowns=shutdown_dur,
+            critical_ore2_level=self.critical_ore2_level,
+            target_ore_stock_level=self.target_ore_stock_level,
+            total_ore_to_extract=self.total_ore_to_extract,
         )
         self.plant = MetallurgicalPlant(
             stockpiles=[self.ore1_stock, self.ore2_stock],
-            target_ore_stock_level=target_ore_stock_level,
-            duration_of_contingency_segments=duration_of_contingency_segments,
-            mode_a_ore1_milling_rate=mode_a_ore1_milling_rate,
-            mode_a_ore2_milling_rate=mode_a_ore2_milling_rate,
-            mode_a_contingency_ore1_milling_rate=mode_a_contingency_ore1_milling_rate,
-            mode_b_ore1_milling_rate=mode_b_ore1_milling_rate,
-            mode_b_ore2_milling_rate=mode_b_ore2_milling_rate,
-            mode_b_contingency_ore2_milling_rate=mode_b_contingency_ore2_milling_rate,
+            target_ore_stock_level=self.target_ore_stock_level,
+            duration_of_contingency_segments=contingency_dur,
+            mode_a_ore1_milling_rate=(
+                mode_a_ore1_milling_rate
+                if mode_a_ore1_milling_rate is not None
+                else cfg.plant.mode_a_ore1_milling_rate
+            ),
+            mode_a_ore2_milling_rate=(
+                mode_a_ore2_milling_rate
+                if mode_a_ore2_milling_rate is not None
+                else cfg.plant.mode_a_ore2_milling_rate
+            ),
+            mode_a_contingency_ore1_milling_rate=(
+                mode_a_contingency_ore1_milling_rate
+                if mode_a_contingency_ore1_milling_rate is not None
+                else cfg.plant.mode_a_contingency_ore1_milling_rate
+            ),
+            mode_b_ore1_milling_rate=(
+                mode_b_ore1_milling_rate
+                if mode_b_ore1_milling_rate is not None
+                else cfg.plant.mode_b_ore1_milling_rate
+            ),
+            mode_b_ore2_milling_rate=(
+                mode_b_ore2_milling_rate
+                if mode_b_ore2_milling_rate is not None
+                else cfg.plant.mode_b_ore2_milling_rate
+            ),
+            mode_b_contingency_ore2_milling_rate=(
+                mode_b_contingency_ore2_milling_rate
+                if mode_b_contingency_ore2_milling_rate is not None
+                else cfg.plant.mode_b_contingency_ore2_milling_rate
+            ),
             economic_params=EconomicParameters(
-                annual_discount_rate=annual_discount_rate,
-                ore1_net_value_per_processed_tonne=ore1_net_value_per_processed_tonne,
-                ore2_net_value_per_processed_tonne=ore2_net_value_per_processed_tonne,
-                production_cost_per_tonne=production_cost_per_tonne,
-                development_cost_per_unit=development_cost_per_unit,
-                fixed_cost_per_day=fixed_cost_per_day,
+                annual_discount_rate=self.annual_discount_rate,
+                ore1_net_value_per_processed_tonne=self.ore1_net_value_per_processed_tonne,
+                ore2_net_value_per_processed_tonne=self.ore2_net_value_per_processed_tonne,
+                production_cost_per_tonne=self.production_cost_per_tonne,
+                development_cost_per_unit=self.development_cost_per_unit,
+                fixed_cost_per_day=self.fixed_cost_per_day,
             ),
         )
 
         # 5. Discrete Entities
-        self.dump_station = SurfaceDumpStation(capacity=SURFACE_TIP_SITES)
-        self.waste_dump_station = SurfaceWasteDumpStation(capacity=SURFACE_TIP_SITES)
+        self.dump_station = SurfaceDumpStation(capacity=cfg.fleet.surface_tip_sites)
+        self.waste_dump_station = SurfaceWasteDumpStation(capacity=cfg.fleet.surface_tip_sites)
         self.face_queues: Dict[int, list] = defaultdict(list)
         self.face_lhds_busy: Dict[int, int] = defaultdict(int)
         self.decline_heading_queue: list = []
         self.decline_heading_lhds_busy: int = 0
-        self.num_lhds_per_decline: int = 1
+        self.num_lhds_per_decline: int = cfg.fleet.num_lhds_per_decline
 
         # Physical Heading Advance Parameters (Geometry Independence)
-        self.capital_decline_cross_section_m2: float = 25.0
-        self.stope_cross_section_m2: float = 16.0
-        self.rock_density_t_per_m3: float = 2.7
+        self.capital_decline_cross_section_m2: float = cfg.topology.capital_decline_cross_section_m2
+        self.stope_cross_section_m2: float = cfg.topology.stope_cross_section_m2
+        self.rock_density_t_per_m3: float = cfg.topology.rock_density_t_per_m3
         self.heading_cross_section_m2: float = self.stope_cross_section_m2
         self.decline_dev_m_per_tonne_waste: float = 1.0 / (
             self.capital_decline_cross_section_m2 * self.rock_density_t_per_m3
@@ -386,19 +475,19 @@ class MiningSimulationBase(drs.Module):
 
         self.trucks = [
             Truck(f"T{i+1:02d}", drs.Timer(f"tr_tmr_{i}", 0.0, rate=-1.0))
-            for i in range(num_trucks)
+            for i in range(self.num_trucks)
         ]
-        self.operators = [Operator(idx=i) for i in range(num_operators)]
+        self.operators = [Operator(idx=i) for i in range(self.num_operators)]
         self._refuel_pumps_in_use = 0
         self._refuel_queue: list = []
 
         # 6. Strategic / Tactical Planning Controller
         self.tactical_controller = TacticalReviewController(
             strategic_targets=self.strategic_targets,
-            strategic_period_days=strategic_period_days,
-            tactical_review_period_days=tactical_review_period_days,
-            tactical_progress_tolerance=tactical_progress_tolerance,
-            development_priority_truck_reservation_fraction=development_priority_truck_reservation_fraction,
+            strategic_period_days=self.strategic_period_days,
+            tactical_review_period_days=self.tactical_review_period_days,
+            tactical_progress_tolerance=self.tactical_progress_tolerance,
+            development_priority_truck_reservation_fraction=self.development_priority_truck_reservation_fraction,
         )
 
         # Readiness & Development Levels
@@ -482,7 +571,7 @@ class MiningSimulationBase(drs.Module):
         self.ore2_hauled_by_face: Dict[int, float] = defaultdict(float)
 
         self.telemetry_history: List[Dict[str, Any]] = []
-        self._telemetry_dt = 1800.0  # Log every 30 minutes
+        self._telemetry_dt = cfg.telemetry_dt  # Log interval from config
         self._next_telemetry_t = 0.0
 
     def _on_area2_unlocked(self, day: float = 0.0) -> None:

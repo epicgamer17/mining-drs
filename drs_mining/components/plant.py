@@ -7,8 +7,7 @@ import drs
 from drs import Processor
 from .stockpiles import Stockpile
 from .modes import OperatingMode
-from drs_mining.config.modes import MILL_MODES
-from drs_mining.config.economics import EconomicParameters
+from drs_mining.config import MILL_MODES, EconomicParameters
 
 
 # TODO: could this be more arbitrary? It seems it forces 2 ore types and 2 overall mode types (A and B) with Contingency and Surging. What if we had one or type? Or 3? Or 3 Modes? or just 1? Can we make it work more arbitrarily.

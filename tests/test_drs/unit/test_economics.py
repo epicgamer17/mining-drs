@@ -1,7 +1,7 @@
 """Unit tests for EconomicParameters and MetallurgicalPlant economics."""
 
 import pytest
-from drs_mining.config.economics import EconomicParameters
+from drs_mining.config import EconomicParameters
 from drs_mining.components.plant import MetallurgicalPlant
 from drs_mining.components.stockpiles import Stockpile
 

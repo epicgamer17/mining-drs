@@ -43,7 +43,7 @@ from .allocation import (
     FaceAllocationResult,
     solve_face_allocation_rates,
 )
-from drs_mining.config.economics import EconomicParameters
+from drs_mining.config import EconomicParameters
 from .simulation_base import MiningSimulationBase, ORE_PAYLOAD
 
 

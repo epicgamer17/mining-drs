@@ -114,8 +114,8 @@ WASTE_TIP_SITES = 2
 FUEL_BURN_PCT_PER_SEC = _CFG.fleet.fuel_burn_pct_per_sec
 REFUEL_DUR_MIN = _CFG.fleet.refuel_dur_min
 N_FUEL_PUMPS = _CFG.fleet.num_fuel_pumps
-BASE_PASS_BAY_DELAY_SEC = _CFG.fleet.base_pass_bay_delay_sec
-PER_TRUCK_PASS_BAY_DELAY_SEC = _CFG.fleet.per_truck_pass_bay_delay_sec
+BASE_PASS_BAY_DELAY_SEC = _CFG.topology.base_pass_bay_delay_sec
+PER_TRUCK_PASS_BAY_DELAY_SEC = _CFG.topology.per_truck_pass_bay_delay_sec
 DT_MAX = _CFG.dt_max
 
 

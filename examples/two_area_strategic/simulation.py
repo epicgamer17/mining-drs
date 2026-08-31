@@ -4,7 +4,7 @@ Features:
 1. Two Distinct Mining Areas / Faces with Stochastic Geological Facies.
 2. Shelswell (2017) DES Haulage Engine.
 3. Strategic & Tactical Planning Framework (Annual StrategicYearTarget, Monthly Tactical Review).
-4. Dynamic Fleet Operating Modes (BALANCED, PRODUCTION, DEVELOPMENT).
+4. Dynamic Fleet Operating Modes (PRODUCTION, DEVELOPMENT).
 """
 
 from __future__ import annotations
@@ -21,6 +21,10 @@ if _REPO_ROOT not in sys.path:
 
 import pandas as pd
 
+from drs_mining.config import (
+    SimulationConfig,
+    DEFAULT_CONFIG,
+)
 from drs_mining.components import (
     MiningSimulationBase,
     AreaReadinessTarget,
@@ -34,7 +38,6 @@ from drs_mining.components.plot import (
 
 
 class TwoAreaStrategicSimulation(MiningSimulationBase):
-
     """Two-Area Strategic & Tactical Planning DES Blending Simulation."""
     pass
 
@@ -54,26 +57,30 @@ def plot_two_area_strategic_dashboard(
 
 
 def run_two_area_strategic_simulation(
-    total_ore_to_extract: float = 6600000.0,
-    ore_to_be_extracted_during_warming_period: float = 600000.0,
+    config: Optional[SimulationConfig] = None,
+    total_ore_to_extract: Optional[float] = None,
+    ore_to_be_extracted_during_warming_period: Optional[float] = None,
     total_days: Optional[float] = None,
-    num_trucks: int = 18,
-    num_operators: int = 18,
-    availability: float = 0.85,
-    target_ore_stock_level: float = 60000.0,
+    num_trucks: Optional[int] = None,
+    num_operators: Optional[int] = None,
+    availability: Optional[float] = None,
+    target_ore_stock_level: Optional[float] = None,
     strategic_target: Optional[StrategicYearTarget] = None,
-    seed: int = 42,
+    seed: Optional[int] = None,
     plot: bool = True,
 ) -> Tuple[TwoAreaStrategicSimulation, pd.DataFrame]:
     """Runs the two-area strategic planning simulation."""
+    cfg = config or DEFAULT_CONFIG
+
     if strategic_target is None:
         strategic_target = StrategicYearTarget(
-            min_development=10000.0,
-            min_ore1_production=1300000.0,
-            min_ore2_production=850000.0,
+            min_development=cfg.planning.annual_min_development_m,
+            min_ore1_production=cfg.planning.annual_min_ore1_production_t,
+            min_ore2_production=cfg.planning.annual_min_ore2_production_t,
         )
 
     sim = TwoAreaStrategicSimulation(
+        config=cfg,
         num_trucks=num_trucks,
         num_operators=num_operators,
         availability=availability,
@@ -85,15 +92,16 @@ def run_two_area_strategic_simulation(
         seed=seed,
     )
 
-    days_to_run = total_days if total_days is not None else 365.0
+    days_to_run = total_days if total_days is not None else cfg.total_days
     sim.step(days_to_run * 86400.0)
     df = pd.DataFrame(sim.telemetry_history)
 
     df_prepared = prepare_history(df)
+    stock_target = target_ore_stock_level if target_ore_stock_level is not None else cfg.plant.target_ore_stock_level
     print_transition_log(
         df_prepared,
         critical_ore2_level=sim.critical_ore2_level,
-        target_ore_stock_level=target_ore_stock_level,
+        target_ore_stock_level=stock_target,
         label="Two-Area Strategic Planning",
     )
 
@@ -110,14 +118,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--total_ore_to_extract",
         type=float,
-        default=6600000.0,
-        help="Total production ore tonnage to extract (default: 6,600,000.0 t)",
+        default=DEFAULT_CONFIG.plant.total_ore_to_extract,
+        help=f"Total production ore tonnage to extract (default: {DEFAULT_CONFIG.plant.total_ore_to_extract:,.1f} t)",
     )
     parser.add_argument(
         "--warmup_ore",
         type=float,
-        default=600000.0,
-        help="Warmup period ore tonnage to extract (default: 600,000.0 t)",
+        default=DEFAULT_CONFIG.plant.ore_to_be_extracted_during_warming_period,
+        help=f"Warmup period ore tonnage to extract (default: {DEFAULT_CONFIG.plant.ore_to_be_extracted_during_warming_period:,.1f} t)",
     )
     parser.add_argument(
         "--total_days",
@@ -128,32 +136,32 @@ if __name__ == "__main__":
     parser.add_argument(
         "--trucks",
         type=int,
-        default=18,
-        help="Number of AD30 haulage trucks (default: 18)",
+        default=DEFAULT_CONFIG.fleet.num_trucks,
+        help=f"Number of haulage trucks (default: {DEFAULT_CONFIG.fleet.num_trucks})",
     )
     parser.add_argument(
         "--operators",
         type=int,
-        default=18,
-        help="Number of operators per shift (default: 18)",
+        default=DEFAULT_CONFIG.fleet.num_operators,
+        help=f"Number of operators per shift (default: {DEFAULT_CONFIG.fleet.num_operators})",
     )
     parser.add_argument(
         "--availability",
         type=float,
-        default=0.85,
-        help="Mechanical availability fraction (default: 0.85)",
+        default=DEFAULT_CONFIG.fleet.availability,
+        help=f"Mechanical availability fraction (default: {DEFAULT_CONFIG.fleet.availability})",
     )
     parser.add_argument(
         "--stockpile_target",
         type=float,
-        default=60000.0,
-        help="Target total ore stockpile buffer (default: 60000.0 t)",
+        default=DEFAULT_CONFIG.plant.target_ore_stock_level,
+        help=f"Target total ore stockpile buffer (default: {DEFAULT_CONFIG.plant.target_ore_stock_level:,.1f} t)",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Random seed for reproducibility (default: 42)",
+        default=DEFAULT_CONFIG.seed,
+        help=f"Random seed for reproducibility (default: {DEFAULT_CONFIG.seed})",
     )
     parser.add_argument(
         "--no_plot",

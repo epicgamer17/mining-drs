@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Any, Union, Dict
 import drs
 from drs_mining.components.modes import OperatingMode
-from drs_mining.config.modes import FLEET_MODES
+from drs_mining.config import FLEET_MODES
 
 
 @dataclass(frozen=True)
