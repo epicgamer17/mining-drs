@@ -35,7 +35,7 @@ from drs_mining.components.stockpiles import Stockpile
 from drs_mining.components.controllers import OperatingModeController
 from drs_mining.components.generators import StochasticFaciesGenerator
 from drs_mining.components.mine_face import MineFace, FaceState
-from drs_mining.components.topology import MineTopology, DEFAULT_SPEEDS
+from drs_mining.components.topology import MineTopology, RoadSegment, PassingBay, DEFAULT_SPEEDS
 from drs_mining.components.planning import (
     AreaReadinessTarget,
     StrategicYearTarget,
@@ -668,17 +668,67 @@ class MiningSimulationBase(drs.Module):
         return tr.down_start <= t < tr.down_end
 
     def _travel_time(self, tr: Truck, loaded: bool) -> float:
-        active_count = sum(
-            1
-            for x in self.trucks
-            if x.phase in OPERATING_PHASES and x.phase != TruckPhase.IDLE
-        )
         return self.topology.calculate_travel_time_sec(
             level=tr.target_level,
             loaded=loaded,
-            active_truck_count=active_count,
+            active_truck_count=len(self.trucks),
             rng=self.rng,
         )
+
+    def _advance_truck_corridor(self, tr: Truck) -> None:
+        """Advances a truck through its assigned route of discrete single-lane segments and passing bays."""
+        direction = "DOWN" if tr.phase == TruckPhase.EMPTY else "UP"
+
+        # 1. Reached destination at end of corridor route
+        if tr.route_segment_idx >= len(tr.route_segments):
+            if tr.in_passing_bay is not None:
+                tr.in_passing_bay.remove_truck(tr)
+            tr.current_segment = None
+            if tr.phase == TruckPhase.EMPTY:
+                if tr.is_waste and tr.mission_type == MissionType.CAPITAL_DECLINE_DEV:
+                    self._enter_decline_loadout(tr)
+                else:
+                    self._enter_face_loadout(tr, tr.target_face_id)
+            elif tr.phase == TruckPhase.LOADED:
+                if tr.is_waste:
+                    self._enter_waste_dump(tr)
+                else:
+                    self._enter_dump(tr)
+            return
+
+        # 2. Try entering next segment on route
+        seg = tr.route_segments[tr.route_segment_idx]
+        if seg.can_enter(tr, direction):
+            trav_time = seg.occupy(tr, direction)
+            tr.current_segment = seg
+            if tr.in_passing_bay is not None:
+                tr.in_passing_bay.remove_truck(tr)
+            tr.timer.value = trav_time
+            tr.timer.rate = -1.0
+        else:
+            # Yield and wait in passing bay at the entry of this segment
+            entry_bay = seg.upstream_bay if direction == "DOWN" else seg.downstream_bay
+            if entry_bay is not None:
+                entry_bay.queue_truck(tr)
+            tr.current_segment = None
+            tr.timer.value = 0.0
+            tr.timer.rate = 0.0
+
+    def _wake_waiting_traffic_at_segment(self, seg: RoadSegment) -> None:
+        """Wakes up yielding trucks waiting in passing bays for this cleared segment."""
+        # 1. Loaded trucks heading UP have right-of-way
+        if seg.downstream_bay is not None:
+            loaded_trk = seg.downstream_bay.get_waiting_loaded_truck()
+            if loaded_trk is not None and seg.can_enter(loaded_trk, "UP"):
+                self._advance_truck_corridor(loaded_trk)
+                return
+
+        # 2. Empty trucks heading DOWN
+        if seg.upstream_bay is not None:
+            empty_trk = seg.upstream_bay.get_waiting_empty_truck()
+            if empty_trk is not None and seg.can_enter(empty_trk, "DOWN"):
+                self._advance_truck_corridor(empty_trk)
+                return
 
     # -----------------------------------------------------------------------
     # Dispatch Face Selection
@@ -786,9 +836,12 @@ class MiningSimulationBase(drs.Module):
         tr.is_waste = is_waste
         tr.trip_start = t
         tr.phase = TruckPhase.EMPTY
-        dur = self._travel_time(tr, loaded=False)
-        tr.timer.value = dur
-        tr.timer.rate = -1.0
+        is_cap_dev = (mission_type == MissionType.CAPITAL_DECLINE_DEV)
+        tr.route_segments = self.topology.get_route(
+            target_level=target_level, direction="DOWN", is_capital_dev=is_cap_dev
+        )
+        tr.route_segment_idx = 0
+        self._advance_truck_corridor(tr)
         return True
 
     def _enter_face_loadout(self, tr: Truck, face_id: int) -> None:
@@ -850,9 +903,11 @@ class MiningSimulationBase(drs.Module):
             )
             self._service_decline_queue()
             tr.phase = TruckPhase.LOADED
-            dur = self._travel_time(tr, loaded=True)
-            tr.timer.value = dur
-            tr.timer.rate = -1.0
+            tr.route_segments = self.topology.get_route(
+                target_level=tr.target_level, direction="UP", is_capital_dev=True
+            )
+            tr.route_segment_idx = 0
+            self._advance_truck_corridor(tr)
             return
 
         if tr.mission_type == MissionType.STOPE_TURNAROUND_DEV:
@@ -866,9 +921,11 @@ class MiningSimulationBase(drs.Module):
             )
             self._service_face_queue(tr.target_face_id)
             tr.phase = TruckPhase.LOADED
-            dur = self._travel_time(tr, loaded=True)
-            tr.timer.value = dur
-            tr.timer.rate = -1.0
+            tr.route_segments = self.topology.get_route(
+                target_level=tr.target_level, direction="UP", is_capital_dev=False
+            )
+            tr.route_segment_idx = 0
+            self._advance_truck_corridor(tr)
             return
 
         face = self.get_face_by_id(tr.target_face_id)
@@ -920,9 +977,12 @@ class MiningSimulationBase(drs.Module):
 
         # Dispatch loaded haul
         tr.phase = TruckPhase.LOADED
-        dur = self._travel_time(tr, loaded=True)
-        tr.timer.value = dur
-        tr.timer.rate = -1.0
+        is_cap_dev = (tr.mission_type == MissionType.CAPITAL_DECLINE_DEV)
+        tr.route_segments = self.topology.get_route(
+            target_level=tr.target_level, direction="UP", is_capital_dev=is_cap_dev
+        )
+        tr.route_segment_idx = 0
+        self._advance_truck_corridor(tr)
 
     def _enter_dump(self, tr: Truck) -> None:
         tr.phase = TruckPhase.WAIT_DUMP
@@ -1470,11 +1530,14 @@ class MiningSimulationBase(drs.Module):
 
     def _advance_truck_state(self, tr: Truck) -> bool:
         ph = tr.phase
-        if ph == TruckPhase.EMPTY:
-            if tr.is_waste and tr.mission_type == MissionType.CAPITAL_DECLINE_DEV:
-                self._enter_decline_loadout(tr)
-            else:
-                self._enter_face_loadout(tr, tr.target_face_id)
+        if ph in (TruckPhase.EMPTY, TruckPhase.LOADED):
+            if tr.current_segment is not None:
+                prev_seg = tr.current_segment
+                prev_seg.release(tr)
+                tr.current_segment = None
+                self._wake_waiting_traffic_at_segment(prev_seg)
+                tr.route_segment_idx += 1
+            self._advance_truck_corridor(tr)
             return True
         if ph == TruckPhase.SPOT_LOAD:
             tr.phase = TruckPhase.ACQUIRE
@@ -1490,12 +1553,6 @@ class MiningSimulationBase(drs.Module):
             return True
         if ph == TruckPhase.LOADING:
             self._finish_loading(tr)
-            return True
-        if ph == TruckPhase.LOADED:
-            if tr.is_waste:
-                self._enter_waste_dump(tr)
-            else:
-                self._enter_dump(tr)
             return True
         if ph == TruckPhase.DUMPING:
             if tr.is_waste:
@@ -1543,7 +1600,11 @@ class MiningSimulationBase(drs.Module):
                 if tr.phase in (TruckPhase.IDLE, TruckPhase.PARKED):
                     if self._try_dispatch(tr):
                         changed = True
-                elif tr.phase in DUE_PHASES and tr.timer.value <= 1e-6:
+                elif (
+                    tr.phase in DUE_PHASES
+                    and tr.timer.rate < 0.0
+                    and tr.timer.value <= 1e-6
+                ):
                     if self._advance_truck_state(tr):
                         changed = True
 

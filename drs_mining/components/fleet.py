@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import drs
 
@@ -107,6 +107,11 @@ class Truck:
     waste_payload_cap: float = 24.6
     speeds: Dict[str, Dict[str, float]] = field(default_factory=dict)
     payload_type: str = "ORE"
+    # Route and passing bay navigation
+    route_segments: List[Any] = field(default_factory=list)
+    route_segment_idx: int = 0
+    current_segment: Optional[Any] = None
+    in_passing_bay: Optional[Any] = None
     current_location: str = "SURFACE_PARKING"
     target_bay_id: Optional[str] = None
     fuel_level_pct: float = 100.0
