@@ -83,7 +83,9 @@ def test_economics_config_defaults():
     econ = EconomicParameters()
     assert econ.copper_price_per_lb == 4.00
     assert econ.gold_price_per_oz == 1900.0
-    assert econ.annual_discount_rate == 0.05
+    assert econ.annual_discount_rate == 0.08
+    assert econ.fixed_cost_per_day == 74460.0
+    assert econ.stockout_penalty_per_day == 25000.0
     assert econ.ore1_net_value_per_processed_tonne == 577.48
     assert econ.ore2_net_value_per_processed_tonne == 709.83
 

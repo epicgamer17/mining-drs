@@ -150,6 +150,12 @@ class MetallurgicalPlant(Processor):
         self.cumulative_operating_cost = drs.Level(
             "cumulative_operating_cost", initial_value=0.0
         )
+        self.cumulative_fixed_cost = drs.Level(
+            "cumulative_fixed_cost", initial_value=0.0
+        )
+        self.cumulative_stockout_penalty = drs.Level(
+            "cumulative_stockout_penalty", initial_value=0.0
+        )
         self.cumulative_net_cash_flow = drs.Level(
             "cumulative_net_cash_flow", initial_value=0.0
         )
@@ -446,8 +452,16 @@ class MetallurgicalPlant(Processor):
             prod_cost = d_mined * (p.production_cost_per_tonne or 0.0)
             dev_cost = d_dev * (p.development_cost_per_unit or 0.0)
             fixed_cost = p.fixed_cost_per_day or 0.0
-            tot_cost = prod_cost + dev_cost + fixed_cost
+            stockout_pen = (
+                p.stockout_penalty_per_day or 0.0
+                if (d_ore1_proc + d_ore2_proc) <= 1e-6
+                and self.active_operating_mode.value.name != "SHUTDOWN"
+                else 0.0
+            )
+            tot_cost = prod_cost + dev_cost + fixed_cost + stockout_pen
             net_cf = rev - tot_cost
+            self.cumulative_fixed_cost.value += fixed_cost
+            self.cumulative_stockout_penalty.value += stockout_pen
         else:
             cu_lbs = (
                 d_ore1_proc * p.ore1_cu_grade * p.copper_recovery_ore1
@@ -461,8 +475,17 @@ class MetallurgicalPlant(Processor):
             mill_cost = (d_ore1_proc + d_ore2_proc) * p.milling_cost_per_tonne
             haul_cost = (d_ore1_proc + d_ore2_proc) * p.haulage_cost_per_tonne
             dev_cost = d_dev * p.development_cost_per_metre
-            tot_cost = mill_cost + haul_cost + dev_cost
+            fixed_cost = p.fixed_cost_per_day or 0.0
+            stockout_pen = (
+                p.stockout_penalty_per_day or 0.0
+                if (d_ore1_proc + d_ore2_proc) <= 1e-6
+                and self.active_operating_mode.value.name != "SHUTDOWN"
+                else 0.0
+            )
+            tot_cost = mill_cost + haul_cost + dev_cost + fixed_cost + stockout_pen
             net_cf = rev - tot_cost
+            self.cumulative_fixed_cost.value += fixed_cost
+            self.cumulative_stockout_penalty.value += stockout_pen
 
         dfactor = (1.0 + p.annual_discount_rate) ** (-max(0.0, current_day / 365.0))
         self._discount_factor.value = dfactor
@@ -512,7 +535,16 @@ class MetallurgicalPlant(Processor):
         haulage_cost = (ore1_t + ore2_t) * p.haulage_cost_per_tonne
         dev_capex = delta_dev_meters * p.development_cost_per_metre
         operating_cost = milling_cost + haulage_cost
-        net_cash_flow = revenue - operating_cost - dev_capex
+
+        # Fixed daily overhead cost
+        fixed_cost = (p.fixed_cost_per_day or 0.0) * dt_days
+
+        # Stockout penalty (mill starved/idle during non-scheduled-shutdown operating periods)
+        stockout_penalty = 0.0
+        if (ore1_t + ore2_t) <= 1e-6 and self.active_operating_mode.value.name != "SHUTDOWN":
+            stockout_penalty = (getattr(p, "stockout_penalty_per_day", 0.0) or 0.0) * dt_days
+
+        net_cash_flow = revenue - operating_cost - dev_capex - fixed_cost - stockout_penalty
 
         t_years = max(0.0, t_days / 365.0)
         discount_factor = (1.0 + p.annual_discount_rate) ** (-t_years)
@@ -521,12 +553,16 @@ class MetallurgicalPlant(Processor):
         self.cumulative_gross_revenue.value += revenue
         self.cumulative_milling_cost.value += milling_cost
         self.cumulative_operating_cost.value += operating_cost
+        self.cumulative_fixed_cost.value += fixed_cost
+        self.cumulative_stockout_penalty.value += stockout_penalty
         self.cumulative_net_cash_flow.value += net_cash_flow
         self.cumulative_npv.value += discounted_cash_flow
 
         if dt_days > 1e-12:
             self.cash_flow_rate_per_day.value = net_cash_flow / dt_days
             self.discounted_cash_flow_rate_per_day.value = discounted_cash_flow / dt_days
+            self.daily_revenue_rate.value = revenue / dt_days
+            self.daily_cost_rate.value = (operating_cost + dev_capex + fixed_cost + stockout_penalty) / dt_days
         else:
             self.cash_flow_rate_per_day.value = 0.0
             self.discounted_cash_flow_rate_per_day.value = 0.0

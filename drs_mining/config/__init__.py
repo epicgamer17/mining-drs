@@ -336,14 +336,15 @@ class EconomicParameters:
     milling_cost_per_tonne: float = 14.0  # Processing plant operating cost [USD/tonne]
     haulage_cost_per_tonne: float = 4.50  # Underground truck haulage operating cost [USD/tonne]
     development_cost_per_metre: float = 4500.0  # Capital heading advance cost [USD/linear metre]
-    annual_discount_rate: float = 0.05  # Annual financial discount rate for NPV calculation [0.05 = 5%]
+    annual_discount_rate: float = 0.08  # Annual financial discount rate for NPV calculation [0.08 = 8% per Slide 5]
+    fixed_cost_per_day: float = 74460.0  # Fixed daily site overhead, baseload power & indirect costs [USD/day]
+    stockout_penalty_per_day: float = 25000.0  # Mill idling, thermal/reagent standby, and contract penalty [USD/day]
 
     # Direct Net-Value Mode Parameters (Two-Area DCF & Counterfactual Incremental NPV Study)
     ore1_net_value_per_processed_tonne: Optional[float] = 577.48  # Direct net value of Ore 1 [USD/tonne]
     ore2_net_value_per_processed_tonne: Optional[float] = 709.83  # Direct net value of Ore 2 [USD/tonne]
     production_cost_per_tonne: Optional[float] = 135.0  # Combined mining & processing operating cost [USD/tonne]
     development_cost_per_unit: Optional[float] = 15000.0  # Capital development advance cost [USD/metre]
-    fixed_cost_per_day: Optional[float] = 74460.0  # Fixed daily site overhead and indirect costs [USD/day]
 
 
 # ===========================================================================

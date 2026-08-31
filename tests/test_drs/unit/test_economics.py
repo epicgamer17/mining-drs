@@ -10,7 +10,9 @@ def test_economic_parameters_defaults():
     params = EconomicParameters()
     assert params.copper_price_per_lb == 4.00
     assert params.gold_price_per_oz == 1900.0
-    assert params.annual_discount_rate == 0.05
+    assert params.annual_discount_rate == 0.08
+    assert params.fixed_cost_per_day == 74460.0
+    assert params.stockout_penalty_per_day == 25000.0
     assert params.ore1_cu_grade == 0.007
     assert params.ore2_cu_grade == 0.015
 
@@ -53,11 +55,29 @@ def test_metallurgical_plant_economic_stepping():
     assert pytest.approx(plant.cumulative_processed_ore2.value) == 2400.0
     assert plant.cumulative_gross_revenue.value > 0.0
     assert plant.cumulative_processing_cost.value == 6000.0 * 14.0
+    assert plant.cumulative_fixed_cost.value == 74460.0
+    assert plant.cumulative_stockout_penalty.value == 0.0
     assert plant.cumulative_net_cash_flow.value > 0.0
 
-    # Discount factor D(1 day) = (1.05)^(-1/365)
-    expected_df = (1.05) ** (-1.0 / 365.0)
+    # Discount factor D(1 day) = (1.08)^(-1/365)
+    expected_df = (1.08) ** (-1.0 / 365.0)
     assert pytest.approx(plant.cumulative_npv.value, rel=1e-5) == (
         plant.cumulative_net_cash_flow.value * expected_df
     )
     assert plant.cash_flow_rate_per_day.value == plant.cumulative_net_cash_flow.value
+
+
+def test_metallurgical_plant_stockout_penalty():
+    s1 = Stockpile("s1", ["ore_grade"], initial_mass=0.0, initial_attributes={"ore_grade": 0.0})
+    s2 = Stockpile("s2", ["ore_grade"], initial_mass=0.0, initial_attributes={"ore_grade": 1.0})
+    plant = MetallurgicalPlant(
+        stockpiles=[s1, s2],
+        economic_params=EconomicParameters(stockout_penalty_per_day=25000.0, fixed_cost_per_day=74460.0),
+    )
+
+    # 1 day of complete starvation (0 tonnes milled, non-shutdown)
+    plant.step_economics(out1_t_sec=0.0, out2_t_sec=0.0, delta_dev_meters=0.0, dt_days=1.0, t_days=1.0)
+    assert plant.cumulative_gross_revenue.value == 0.0
+    assert plant.cumulative_fixed_cost.value == 74460.0
+    assert plant.cumulative_stockout_penalty.value == 25000.0
+    assert plant.cumulative_net_cash_flow.value == -(74460.0 + 25000.0)

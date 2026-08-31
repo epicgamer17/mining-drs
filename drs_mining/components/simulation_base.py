@@ -1811,6 +1811,12 @@ class MiningSimulationBase(drs.Module):
             "cumulative_cash_flow": float(
                 self.plant.cumulative_net_cash_flow.value
             ),
+            "cumulative_fixed_cost": float(
+                self.plant.cumulative_fixed_cost.value
+            ),
+            "cumulative_stockout_penalty": float(
+                self.plant.cumulative_stockout_penalty.value
+            ),
             "cumulative_npv": float(self.plant.cumulative_npv.value),
             "operating_npv_proxy": float(self.plant.cumulative_npv.value),
             "cumulative_discounted_cash_flow": float(
