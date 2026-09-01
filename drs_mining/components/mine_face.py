@@ -6,7 +6,7 @@ import math
 import random
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Union, Dict, Any, Tuple, Callable
+from typing import Optional, Union, Dict, Any, Tuple, Callable, Sequence
 
 import drs
 from drs import Processor
@@ -481,10 +481,35 @@ class MineFace(Processor):
             self.active_parcel_initial_mass.value
         )
 
+    def levels(self) -> Sequence[drs.Level]:
+        """Return all stateful Level instances owned by the mine face."""
+        return (
+            self.cumulative_extracted_mass,
+            self.parcel_extracted_mass,
+            self.parcel_waste_extracted,
+            self.cumulative_waste_extracted,
+            self.cumulative_stope_dev_m,
+            self.cumulative_development,
+            self.readiness_fraction,
+            self.readiness_trajectory_ratio,
+            self.ready_day,
+        )
+
+    def time_to_event(self) -> float:
+        """Time until any owned level reaches a threshold."""
+        min_dt = math.inf
+        for lvl in self.levels():
+            dt = lvl.time_to_event()
+            if 0.0 <= dt < min_dt:
+                min_dt = dt
+        return min_dt
+
     def step(self, dt: float) -> None:
         """Apply the face's continuous mechanics for one engine step."""
         self.advance_parcel_state()
         actual = self.actual_rate
         self.cumulative_extracted_mass.rate = actual
         self.parcel_extracted_mass.rate = actual
-        super().step(dt)
+        for lvl in self.levels():
+            lvl.step(dt)
+

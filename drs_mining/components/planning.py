@@ -305,6 +305,31 @@ class TacticalReviewController(drs.Module):
             force_mode=force_mode,
         )
 
+    def levels(self) -> Sequence[drs.Level]:
+        return (
+            self.strategic_year_index,
+            self.strategic_year_timer,
+            self.tactical_review_timer,
+            self.tactical_review_count,
+            self.development_trajectory_ratio,
+            self.ore1_trajectory_ratio,
+            self.ore2_trajectory_ratio,
+            self.development_priority_reserved_trucks,
+        )
+
+    def time_to_event(self) -> float:
+        min_dt = math.inf
+        for lvl in self.levels():
+            dt = lvl.time_to_event()
+            if 0.0 <= dt < min_dt:
+                min_dt = dt
+        return min_dt
+
+    def step(self, dt: float) -> None:
+        for lvl in self.levels():
+            lvl.step(dt)
+
+
 
 
 

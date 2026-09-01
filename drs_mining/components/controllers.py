@@ -95,7 +95,12 @@ class OperatingModeController(drs.Module):
             if name == "SHUTDOWN"
             else self.duration_of_production_campaigns
         )
-        self.current_campaign_duration.rate = (1.0, -math.inf, threshold)
+        self.current_campaign_duration.rate = 1.0
+        self.current_campaign_duration.lower_threshold = -math.inf
+        self.current_campaign_duration.upper_threshold = threshold
+
+    def levels(self) -> tuple[drs.Level, ...]:
+        return (self.current_campaign_duration,)
 
     def is_terminating_condition_met(self) -> bool:
         return False
@@ -485,7 +490,9 @@ class FleetController(drs.Module):
         return max(0.0, final_real_extraction_rate)
 
     def _schedule_shifts(self, mode_name: str):
-        self.fleet_shift_timer.rate = (1.0, -math.inf, self.fleet_shift_duration)
+        self.fleet_shift_timer.rate = 1.0
+        self.fleet_shift_timer.lower_threshold = -math.inf
+        self.fleet_shift_timer.upper_threshold = self.fleet_shift_duration
 
         shift_due = self.fleet_shift_timer.value >= self.fleet_shift_duration - 1e-6
         mode_changed = mode_name != self.current_shift_mode_name
@@ -495,6 +502,9 @@ class FleetController(drs.Module):
             self.current_shift_mode_name = mode_name
             self._refresh_shift_allocation_fractions()
             self.fleet_shift_count.value += 1
+
+    def levels(self) -> Sequence[drs.Level]:
+        return (self.fleet_shift_timer, self.cumulative_mine_development)
 
     def allocate(
         self,

@@ -87,3 +87,27 @@ class Stockpile(Storage):
 
         self.actual_outflow_rate.value = actual_outflow
         return actual_outflow
+
+    def levels(self) -> Sequence[drs.Level]:
+        """Return the stateful levels owned by this stockpile."""
+        attr_levels = [
+            getattr(self, attr)
+            for attr in self.expected_attributes
+            if hasattr(self, attr)
+        ]
+        return (self._level, *attr_levels)
+
+    def time_to_event(self) -> float:
+        """Time until this stockpile or any attribute hits a state boundary."""
+        min_dt = math.inf
+        for lvl in self.levels():
+            dt = lvl.time_to_event()
+            if 0.0 <= dt < min_dt:
+                min_dt = dt
+        return min_dt
+
+    def step(self, dt: float) -> None:
+        """Advance all owned levels forward by dt."""
+        for lvl in self.levels():
+            lvl.step(dt)
+

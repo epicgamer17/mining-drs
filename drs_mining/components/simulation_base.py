@@ -577,6 +577,65 @@ class MiningSimulationBase(drs.Module):
         self._last_telemetry_net_cf = 0.0
         self._last_telemetry_npv = 0.0
 
+    def levels(self) -> Sequence[drs.Level]:
+        """Aggregate all stateful levels owned directly and by child sub-modules."""
+        base_levels: List[drs.Level] = [
+            self.sustaining_cumulative_development,
+            self.area2_cumulative_development,
+            self.cumulative_mine_development,
+            self.development_rate_m_per_day,
+            self.development_priority_reserved_trucks,
+            self.development_trajectory_ratio,
+            self.ore1_trajectory_ratio,
+            self.ore2_trajectory_ratio,
+            self.area2_readiness_trajectory_ratio,
+            self.area2_readiness_fraction,
+            self.area2_ready_day,
+            self.area1_depleted_day,
+            self.area2_depleted_day,
+            self.analytical_face1_weight,
+            self.analytical_face2_weight,
+            self.analytical_face1_rate_target,
+            self.analytical_face2_rate_target,
+            self.analytical_blend_feasible,
+            self.total_extracted_ore,
+            self.ore1_hauled,
+            self.ore2_hauled,
+            self.ore1_dumped_total,
+            self.ore2_dumped_total,
+        ]
+        if hasattr(self, "stope_turnaround_development"):
+            base_levels.append(self.stope_turnaround_development)
+        if hasattr(self, "fallback_dispatch_count"):
+            base_levels.append(self.fallback_dispatch_count)
+        if hasattr(self, "gt") and isinstance(self.gt, drs.Level):
+            base_levels.append(self.gt)
+
+        # Child components
+        for comp_name in (
+            "ore1_stock",
+            "ore2_stock",
+            "mode_controller",
+            "plant",
+            "tactical_controller",
+            "topology",
+        ):
+            comp = getattr(self, comp_name, None)
+            if comp is not None and hasattr(comp, "levels") and callable(comp.levels):
+                base_levels.extend(comp.levels())
+
+        if hasattr(self, "faces"):
+            for face in self.faces:
+                if hasattr(face, "levels") and callable(face.levels):
+                    base_levels.extend(face.levels())
+
+        if hasattr(self, "trucks"):
+            for tr in self.trucks:
+                if getattr(tr, "timer", None) is not None:
+                    base_levels.append(tr.timer)
+
+        return tuple(base_levels)
+
     def _on_area2_unlocked(self, day: float = 0.0) -> None:
         """Callback triggered when Area 2 physical development reaches 100%."""
         if not self._area2_unlocked:

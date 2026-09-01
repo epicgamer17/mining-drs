@@ -356,11 +356,9 @@ class MetallurgicalPlant(Processor):
             getattr(self, timer_attr).rate = 1.0
 
         if name in self._CONTINGENCY_MODES:
-            self.current_contingency_duration.rate = (
-                1.0,
-                -math.inf,
-                self.duration_of_contingency_segments,
-            )
+            self.current_contingency_duration.rate = 1.0
+            self.current_contingency_duration.lower_threshold = -math.inf
+            self.current_contingency_duration.upper_threshold = self.duration_of_contingency_segments
         else:
             self.current_contingency_duration.rate = 0.0
 
@@ -566,5 +564,46 @@ class MetallurgicalPlant(Processor):
         else:
             self.cash_flow_rate_per_day.value = 0.0
             self.discounted_cash_flow_rate_per_day.value = 0.0
+
+    def levels(self) -> Sequence[drs.Level]:
+        """Return all stateful Level instances owned by the metallurgical plant."""
+        return (
+            self.cumulative_processed_ore1,
+            self.cumulative_processed_ore2,
+            self.cumulative_recovered_cu_lbs,
+            self.cumulative_recovered_au_oz,
+            self.cumulative_gross_revenue,
+            self.cumulative_milling_cost,
+            self.cumulative_operating_cost,
+            self.cumulative_fixed_cost,
+            self.cumulative_stockout_penalty,
+            self.cumulative_net_cash_flow,
+            self.cumulative_npv,
+            self.cumulative_milled_mass,
+            self.current_contingency_duration,
+            self.cumulative_time_mode_a,
+            self.cumulative_time_mode_a_contingency,
+            self.cumulative_time_mode_a_surging,
+            self.cumulative_time_mode_b,
+            self.cumulative_time_mode_b_contingency,
+            self.cumulative_time_mode_b_surging,
+            self.cumulative_time_shutdown,
+            self.total_system_ore_mass,
+        )
+
+    def time_to_event(self) -> float:
+        """Time until any owned level reaches a threshold."""
+        min_dt = math.inf
+        for lvl in self.levels():
+            dt = lvl.time_to_event()
+            if 0.0 <= dt < min_dt:
+                min_dt = dt
+        return min_dt
+
+    def step(self, dt: float) -> None:
+        """Advance all owned levels forward by dt."""
+        for lvl in self.levels():
+            lvl.step(dt)
+
 
 

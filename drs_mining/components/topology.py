@@ -1,4 +1,4 @@
-from typing import Optional, Union, Dict, List, Any
+from typing import Optional, Union, Dict, List, Any, Sequence
 import json
 import random
 import drs
@@ -124,8 +124,13 @@ class RoadSegment(drs.Module):
             loaded=(direction == "UP"), truck=truck
         )
         self.time_until_free.value = trav_time
-        self.time_until_free.rate = (-1.0, 0.0, float("inf"))
+        self.time_until_free.rate = -1.0
+        self.time_until_free.lower_threshold = 0.0
+        self.time_until_free.upper_threshold = float("inf")
         return trav_time
+
+    def levels(self) -> tuple[drs.Level, ...]:
+        return (self.time_until_free,)
 
     def release(self, truck: Truck) -> None:
         """Releases the segment lock when a truck exits into a passing bay or destination."""
@@ -214,6 +219,9 @@ class MineTopology(drs.Module):
         self.segments: Dict[str, RoadSegment] = {}
         self.passing_bays: Dict[str, PassingBay] = {}
         self._build_network()
+
+    def levels(self) -> Sequence[drs.Level]:
+        return [lvl for seg in self.segments.values() for lvl in seg.levels()]
 
     def _build_network(self) -> None:
         """Constructs the full discrete road segment and passing bay network."""

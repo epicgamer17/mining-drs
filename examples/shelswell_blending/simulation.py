@@ -840,6 +840,32 @@ class ShelswellBlendingHaulage(drs.Module):
             self.traffic_delay_sum += delay
         return t
 
+    def levels(self) -> Sequence[drs.Level]:
+        base_levels: List[drs.Level] = [
+            self.gt,
+            self.waste_hauled,
+            self.ore1_hauled,
+            self.ore2_hauled,
+            self.cumulative_extracted_ore,
+        ]
+        if hasattr(self, "ore1_stock") and hasattr(self.ore1_stock, "levels"):
+            base_levels.extend(self.ore1_stock.levels())
+        if hasattr(self, "ore2_stock") and hasattr(self.ore2_stock, "levels"):
+            base_levels.extend(self.ore2_stock.levels())
+        if hasattr(self, "mode_controller") and hasattr(self.mode_controller, "levels"):
+            base_levels.extend(self.mode_controller.levels())
+        if hasattr(self, "plant") and hasattr(self.plant, "levels"):
+            base_levels.extend(self.plant.levels())
+        if hasattr(self, "trucks"):
+            for tr in self.trucks:
+                if getattr(tr, "timer", None) is not None:
+                    base_levels.append(tr.timer)
+        if hasattr(self, "loadouts"):
+            for lo in self.loadouts:
+                if getattr(lo, "muck_remaining", None) is not None:
+                    base_levels.append(lo.muck_remaining)
+        return tuple(base_levels)
+
     # -- Telemetry & History -------------------------------------------------
     def _record_telemetry(self, plant_draw: PlantDrawRates):
         t_days = self.gt.value / 86400.0

@@ -102,6 +102,7 @@ import random
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Sequence, List
 
 import drs
 import matplotlib.pyplot as plt
@@ -414,6 +415,26 @@ class ShelswellHaulage(drs.Module):
         self.trips = 0
         self._cycle_sum = 0.0
         self.traffic_delay_sum = 0.0
+
+    def levels(self) -> Sequence[drs.Level]:
+        base_levels: List[drs.Level] = [
+            self.gt,
+            self.ore_hauled,
+            self.waste_hauled,
+        ]
+        if hasattr(self, "dump_sites"):
+            for dump in self.dump_sites.values():
+                if getattr(dump, "dumped_level", None) is not None:
+                    base_levels.append(dump.dumped_level)
+        if hasattr(self, "trucks"):
+            for tr in self.trucks:
+                if getattr(tr, "timer", None) is not None:
+                    base_levels.append(tr.timer)
+        if hasattr(self, "loadouts"):
+            for lo in self.loadouts:
+                if getattr(lo, "muck_remaining", None) is not None:
+                    base_levels.append(lo.muck_remaining)
+        return tuple(base_levels)
 
     # -- DRS (Layer 3) hooks ------------------------------------------------
     def time_to_event(self) -> float:
