@@ -1020,6 +1020,12 @@ def prepare_history(df):
         else:
             df["total_system_ore_mass"] = 0.0
 
+    if "cumulative_extracted_mass" not in df.columns:
+        if "mine_face_cumulative_extracted_mass" in df.columns:
+            df["cumulative_extracted_mass"] = df["mine_face_cumulative_extracted_mass"]
+        elif "cumulative_milled_mass" in df.columns:
+            df["cumulative_extracted_mass"] = df["cumulative_milled_mass"]
+
     df["Total Ore Stockpile Level"] = df["total_system_ore_mass"] / 1000.0
     df["Ore 1 Stockpile Level"] = df["Ore1Stock_mass"] / 1000.0 if "Ore1Stock_mass" in df.columns else 0.0
     df["Ore 2 Stockpile Level"] = df["Ore2Stock_mass"] / 1000.0 if "Ore2Stock_mass" in df.columns else 0.0

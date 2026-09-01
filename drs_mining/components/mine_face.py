@@ -58,7 +58,7 @@ class MineFace(Processor):
         std_dev_ore_fraction: float = 0.05,
         prob_new_facies: float = 0.3,
         variation_same_facies: float = 0.01,
-        initial_parcel_mass: float = 40000.0,
+        initial_parcel_mass: Optional[float] = None,
         max_rate: float = math.inf,
         # Capital development & physical readiness
         required_development: float = 0.0,
@@ -108,7 +108,7 @@ class MineFace(Processor):
         self.on_unlock_callback = on_unlock_callback
         self.counterfactual_disable = counterfactual_disable
 
-        self.rng = random.Random((seed or 42) + face_id * 100)
+        self.rng = random.Random(seed + face_id * 100) if seed is not None else random
         self.generator = generator or StochasticFaciesGenerator(
             mean_fraction=mean_ore_fraction,
             std_dev=std_dev_ore_fraction,
@@ -131,11 +131,16 @@ class MineFace(Processor):
         )
         self.active_parcel_ore_fraction = drs.Variable(var_name, self.mean_ore_fraction)
         self.active_parcel_initial_mass = drs.Variable(
-            f"{name}_active_parcel_initial_mass", initial_parcel_mass
+            f"{name}_active_parcel_initial_mass", initial_parcel_mass if initial_parcel_mass is not None else 0.0
         )
         self.active_parcel_ore_mass = self.active_parcel_initial_mass
-        self.active_parcel_waste_mass = drs.Variable(f"{name}_parcel_waste_mass", 0.0)
-        self.required_turnaround_dev_m = drs.Variable(f"{name}_req_dev_m", 0.0)
+        self.active_parcel_waste_mass = drs.Variable(
+            f"{name}_parcel_waste_mass",
+            (initial_parcel_mass if initial_parcel_mass is not None else 0.0) * self.waste_to_ore_ratio,
+        )
+        self.required_turnaround_dev_m = drs.Variable(
+            f"{name}_req_dev_m", self.turnaround_dev_per_parcel_m
+        )
 
         # Extraction Counters
         self.cumulative_extracted_mass = drs.Level(
@@ -175,8 +180,8 @@ class MineFace(Processor):
         self.currently_late: bool = False
         self.completed_late: bool = False
 
-        # Load initial batch/parcel
-        self._load_next_batch()
+        if initial_parcel_mass is None:
+            self._load_next_batch()
 
     # -----------------------------------------------------------------------
     # Readiness & Physical Unlock Mechanics

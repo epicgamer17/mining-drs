@@ -331,6 +331,10 @@ if __name__ == "__main__":
     mine.total_ore_to_extract = 6600000.0
     telemetry = Telemetry(model=engine)
     telemetry.register_metric(
+        "active_operating_mode",
+        lambda t, m, s, _: plant.active_operating_mode.value,
+    )
+    telemetry.register_metric(
         "MassOfCurrentParcel",
         lambda t, m, s, _: mine.active_parcel_initial_mass.value,
     )
