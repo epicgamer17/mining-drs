@@ -9,6 +9,10 @@ from .controllers import OperatingModeController
 from .generators import StochasticFaciesGenerator
 
 
+from .geology import StochasticReserve
+from .haulage import HaulRoute
+
+
 def create_stockpiles(configs: Sequence[Mapping]) -> List[Stockpile]:
     """Factory helper to construct a list of Stockpiles from config dicts."""
     stockpiles = []
@@ -60,19 +64,19 @@ def build_tactical_simulation(
             prob_new_facies=prob_new_facies,
             variation_same_facies=variation_same_facies,
         )
+        geology = StochasticReserve(
+            name="mine_face_reserve",
+            total_tonnes=total_ore_to_extract,
+            generator=gen,
+            min_parcel_mass=min_ore_mass,
+            max_parcel_mass=max_ore_mass,
+            warming_period=ore_to_be_extracted_during_warming_period,
+        )
+        haulage = HaulRoute(distance_km=1.0)
         face = MineFace(
             name="mine_face",
-            face_id=1,
-            generator=gen,
-            min_ore_mass=min_ore_mass,
-            max_ore_mass=max_ore_mass,
-            total_ore_to_extract=total_ore_to_extract,
-            ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-            mean_ore_fraction=mean_ore_fraction,
-            std_dev_ore_fraction=std_dev_ore_fraction,
-            prob_new_facies=prob_new_facies,
-            variation_same_facies=variation_same_facies,
-            initial_parcel_mass=40000.0,
+            geology=geology,
+            haulage=haulage,
         )
         faces = [face]
 

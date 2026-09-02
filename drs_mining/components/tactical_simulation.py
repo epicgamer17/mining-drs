@@ -31,7 +31,9 @@ from drs_mining.components.modes import OperatingMode
 from drs_mining.components.plant import MetallurgicalPlant
 from drs_mining.components.stockpiles import Stockpile
 from drs_mining.components.controllers import OperatingModeController
-from drs_mining.components.mine_face import MineFace, FaceState
+from drs_mining.components.mine_face import MineFace
+from drs_mining.components.geology import StochasticReserve
+from drs_mining.components.haulage import HaulRoute
 from drs_mining.components.generators import StochasticFaciesGenerator
 from drs_mining.components.planning import (
     AreaReadinessTarget,
@@ -137,23 +139,19 @@ class TacticalMiningSimulation(drs.Module):
             face_capacity = self.total_ore_to_extract / 2.0
             warmup_cap = self.ore_to_be_extracted_during_warming_period / 2.0
 
+            res1 = StochasticReserve(
+                name="mine_face_1_reserve",
+                total_tonnes=face_capacity,
+                generator=gen1,
+                min_parcel_mass=cfg.geology.min_parcel_mass,
+                max_parcel_mass=cfg.geology.max_parcel_mass,
+                warming_period=warmup_cap,
+                seed=self.seed,
+            )
             self.face1 = MineFace(
                 name="mine_face_1",
-                face_id=1,
-                area_id=1,
-                level_index=cfg.topology.area1_level,
-                generator=gen1,
-                min_ore_mass=cfg.geology.min_parcel_mass,
-                max_ore_mass=cfg.geology.max_parcel_mass,
-                total_ore_to_extract=face_capacity,
-                ore_to_be_extracted_during_warming_period=warmup_cap,
-                mean_ore_fraction=cfg.geology.area1_mean_fraction,
-                std_dev_ore_fraction=cfg.geology.area1_std_dev,
-                prob_new_facies=cfg.geology.prob_new_facies,
-                variation_same_facies=cfg.geology.variation_same_facies,
-                initial_parcel_mass=cfg.geology.initial_parcel_mass,
-                required_development=0.0,
-                seed=self.seed,
+                geology=res1,
+                haulage=HaulRoute(distance_km=1.0),
             )
 
             gen2 = StochasticFaciesGenerator(
@@ -162,29 +160,19 @@ class TacticalMiningSimulation(drs.Module):
                 prob_new_facies=cfg.geology.prob_new_facies,
                 variation_same_facies=cfg.geology.variation_same_facies,
             )
+            res2 = StochasticReserve(
+                name="mine_face_2_reserve",
+                total_tonnes=face_capacity,
+                generator=gen2,
+                min_parcel_mass=cfg.geology.min_parcel_mass,
+                max_parcel_mass=cfg.geology.max_parcel_mass,
+                warming_period=warmup_cap,
+                seed=self.seed,
+            )
             self.face2 = MineFace(
                 name="mine_face_2",
-                face_id=2,
-                area_id=2,
-                level_index=cfg.topology.area2_level,
-                generator=gen2,
-                min_ore_mass=cfg.geology.min_parcel_mass,
-                max_ore_mass=cfg.geology.max_parcel_mass,
-                total_ore_to_extract=face_capacity,
-                ore_to_be_extracted_during_warming_period=warmup_cap,
-                mean_ore_fraction=cfg.geology.area2_mean_fraction,
-                std_dev_ore_fraction=cfg.geology.area2_std_dev,
-                prob_new_facies=cfg.geology.prob_new_facies,
-                variation_same_facies=cfg.geology.variation_same_facies,
-                initial_parcel_mass=cfg.geology.initial_parcel_mass,
-                required_development=self.area2_readiness_target.required_development,
-                ready_by_day=self.area2_readiness_target.ready_by_day,
-                on_unlock_callback=self._on_area2_unlocked,
-                sporadic=True,
-                availability_probability=cfg.geology.sporadic_probability,
-                min_waste_fraction=cfg.geology.min_waste_fraction,
-                max_waste_fraction=cfg.geology.max_waste_fraction,
-                seed=self.seed,
+                geology=res2,
+                haulage=HaulRoute(distance_km=3.0),
             )
             self.faces = [self.face1, self.face2]
 
@@ -334,8 +322,6 @@ class TacticalMiningSimulation(drs.Module):
         if not self._area2_unlocked:
             self._area2_unlocked = True
             self.area2_ready_day.value = day
-            self.face2.ready_day.value = day
-            self.face2.state = FaceState.ORE_READY
 
     def is_area2_locked(self) -> bool:
         required = max(0.0, float(self.area2_readiness_target.required_development))
@@ -361,9 +347,9 @@ class TacticalMiningSimulation(drs.Module):
         if f1_done and f2_done:
             return 1
 
-        # Check sporadic availability for face 2
+        # Check availability for face 2
         face2 = self._get_face(2)
-        if face2.sporadic and not face2.is_sporadic_available:
+        if not face2.is_ore_available:
             return 1
 
         mode_name = self.plant.active_operating_mode.value.name
@@ -371,14 +357,10 @@ class TacticalMiningSimulation(drs.Module):
         return 2 if self.rng.random() < p_face2 else 1
 
     def _get_face(self, face_id: int) -> MineFace:
-        for f in self.faces:
-            if f.face_id == face_id:
-                return f
-        raise KeyError(f"Face with face_id={face_id} not found")
+        return self.faces[face_id - 1]
 
     def _is_face_exhausted(self, face_id: int) -> bool:
-        face = self._get_face(face_id)
-        return face.cumulative_extracted_mass.value >= face.total_ore_to_extract - 1e-6
+        return self._get_face(face_id).is_exhausted
 
     # -----------------------------------------------------------------------
     # DRS Engine Interface
@@ -461,7 +443,12 @@ class TacticalMiningSimulation(drs.Module):
         available_faces = [f for f in self.faces if f.is_ore_available]
         if available_faces:
             f_blend = sum(
-                float(f.active_parcel_ore_fraction.value) for f in available_faces
+                (
+                    f.geology.active_parcel.ore2_fraction
+                    if f.geology.active_parcel
+                    else 0.0
+                )
+                for f in available_faces
             ) / len(available_faces)
         else:
             # No ore available
@@ -500,7 +487,11 @@ class TacticalMiningSimulation(drs.Module):
             face.target_rate = face_target / 86400.0
 
             # Get actual extraction from face
-            ore2_frac = float(face.active_parcel_ore_fraction.value)
+            ore2_frac = (
+                face.geology.active_parcel.ore2_fraction
+                if face.geology.active_parcel
+                else 0.0
+            )
             ore1_frac = 1.0 - ore2_frac
             actual_rate = face.actual_rate
 
@@ -523,15 +514,12 @@ class TacticalMiningSimulation(drs.Module):
         throughput_tonnes = (out1 + out2) * dt
         self.cumulative_throughput.value += throughput_tonnes
 
-        # 7. Advance development for faces requiring it
+        # 7. Advance development for area 2
         if self.tactical_controller.planning_started:
-            for face in self.faces:
-                if face.required_development > 0 and not face.is_ready:
-                    # In DEVELOPMENT mode, advance at development_rate_m_per_day
-                    fleet_mode = self.tactical_controller.fleet_mode
-                    if fleet_mode == FLEET_MODES["DEVELOPMENT"]:
-                        dev_delta = self.development_rate_m_per_day * dt_days
-                        face.advance_development(dev_delta)
+            fleet_mode = self.tactical_controller.fleet_mode
+            if fleet_mode == FLEET_MODES["DEVELOPMENT"]:
+                dev_delta = self.development_rate_m_per_day * dt_days
+                self.area2_cumulative_development.value += dev_delta
 
         # 8. Update area 2 readiness
         self._update_area2_readiness()
@@ -553,11 +541,6 @@ class TacticalMiningSimulation(drs.Module):
             ore2_stock_level=float(self.ore2_stock.level),
             total_stock_level=float(self.ore1_stock.level + self.ore2_stock.level),
         )
-
-        # Check sporadic availability for satellites (daily re-evaluation)
-        for face in self.faces:
-            if face.sporadic and not face.is_exhausted:
-                face.check_sporadic_availability(self.rng)
 
         # Update tactical review
         self._update_tactical_review()

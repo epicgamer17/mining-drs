@@ -1,26 +1,30 @@
 from drs_mining.components.mine_face import MineFace
+from drs_mining.components.geology import StochasticReserve
+from drs_mining.components.haulage import HaulRoute
 from drs_mining.components.generators import StochasticFaciesGenerator
 from drs_mining.components.factories import build_tactical_simulation
 
 
 def test_mine_face_net_extracted_mass():
-    gen = StochasticFaciesGenerator(mean_fraction=0.3, std_dev=0.05, prob_new_facies=0.3, variation_same_facies=0.01)
+    gen = StochasticFaciesGenerator(
+        mean_fraction=0.3, std_dev=0.05, prob_new_facies=0.3, variation_same_facies=0.01
+    )
+    geology = StochasticReserve(
+        name="mine_face_reserve",
+        total_tonnes=6600000.0,
+        generator=gen,
+        min_parcel_mass=30000.0,
+        max_parcel_mass=50000.0,
+        warming_period=600000.0,
+    )
     mine = MineFace(
         name="mine_face",
-        face_id=1,
-        generator=gen,
-        min_ore_mass=30000.0,
-        max_ore_mass=50000.0,
-        total_ore_to_extract=6600000.0,
-        ore_to_be_extracted_during_warming_period=600000.0,
-        mean_ore_fraction=0.3,
-        std_dev_ore_fraction=0.05,
-        prob_new_facies=0.3,
-        variation_same_facies=0.01,
-        initial_parcel_mass=30000.0,
+        geology=geology,
+        haulage=HaulRoute(distance_km=1.0),
     )
-    mine.cumulative_extracted_mass.value = 1000000.0
-    assert mine.net_extracted_mass == 400000.0
+    mine.geology.cumulative_extracted_mass.value = 1000000.0
+    assert mine.geology.net_extracted_mass == 400000.0
+
 
 
 def test_controller_durations():

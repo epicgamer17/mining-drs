@@ -4,6 +4,8 @@ from drs import Processor, Storage
 
 from drs_mining.components import (
     MineFace,
+    StochasticReserve,
+    HaulRoute,
     MetallurgicalPlant,
     Stockpile,
     StochasticFaciesGenerator,
@@ -88,19 +90,18 @@ def test_mining_plant_is_a_processor():
 
 def test_mining_face_is_a_processor_driven_by_target_rate():
     gen = StochasticFaciesGenerator(mean_fraction=0.3, std_dev=0.05, prob_new_facies=0.3, variation_same_facies=0.01)
+    geology = StochasticReserve(
+        name="mine_face_1_reserve",
+        total_tonnes=6600000.0,
+        generator=gen,
+        min_parcel_mass=30000.0,
+        max_parcel_mass=50000.0,
+        warming_period=600000.0,
+    )
     face = MineFace(
         name="mine_face_1",
-        face_id=1,
-        generator=gen,
-        min_ore_mass=30000.0,
-        max_ore_mass=50000.0,
-        total_ore_to_extract=6600000.0,
-        ore_to_be_extracted_during_warming_period=600000.0,
-        mean_ore_fraction=0.3,
-        std_dev_ore_fraction=0.05,
-        prob_new_facies=0.3,
-        variation_same_facies=0.01,
-        initial_parcel_mass=30000.0,
+        geology=geology,
+        haulage=HaulRoute(distance_km=1.0),
     )
     assert isinstance(face, Processor)
 

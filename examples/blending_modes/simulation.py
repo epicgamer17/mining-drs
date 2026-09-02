@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 from drs import DRSEngine, Telemetry
 from drs_mining.components import (
     MineFace,
+    StochasticReserve,
+    HaulRoute,
     MetallurgicalPlant,
     OperatingModeController,
     Stockpile,
@@ -50,20 +52,22 @@ def build_blending_network(
         prob_new_facies=prob_new_facies,
         variation_same_facies=variation_same_facies,
     )
+    geology = StochasticReserve(
+        name="mine_face_reserve",
+        total_tonnes=total_ore_to_extract,
+        generator=gen,
+        min_parcel_mass=min_ore_mass,
+        max_parcel_mass=max_ore_mass,
+        initial_parcel_mass=40000.0,
+        warming_period=ore_to_be_extracted_during_warming_period,
+    )
+    haulage = HaulRoute(distance_km=1.0)
     mine = MineFace(
         name="mine_face",
-        face_id=1,
-        generator=gen,
-        min_ore_mass=min_ore_mass,
-        max_ore_mass=max_ore_mass,
-        total_ore_to_extract=total_ore_to_extract,
-        ore_to_be_extracted_during_warming_period=ore_to_be_extracted_during_warming_period,
-        mean_ore_fraction=mean_ore_fraction,
-        std_dev_ore_fraction=std_dev_ore_fraction,
-        prob_new_facies=prob_new_facies,
-        variation_same_facies=variation_same_facies,
-        initial_parcel_mass=40000.0,
+        geology=geology,
+        haulage=haulage,
     )
+
 
     initial_mass1 = (1 - mean_ore_fraction) * target_ore_stock_level
     ore1_stock = Stockpile(
@@ -117,16 +121,20 @@ def _register_and_policy(engine, network):
     def manage_blending(t: float):
         mode = mode_ctrl.update(ore2_stock.level)
 
+        ore2_frac = (
+            mine.geology.active_parcel.ore2_fraction
+            if mine.geology.active_parcel
+            else 0.0
+        )
         ore1_rate, ore2_rate, mine_target = plant.get_target_rates(
             mode,
             ore1_level=ore1_stock.level,
             ore2_level=ore2_stock.level,
-            stockpile2_routing_fraction=float(mine.active_parcel_ore_fraction.value),
+            stockpile2_routing_fraction=ore2_frac,
         )
 
         mine.target_rate = mine_target
 
-        ore2_frac = float(mine.active_parcel_ore_fraction.value)
         ore1_frac = 1.0 - ore2_frac
         actual = mine.actual_rate
         ore1_in = actual * ore1_frac
@@ -187,12 +195,12 @@ if __name__ == "__main__":
     engine = DRSEngine()
     _register_and_policy(engine, network)
 
-    mine.total_ore_to_extract = 600000.0
+    mine.geology.total_tonnes = 600000.0
     warmup_result = engine.run(until=99999.0)
 
     plant.reset_mode_timers()
 
-    mine.total_ore_to_extract = 6600000.0
+    mine.geology.total_tonnes = 6600000.0
     telemetry = Telemetry(model=engine)
     telemetry.register_metric(
         "active_operating_mode",
@@ -200,11 +208,17 @@ if __name__ == "__main__":
     )
     telemetry.register_metric(
         "MassOfCurrentParcel",
-        lambda t, m, s, _: mine.active_parcel_initial_mass.value,
+        lambda t, m, s, _: (
+            mine.geology.active_parcel.mass if mine.geology.active_parcel else 0.0
+        ),
     )
     telemetry.register_metric(
         "CurrentParcelOreFraction",
-        lambda t, m, s, _: mine.active_parcel_ore_fraction.value,
+        lambda t, m, s, _: (
+            mine.geology.active_parcel.ore2_fraction
+            if mine.geology.active_parcel
+            else 0.0
+        ),
     )
     telemetry.register_metric(
         "Campaign_Shutdown",
