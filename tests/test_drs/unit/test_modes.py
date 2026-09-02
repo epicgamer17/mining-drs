@@ -23,7 +23,6 @@ def test_generic_operating_mode_instantiation():
     )
     assert mode.name == "CRUSHING_CAMPAIGN_1"
     assert mode.id == 101
-    assert mode.value == 101
     assert mode.category == "processing"
     assert mode.metadata["target_throughput"] == 4500.0
     assert mode.metadata["feed_grade"] == 0.035
@@ -48,7 +47,7 @@ def test_operating_mode_equality_and_hashing():
 
     assert m1 == m2
     assert m1 != m_mill  # Different category!
-    assert m1 == "BALANCED"
+    assert m1 != "BALANCED"
 
     # Set and Dict hashing
     mode_set = {m1, m2, m_mill}

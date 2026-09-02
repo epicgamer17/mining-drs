@@ -40,7 +40,6 @@ from drs_mining.components.planning import (
 )
 
 
-
 _DEFAULT_CONFIG = DEFAULT_CONFIG
 DAYS_IN_YEAR = _DEFAULT_CONFIG.calendar.days_in_year
 DT_MAX = _DEFAULT_CONFIG.dt_max
@@ -154,8 +153,6 @@ class TacticalMiningSimulation(drs.Module):
                 variation_same_facies=cfg.geology.variation_same_facies,
                 initial_parcel_mass=cfg.geology.initial_parcel_mass,
                 required_development=0.0,
-                waste_to_ore_ratio=cfg.geology.waste_to_ore_ratio,
-                turnaround_dev_per_parcel_m=cfg.geology.turnaround_dev_per_parcel_m,
                 seed=self.seed,
             )
 
@@ -183,8 +180,6 @@ class TacticalMiningSimulation(drs.Module):
                 required_development=self.area2_readiness_target.required_development,
                 ready_by_day=self.area2_readiness_target.ready_by_day,
                 on_unlock_callback=self._on_area2_unlocked,
-                waste_to_ore_ratio=cfg.geology.waste_to_ore_ratio,
-                turnaround_dev_per_parcel_m=cfg.geology.turnaround_dev_per_parcel_m,
                 sporadic=True,
                 availability_probability=cfg.geology.sporadic_probability,
                 min_waste_fraction=cfg.geology.min_waste_fraction,
@@ -283,9 +278,7 @@ class TacticalMiningSimulation(drs.Module):
         self.area2_cumulative_development = drs.Level(
             "area2_cumulative_development", 0.0
         )
-        self.cumulative_mine_development = drs.Level(
-            "cumulative_mine_development", 0.0
-        )
+        self.cumulative_mine_development = drs.Level("cumulative_mine_development", 0.0)
 
         # Throughput (single total metric)
         self.cumulative_throughput = drs.Level("cumulative_throughput", 0.0)
@@ -298,9 +291,7 @@ class TacticalMiningSimulation(drs.Module):
         self.area2_readiness_trajectory_ratio = drs.Level(
             "area2_readiness_trajectory_ratio", 1.0
         )
-        self.area2_readiness_fraction = drs.Level(
-            "area2_readiness_fraction", 0.0
-        )
+        self.area2_readiness_fraction = drs.Level("area2_readiness_fraction", 0.0)
         self.area2_ready_day = drs.Level("area2_ready_day", -1.0)
         self._area2_unlocked = False
 
@@ -323,17 +314,16 @@ class TacticalMiningSimulation(drs.Module):
             self.area2_ready_day,
         ]
 
-        for comp_name in ("ore1_stock", "ore2_stock", "mode_controller", "plant", "tactical_controller"):
-            comp = getattr(self, comp_name, None)
-            if comp is not None and hasattr(comp, "levels") and callable(comp.levels):
-                base_levels.extend(comp.levels())
+        base_levels.extend(self.ore1_stock.levels())
+        base_levels.extend(self.ore2_stock.levels())
+        base_levels.extend(self.mode_controller.levels())
+        base_levels.extend(self.plant.levels())
+        base_levels.extend(self.tactical_controller.levels())
 
         for face in self.faces:
-            if hasattr(face, "levels") and callable(face.levels):
-                base_levels.extend(face.levels())
+            base_levels.extend(face.levels())
 
-        if hasattr(self, "gt") and isinstance(self.gt, drs.Level):
-            base_levels.append(self.gt)
+        base_levels.append(self.gt)
 
         return tuple(base_levels)
 
@@ -384,14 +374,11 @@ class TacticalMiningSimulation(drs.Module):
         for f in self.faces:
             if f.face_id == face_id:
                 return f
-        return self.faces[0]
+        raise KeyError(f"Face with face_id={face_id} not found")
 
     def _is_face_exhausted(self, face_id: int) -> bool:
         face = self._get_face(face_id)
-        return (
-            face.cumulative_extracted_mass.value
-            >= face.total_ore_to_extract - 1e-6
-        )
+        return face.cumulative_extracted_mass.value >= face.total_ore_to_extract - 1e-6
 
     # -----------------------------------------------------------------------
     # DRS Engine Interface
@@ -426,10 +413,7 @@ class TacticalMiningSimulation(drs.Module):
             min_dt = min(min_dt, rem_c_days * 86400.0)
 
         # Remaining contingency duration
-        if (
-            self.plant.active_operating_mode.value.name
-            in self.plant._CONTINGENCY_MODES
-        ):
+        if self.plant.active_operating_mode.value.name in self.plant._CONTINGENCY_MODES:
             rem_cont = max(
                 0.0,
                 self.plant.duration_of_contingency_segments
@@ -464,9 +448,8 @@ class TacticalMiningSimulation(drs.Module):
         self.gt.step(dt)
         self.mode_controller.current_campaign_duration.step(dt_days)
         active_mode_name = self.plant.active_operating_mode.value.name
-        timer_attr = self.plant._MODE_TIMER_ATTRS.get(active_mode_name)
-        if timer_attr:
-            getattr(self.plant, timer_attr).step(dt_days)
+        timer_attr = self.plant._MODE_TIMER_ATTRS[active_mode_name]
+        getattr(self.plant, timer_attr).step(dt_days)
 
         if active_mode_name in self.plant._CONTINGENCY_MODES:
             self.plant.current_contingency_duration.step(dt_days)
@@ -477,9 +460,12 @@ class TacticalMiningSimulation(drs.Module):
         # 2. Compute blend fraction from active faces
         available_faces = [f for f in self.faces if f.is_ore_available]
         if available_faces:
-            f_blend = sum(float(f.active_parcel_ore_fraction.value) for f in available_faces) / len(available_faces)
+            f_blend = sum(
+                float(f.active_parcel_ore_fraction.value) for f in available_faces
+            ) / len(available_faces)
         else:
-            f_blend = 0.30
+            # No ore available
+            f_blend = 0.0
 
         # 3. Plant target rates
         ore1_rate, ore2_rate, mine_target = self.plant.get_target_rates(
@@ -492,8 +478,6 @@ class TacticalMiningSimulation(drs.Module):
         mode_name = self.plant.active_operating_mode.value.name
         if mode_name == "SHUTDOWN":
             self.daily_target_ore = 0.0
-        elif "_MINE_SURGING" in mode_name:
-            self.daily_target_ore = mine_target * 0.70
         else:
             self.daily_target_ore = mine_target
 
@@ -544,8 +528,8 @@ class TacticalMiningSimulation(drs.Module):
             for face in self.faces:
                 if face.required_development > 0 and not face.is_ready:
                     # In DEVELOPMENT mode, advance at development_rate_m_per_day
-                    fleet_mode = self.tactical_controller.active_fleet_mode
-                    if fleet_mode == FLEET_MODES.get("DEVELOPMENT"):
+                    fleet_mode = self.tactical_controller.fleet_mode
+                    if fleet_mode == FLEET_MODES["DEVELOPMENT"]:
                         dev_delta = self.development_rate_m_per_day * dt_days
                         face.advance_development(dev_delta)
 
@@ -605,7 +589,9 @@ class TacticalMiningSimulation(drs.Module):
             elapsed_fraction = max(1e-4, min(1.0, current_day / ready_by_day))
             expected = required * elapsed_fraction
             if expected > 1e-12:
-                self.area2_readiness_trajectory_ratio.value = max(0.0, progress) / expected
+                self.area2_readiness_trajectory_ratio.value = (
+                    max(0.0, progress) / expected
+                )
             else:
                 self.area2_readiness_trajectory_ratio.value = 1.0
         else:
@@ -644,17 +630,21 @@ class TacticalMiningSimulation(drs.Module):
             "mill_mode": mode_name,
             "active_operating_mode": self.plant.active_operating_mode.value,
             "active_operating_mode_name": mode_name,
-            "fleet_mode": self.tactical_controller.active_fleet_mode.name,
-            "mining_priority": self.tactical_controller.active_fleet_mode.name,
+            "fleet_mode": self.tactical_controller.fleet_mode.name,
+            "mining_priority": self.tactical_controller.fleet_mode.name,
             "Mode A": 1.0 if "MODE_A" in mode_name else 0.0,
             "Mode B": 1.0 if "MODE_B" in mode_name else 0.0,
             "Shutdown": 1.0 if "SHUTDOWN" in mode_name else 0.0,
             "total_throughput": tot_throughput,
             "cumulative_milled_mass": float(self.plant.cumulative_milled_mass.value),
             "cumulative_development": float(self.cumulative_mine_development.value),
-            "area2_cumulative_development": float(self.area2_cumulative_development.value),
+            "area2_cumulative_development": float(
+                self.area2_cumulative_development.value
+            ),
             "area2_readiness_fraction": float(self.area2_readiness_fraction.value),
-            "area2_trajectory_ratio": float(self.area2_readiness_trajectory_ratio.value),
+            "area2_trajectory_ratio": float(
+                self.area2_readiness_trajectory_ratio.value
+            ),
             "area2_ready_day": float(self.area2_ready_day.value),
             "area2_is_locked": float(self.is_area2_locked()),
             "area2_ready": not self.is_area2_locked(),
@@ -662,14 +652,23 @@ class TacticalMiningSimulation(drs.Module):
 
         # Per-face metrics
         for face in self.faces:
-            record[f"face{face.face_id}_mined"] = float(face.cumulative_extracted_mass.value)
-            record[f"face{face.face_id}_available"] = float(face.sporadic_available.value) if face.sporadic else 1.0
-            record[f"face{face.face_id}_ore_fraction"] = float(face.active_parcel_ore_fraction.value)
+            record[f"face{face.face_id}_mined"] = float(
+                face.cumulative_extracted_mass.value
+            )
+            record[f"face{face.face_id}_available"] = (
+                float(face.sporadic_available.value) if face.sporadic else 1.0
+            )
+            record[f"face{face.face_id}_ore_fraction"] = float(
+                face.active_parcel_ore_fraction.value
+            )
 
         self.telemetry_history.append(record)
 
     def results(self) -> Dict[str, Any]:
-        if not self.telemetry_history or self.telemetry_history[-1]["time_sec"] < self.gt.value - 1e-6:
+        if (
+            not self.telemetry_history
+            or self.telemetry_history[-1]["time_sec"] < self.gt.value - 1e-6
+        ):
             self._record_telemetry(self.gt.value)
         df = pd.DataFrame(self.telemetry_history)
         return {
@@ -677,6 +676,8 @@ class TacticalMiningSimulation(drs.Module):
             "total_throughput": float(self.cumulative_throughput.value),
             "cumulative_milled_mass": float(self.plant.cumulative_milled_mass.value),
             "cumulative_development_m": float(self.cumulative_mine_development.value),
-            "area2_cumulative_development_m": float(self.area2_cumulative_development.value),
+            "area2_cumulative_development_m": float(
+                self.area2_cumulative_development.value
+            ),
             "area2_ready_day": float(self.area2_ready_day.value),
         }

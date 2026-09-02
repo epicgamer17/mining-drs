@@ -143,7 +143,7 @@ class MetallurgicalPlant(Processor):
         campaign_mode: OperatingMode,
         ore1_level: float,
         ore2_level: float,
-        stockpile2_routing_fraction: float = 0.0,
+        stockpile2_routing_fraction: float,
     ) -> Tuple[float, float, float]:
         """Determines active operational state and computes draw rates.
 
@@ -163,8 +163,6 @@ class MetallurgicalPlant(Processor):
         if "_MINE_SURGING" in mode_name:
             self.total_system_ore_mass.lower_threshold = self.target_ore_stock_level
             p = stockpile2_routing_fraction
-            if p <= 1e-4:
-                p = 0.30
             if mode_name == "MODE_A_MINE_SURGING":
                 effective_fraction = max(1.0 - p, 0.01)
                 mine_target = ore1_rate / effective_fraction
@@ -176,17 +174,13 @@ class MetallurgicalPlant(Processor):
             mine_target = ore1_rate + ore2_rate
 
         self.total_system_ore_mass.value = ore1_level + ore2_level
-        self.total_system_ore_mass.rate = (
-            self.ore1_stock.rate + self.ore2_stock.rate
-        )
+        self.total_system_ore_mass.rate = self.ore1_stock.rate + self.ore2_stock.rate
 
         self.target_stock1_outflow_rate.value = ore1_rate
         self.target_stock2_outflow_rate.value = ore2_rate
         self.target_mine_mass_rate.value = mine_target
 
         return ore1_rate, ore2_rate, mine_target
-
-    determine_operating_mode = get_target_rates
 
     def _resolve_operating_mode(
         self, campaign_mode: OperatingMode, ore1: float, ore2: float
@@ -244,22 +238,23 @@ class MetallurgicalPlant(Processor):
         return self.current_contingency_duration.value >= (threshold - 1e-6)
 
     def _read_milling_rates(self, name: str) -> Tuple[float, float]:
-        ore1_attr, ore2_attr = self._RATE_MAP.get(name, (None, None))
-        ore1 = getattr(self, ore1_attr, 0.0) if ore1_attr else 0.0
-        ore2 = getattr(self, ore2_attr, 0.0) if ore2_attr else 0.0
+        ore1_attr, ore2_attr = self._RATE_MAP[name]
+        ore1 = getattr(self, ore1_attr) if ore1_attr else 0.0
+        ore2 = getattr(self, ore2_attr) if ore2_attr else 0.0
         return ore1, ore2
 
     def _update_mode_timers(self, name: str):
         for timer_name in self._MODE_TIMER_ATTRS.values():
             getattr(self, timer_name).rate = 0.0
-        timer_attr = self._MODE_TIMER_ATTRS.get(name)
-        if timer_attr:
-            getattr(self, timer_attr).rate = 1.0
+        timer_attr = self._MODE_TIMER_ATTRS[name]
+        getattr(self, timer_attr).rate = 1.0
 
         if name in self._CONTINGENCY_MODES:
             self.current_contingency_duration.rate = 1.0
             self.current_contingency_duration.lower_threshold = -math.inf
-            self.current_contingency_duration.upper_threshold = self.duration_of_contingency_segments
+            self.current_contingency_duration.upper_threshold = (
+                self.duration_of_contingency_segments
+            )
         else:
             self.current_contingency_duration.rate = 0.0
 

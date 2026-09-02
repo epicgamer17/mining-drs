@@ -25,7 +25,6 @@ class OperatingModeController(drs.Module):
         self.total_ore_to_extract = total_ore_to_extract
 
         self.active_campaign_mode = drs.Variable("active_campaign_mode", initial_mode)
-        self.active_operating_mode = self.active_campaign_mode
 
         self.current_campaign_duration = drs.Timer(
             "current_campaign_duration", initial_value=0.0

@@ -857,29 +857,8 @@ def prepare_history(df):
         df["daily_cash_flow_min"] = grouped.transform("min")
         df["daily_cash_flow_max"] = grouped.transform("max")
 
-    # Fleet Area 1 / Area 2 breakdown fallback
-    if "trucks_area1_operating" not in df.columns or df["trucks_area1_operating"].isna().all():
-        if "trucks_operating_face1" in df.columns:
-            df["trucks_area1_operating"] = df["trucks_operating_face1"]
-            df["trucks_area2_operating"] = df.get("trucks_operating_face2", 0.0)
-        elif "trucks_operating" in df.columns:
-            if "analytical_face1_weight" in df.columns:
-                w1 = df["analytical_face1_weight"].clip(0.0, 1.0)
-                df["trucks_area1_operating"] = df["trucks_operating"] * w1
-                df["trucks_area2_operating"] = df["trucks_operating"] * (1.0 - w1)
-            else:
-                a2_ready = df.get("area2_ready", False)
-                mode_a = df.get("Mode A", 0.0) == 1.0
-                w2 = np.where(a2_ready, np.where(mode_a, 0.65, 0.35), 0.0)
-                df["trucks_area2_operating"] = df["trucks_operating"] * w2
-                df["trucks_area1_operating"] = df["trucks_operating"] - df["trucks_area2_operating"]
-
     # Fleet Operating Mode formatting
-    if "fleet_operating_mode" in df.columns:
-        df["fleet_operating_mode_name"] = df["fleet_operating_mode"].apply(
-            lambda x: x.name if hasattr(x, "name") else str(x)
-        )
-    elif "fleet_mode" in df.columns:
+    if "fleet_mode" in df.columns:
         df["fleet_operating_mode_name"] = df["fleet_mode"].apply(
             lambda x: x.name if hasattr(x, "name") else str(x)
         )

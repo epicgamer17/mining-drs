@@ -33,10 +33,6 @@ class OperatingMode:
         return self._id
 
     @property
-    def value(self) -> int:
-        return self._id
-
-    @property
     def name(self) -> str:
         return self._name
 
@@ -51,13 +47,6 @@ class OperatingMode:
     def __eq__(self, other: object) -> bool:
         if isinstance(other, OperatingMode):
             return self._name == other._name and self._category == other._category
-        if hasattr(other, "name") and hasattr(other, "category"):
-            return (
-                self._name == getattr(other, "name")
-                and self._category == getattr(other, "category")
-            )
-        if isinstance(other, str):
-            return self._name == other
         return NotImplemented
 
     def __hash__(self) -> int:

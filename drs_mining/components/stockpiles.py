@@ -30,8 +30,6 @@ class Stockpile(Storage):
         self.expected_attributes = list(expected_attributes)
         self.attr_inflow = float(attr_inflow)
 
-        # Bind current_mass and mass to Storage's underlying Level for compatibility
-        self.current_mass = self._level
         self.actual_outflow_rate = drs.Variable(f"{name}_actual_outflow_rate", 0.0)
 
         attrs = dict(initial_attributes)
@@ -41,13 +39,8 @@ class Stockpile(Storage):
             setattr(self, attr, attr_lvl)
 
     def current_concentration(self, attr: str) -> float:
-        """Calculates current concentration (e.g. grade) of an attribute.
-
-        Returns 0.0 if the attribute level is not present or if stockpile is empty.
-        """
-        level = getattr(self, attr, None)
-        if level is None:
-            return 0.0
+        """Calculates current concentration (e.g. grade) of an attribute."""
+        level = getattr(self, attr)
         return level.value / max(1e-6, self.level)
 
     def feed_and_draw(self, inflow_rate: float, outflow_rate: float) -> float:
@@ -78,23 +71,18 @@ class Stockpile(Storage):
         self.rate = net
 
         for attr in self.expected_attributes:
-            level = getattr(self, attr, None)
-            if level is not None:
-                level.rate = (
-                    inflow_rate * attr_inflow
-                    - actual_outflow * self.current_concentration(attr)
-                )
+            level = getattr(self, attr)
+            level.rate = (
+                inflow_rate * attr_inflow
+                - actual_outflow * self.current_concentration(attr)
+            )
 
         self.actual_outflow_rate.value = actual_outflow
         return actual_outflow
 
     def levels(self) -> Sequence[drs.Level]:
         """Return the stateful levels owned by this stockpile."""
-        attr_levels = [
-            getattr(self, attr)
-            for attr in self.expected_attributes
-            if hasattr(self, attr)
-        ]
+        attr_levels = [getattr(self, attr) for attr in self.expected_attributes]
         return (self._level, *attr_levels)
 
     def time_to_event(self) -> float:

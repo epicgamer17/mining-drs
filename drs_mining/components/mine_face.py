@@ -49,7 +49,6 @@ class MineFace(Processor):
         ready_by_day: Optional[float] = None,
         on_unlock_callback: Optional[Callable[[], None]] = None,
         counterfactual_disable: bool = False,
-        waste_to_ore_ratio: float = 0.0,
         seed: Optional[int] = None,
         sporadic: bool = False,
         availability_probability: float = 1.0,
@@ -72,8 +71,6 @@ class MineFace(Processor):
         self.ore_to_be_extracted_during_warming_period = (
             ore_to_be_extracted_during_warming_period
         )
-
-        self.waste_to_ore_ratio = waste_to_ore_ratio
 
         self.required_development = required_development
         self.ready_by_day = ready_by_day
@@ -108,9 +105,7 @@ class MineFace(Processor):
         )
 
         self.active_parcel_ore_fraction = drs.Variable(
-            f"face{face_id}_ore_fraction"
-            if face_id != 1
-            else "active_parcel_ore_fraction",
+            f"face{face_id}_ore_fraction",
             self.mean_ore_fraction,
         )
         self.active_parcel_initial_mass = drs.Variable(
@@ -185,9 +180,14 @@ class MineFace(Processor):
 
         if not self.is_ready:
             self.cumulative_development.value += max(0.0, delta_meters)
+            self.readiness_fraction.value = min(
+                1.0,
+                self.cumulative_development.value / self.required_development,
+            )
 
         if self.is_ready and self.state == FaceState.LOCKED:
             self.state = FaceState.ORE_READY
+            self.readiness_fraction.value = 1.0
             if self.on_unlock_callback:
                 self.on_unlock_callback()
             return True
@@ -246,18 +246,9 @@ class MineFace(Processor):
         self.parcel_extracted_mass.value = 0.0
 
         parcel = self.generator.generate_next()
-        if isinstance(parcel, dict):
-            self.active_parcel_ore_fraction.value = float(
-                parcel.get("ore1_frac", self.mean_ore_fraction)
-            )
-        elif hasattr(parcel, "ore1_frac"):
-            self.active_parcel_ore_fraction.value = float(parcel.ore1_frac)
-        elif hasattr(parcel, "value"):
-            self.active_parcel_ore_fraction.value = float(parcel.value)
-        else:
-            self.active_parcel_ore_fraction.value = float(parcel)
+        self.active_parcel_ore_fraction.value = float(parcel["ore1_frac"])
 
-        if not self.is_locked():
+        if self.is_ready:
             self.state = FaceState.ORE_READY
 
     def advance_parcel_state(self):

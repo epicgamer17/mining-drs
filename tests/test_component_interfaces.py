@@ -5,7 +5,6 @@ from drs import Processor, Storage
 from drs_mining.components import (
     MineFace,
     MetallurgicalPlant,
-    ContinuousFleetLogistics,
     Stockpile,
     StochasticFaciesGenerator,
 )
@@ -69,11 +68,9 @@ def test_mining_stockpile_is_a_storage():
 
     stock.rate = 10.0
     assert stock._level.rate == 10.0
-    assert stock.current_mass is stock._level
 
 
 def test_mining_plant_is_a_processor():
-    fleet = ContinuousFleetLogistics()
     ore1 = Stockpile(name="Ore1Stock", expected_attributes=["x"], initial_mass=100.0, initial_attributes={})
     ore2 = Stockpile(name="Ore2Stock", expected_attributes=["x"], initial_mass=100.0, initial_attributes={})
     plant = MetallurgicalPlant(stockpiles=[ore1, ore2], max_rate=600.0)

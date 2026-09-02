@@ -120,14 +120,6 @@ class TacticalReviewController(drs.Module):
 
         return self.fleet_mode
 
-    @property
-    def active_fleet_mode(self) -> OperatingMode:
-        return self.fleet_mode
-
-    @active_fleet_mode.setter
-    def active_fleet_mode(self, value: OperatingMode) -> None:
-        self.fleet_mode = value
-
     def levels(self) -> Sequence[drs.Level]:
         return (self.tactical_review_timer, self.tactical_review_count)
 
