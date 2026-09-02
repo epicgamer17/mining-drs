@@ -1,24 +1,20 @@
-import sys
-import os
+import argparse
+from typing import Optional
 
-# Ensure the root directory is on the path
-sys.path.append(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-)
-
-import random
-import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
 
 import drs
-from drs import DRSEngine, Telemetry, Processor
-from drs_mining.components import (
+from drs import (
+    DRSEngine,
+    Telemetry,
+    Storage,
+    Processor,
     Flow,
     blend_flows,
-    StochasticReserve,
+)
+from drs_mining.components import (
     OperatingModeController,
-    Stockpile,
-    StochasticFaciesGenerator,
+    MaterialSource,
 )
 from drs_mining.config import MILL_MODES
 from drs_mining.components.plot import (
@@ -45,33 +41,29 @@ def build_blending_network(
     duration_of_contingency_segments: float = 1.0,
     **kwargs,
 ) -> tuple:
-    gen = StochasticFaciesGenerator(
-        mean_fraction=mean_ore_fraction,
-        std_dev=std_dev_ore_fraction,
-        prob_new_facies=prob_new_facies,
-        variation_same_facies=variation_same_facies,
-        attribute_name="ore2_fraction",
-    )
-    reserve = StochasticReserve(
+    source = MaterialSource(
         name="mine_face_reserve",
         total_tonnes=total_ore_to_extract,
-        generator=gen,
+        mean_attributes={"ore2_fraction": mean_ore_fraction},
+        attribute_std_dev=std_dev_ore_fraction,
+        variation_autocorrelation=prob_new_facies,
+        variation_step=variation_same_facies,
         min_parcel_mass=min_ore_mass,
         max_parcel_mass=max_ore_mass,
         initial_parcel_mass=40000.0,
         warming_period=ore_to_be_extracted_during_warming_period,
     )
 
-    initial_mass1 = (1 - mean_ore_fraction) * target_ore_stock_level
-    ore1_stock = Stockpile(
+    initial_mass1 = (1.0 - mean_ore_fraction) * target_ore_stock_level
+    ore1_stock = Storage(
         name="Ore1Stock",
-        initial_mass=initial_mass1,
+        initial_level=initial_mass1,
         initial_attributes={"ore2_fraction": 0.0},
     )
     initial_mass2 = mean_ore_fraction * target_ore_stock_level
-    ore2_stock = Stockpile(
+    ore2_stock = Storage(
         name="Ore2Stock",
-        initial_mass=initial_mass2,
+        initial_level=initial_mass2,
         initial_attributes={"ore2_fraction": 1.0},
     )
 
@@ -85,14 +77,14 @@ def build_blending_network(
         target_total_stock=target_ore_stock_level,
     )
 
-    return reserve, mill, mode_controller, ore1_stock, ore2_stock
+    return source, mill, mode_controller, ore1_stock, ore2_stock
 
 
 def _register_and_policy(engine: DRSEngine, network: tuple) -> drs.Level:
-    reserve, mill, mode_ctrl, ore1_stock, ore2_stock = network
+    source, mill, mode_ctrl, ore1_stock, ore2_stock = network
     cumulative_milled_mass = drs.Level("cumulative_milled_mass", initial_value=0.0, owner=mill)
     mill.cumulative_milled_mass = cumulative_milled_mass
-    engine.register(reserve, mill, mode_ctrl, ore1_stock, ore2_stock)
+    engine.register(source, mill, mode_ctrl, ore1_stock, ore2_stock)
 
     @engine.on_step
     def manage_blending(t: float):
@@ -107,7 +99,7 @@ def _register_and_policy(engine: DRSEngine, network: tuple) -> drs.Level:
         ore1_target = draw_rates.get("Ore1Stock", 0.0)
         ore2_target = draw_rates.get("Ore2Stock", 0.0)
 
-        ore2_frac = reserve.current_attributes.get("ore2_fraction", 0.0)
+        ore2_frac = source.current_attributes.get("ore2_fraction", 0.0)
         mode_name = active_mode.name
         if "_MINE_SURGING" in mode_name:
             if mode_name == "MODE_A_MINE_SURGING":
@@ -119,7 +111,7 @@ def _register_and_policy(engine: DRSEngine, network: tuple) -> drs.Level:
         else:
             mine_target = ore1_target + ore2_target
 
-        extraction_flow = reserve.extract(mine_target)
+        extraction_flow = source.extract(mine_target)
 
         in_flow1 = Flow(
             rate=extraction_flow.rate * (1.0 - ore2_frac),
@@ -134,7 +126,7 @@ def _register_and_policy(engine: DRSEngine, network: tuple) -> drs.Level:
         out2 = ore2_stock.feed_and_draw(in_flow2, ore2_target)
 
         blended_feed = blend_flows([out1, out2])
-        mill.rate = blended_feed.rate
+        mill.process(blended_feed)
         cumulative_milled_mass.rate = mill.actual_rate
 
     return cumulative_milled_mass
@@ -149,95 +141,91 @@ def print_statistics(mode_ctrl: OperatingModeController, cumulative_milled_mass:
             ("MODE_A_MINE_SURGING", "PortionOfTimeInModeAMineSurging"),
             ("MODE_B", "PortionOfTimeInModeB"),
             ("MODE_B_CONTINGENCY", "PortionOfTimeInModeBContingency"),
-            ("MODE_B_MINE_SURGING", "PortionOfTimeInModeBMineSurging"),
             ("SHUTDOWN", "PortionOfTimeInShutdown"),
         ]:
-            timer_val = mode_ctrl.mode_timers[mode_name].value
-            print(f"{label}: {timer_val / total_time:.4f}")
-    else:
-        print("Total time is 0. Cannot calculate mode portions.")
-
-    shutdown_time = mode_ctrl.mode_timers["SHUTDOWN"].value
-    active_time = max(0.0, total_time - shutdown_time)
-    if active_time > 0:
-        total_ore_processed = cumulative_milled_mass.value
-        throughput = total_ore_processed / active_time
-        print(f"Throughput: {throughput:.4f} tons/day")
-    else:
-        print("Active time is 0. Cannot calculate throughput.")
+            timer = mode_ctrl.mode_timers.get(mode_name)
+            fraction = (timer.value / total_time) if timer else 0.0
+            print(f"{label}: {fraction:.4f}")
+    print(f"CumulativeTonsMilled: {cumulative_milled_mass.value:.2f}")
 
 
-if __name__ == "__main__":
-    import argparse
+def run_blending_simulation(
+    replication_length: float = 999999.0,
+    plot: bool = False,
+    seed: int = 11,
+    **kwargs,
+) -> tuple[drs.SimResult, Optional[pd.DataFrame]]:
+    import random
+    import numpy as np
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--total_stockpile_level", type=float, default=60000.0)
-    parser.add_argument("--std_dev_ore_fraction", type=float, default=0.05)
-    parser.add_argument("--N", type=int, default=1)
-    args = parser.parse_args()
+    random.seed(seed)
+    np.random.seed(seed)
 
-    np.random.seed(11)
-    random.seed(11)
-    network = build_blending_network(
-        target_ore_stock_level=args.total_stockpile_level,
-        std_dev_ore_fraction=args.std_dev_ore_fraction,
-        prob_new_facies=0.3,
-    )
-    reserve, mill, mode_ctrl, ore1_stock, ore2_stock = network
+    network = build_blending_network(**kwargs)
+    source, mill, mode_ctrl, ore1_stock, ore2_stock = network
 
     mode_ctrl.active_campaign_mode.value = MILL_MODES["MODE_A"]
 
     engine = DRSEngine()
     cumulative_milled_mass = _register_and_policy(engine, network)
 
-    reserve.total_tonnes = 600000.0
+    # Warmup phase (pre-burns 600,000 tonnes)
+    source.total_tonnes = 600000.0
     warmup_result = engine.run(until=99999.0)
 
     mode_ctrl.reset_mode_timers()
 
-    reserve.total_tonnes = 6600000.0
-    telemetry = Telemetry(model=engine)
-    telemetry.register_metric(
-        "active_operating_mode",
-        lambda t, m, s, _: mode_ctrl.active_operating_mode.value,
-    )
-    telemetry.register_metric(
-        "MassOfCurrentParcel",
-        lambda t, m, s, _: (
-            reserve.active_entity.mass if reserve.active_entity else 0.0
-        ),
-    )
-    telemetry.register_metric(
-        "CurrentParcelOreFraction",
-        lambda t, m, s, _: reserve.current_attributes.get("ore2_fraction", 0.0),
-    )
-    telemetry.register_metric(
-        "Campaign_Shutdown",
-        lambda t, m, s, _: mode_ctrl.current_campaign_duration.value,
-    )
-    telemetry.register_metric(
-        "Contingency",
-        lambda t, m, s, _: mode_ctrl.current_contingency_duration.value,
-    )
-    engine.attach_telemetry(telemetry)
-    result = engine.run(until=99999.0)
+    # Production phase (6,600,000 tonnes)
+    source.total_tonnes = 6600000.0
 
-    print(result.summary())
+    telemetry = None
+    if plot:
+        telemetry = Telemetry(model=engine)
+        telemetry.register_metric("active_operating_mode", lambda t, m, s, _: mode_ctrl.active_operating_mode.value.name)
+        telemetry.register_metric("active_operating_mode_name", lambda t, m, s, _: mode_ctrl.active_operating_mode.value.name)
+        telemetry.register_metric("total_stock_level", lambda t, m, s, _: ore1_stock.level + ore2_stock.level)
+        telemetry.register_metric(
+            "MassOfCurrentParcel",
+            lambda t, m, s, _: source.active_entity.mass if source.active_entity else 0.0,
+        )
+        telemetry.register_metric(
+            "CurrentParcelRoutingFraction",
+            lambda t, m, s, _: source.current_attributes.get("ore2_fraction", 0.0),
+        )
+        telemetry.register_metric(
+            "CurrentParcelOreFraction",
+            lambda t, m, s, _: source.current_attributes.get("ore2_fraction", 0.0),
+        )
+        telemetry.register_metric(
+            "Campaign_Shutdown",
+            lambda t, m, s, _: mode_ctrl.current_campaign_duration.value,
+        )
+        telemetry.register_metric(
+            "Contingency",
+            lambda t, m, s, _: mode_ctrl.current_contingency_duration.value,
+        )
+        engine.attach_telemetry(telemetry)
 
-    total_time = engine.current_time
-    print_statistics(mode_ctrl, cumulative_milled_mass, total_time)
+    result = engine.run(until=replication_length)
 
-    df = prepare_history(result.history)
-    print_transition_log(
-        df,
-        critical_ore2_level=20400.0,
-        target_ore_stock_level=args.total_stockpile_level,
-    )
+    print_statistics(mode_ctrl, cumulative_milled_mass, result.duration)
 
-    print_deficit_by_mode(
-        df,
-        extraction_cols=["mine_face_reserve_cumulative_extracted_mass"],
-        ideal_rate=6000.0,
-    )
+    history = None
+    if plot and telemetry is not None:
+        history = telemetry.to_dataframe()
+        history = prepare_history(history)
+        print_transition_log(history)
+        print_deficit_by_mode(history, extraction_cols=["mine_face_reserve_cumulative_extracted_mass"])
+        plot_single_face_dashboard(history)
 
-    plot_single_face_dashboard(df)
+    return result, history
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Tactical Blending Simulation")
+    parser.add_argument("--days", type=float, default=999999.0, help="Simulation duration (days)")
+    parser.add_argument("--plot", action="store_true", default=True, help="Display telemetry dashboard")
+    parser.add_argument("--no-plot", dest="plot", action="store_false", help="Disable plotting")
+    args = parser.parse_args()
+
+    run_blending_simulation(replication_length=args.days, plot=args.plot)

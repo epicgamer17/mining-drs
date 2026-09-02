@@ -1,119 +1,77 @@
-"""Geological sources, discrete entities, and reserve depletion models."""
+"""Material sources, continuous flow extraction, and discrete entity generation."""
 
 from __future__ import annotations
 
-import abc
 import math
 import random
-from typing import Mapping, Optional, Sequence
+from typing import Callable, Mapping, Optional
 
 import drs
-from .generators import StochasticFaciesGenerator
-from .material import Entity, Flow
+from drs import Flow, Entity
 
 
-class GeologySource(abc.ABC, drs.Module):
-    """Abstract base class for material sources and reserve depletion."""
+class MaterialSource(drs.Module):
+    """Source of material with reserve depletion and attribute generation.
 
-    @property
-    @abc.abstractmethod
-    def remaining_reserve(self) -> float:
-        """Remaining unextracted reserve mass (tonnes)."""
-        ...
-
-    @property
-    @abc.abstractmethod
-    def is_exhausted(self) -> bool:
-        """Whether the total reserve has been fully extracted."""
-        ...
-
-    @property
-    @abc.abstractmethod
-    def active_entity(self) -> Optional[Entity]:
-        """Currently loaded discrete material entity (parcel / block)."""
-        ...
-
-    @property
-    @abc.abstractmethod
-    def current_attributes(self) -> Mapping[str, float]:
-        """Current attribute concentrations of the material being extracted."""
-        ...
-
-    @abc.abstractmethod
-    def advance_state(self) -> None:
-        """Check for current entity depletion and advance to the next entity."""
-        ...
-
-    @abc.abstractmethod
-    def extract(self, rate: float) -> Flow:
-        """Extract material at the given rate and return the continuous flow."""
-        ...
-
-    @abc.abstractmethod
-    def levels(self) -> Sequence[drs.Level]:
-        """Return stateful DRS levels for reserve and entity tracking."""
-        ...
-
-    def time_to_event(self) -> float:
-        """Time to next threshold crossing event."""
-        min_dt = math.inf
-        for lvl in self.levels():
-            dt = lvl.time_to_event()
-            if 0.0 <= dt < min_dt:
-                min_dt = dt
-        return min_dt
-
-    @abc.abstractmethod
-    def step(self, dt: float) -> None:
-        """Advance internal levels forward by dt."""
-        ...
-
-
-class StochasticReserve(GeologySource):
-    """Stochastic geological reserve with parcel batching and facies variation."""
+    Generates quality attributes either from statistical parameters (autocorrelated
+    random walk), a block model iterator, or a custom attribute generator function.
+    Seamlessly extracts continuous Flow (DRS) or discrete Entity batches (DES).
+    """
 
     def __init__(
         self,
-        name: str,
-        total_tonnes: float,
-        generator: StochasticFaciesGenerator,
+        name: str = "source",
+        total_tonnes: float = math.inf,
+        mean_attributes: Optional[Mapping[str, float]] = None,
+        attribute_std_dev: float = 0.05,
+        variation_autocorrelation: float = 0.30,
+        variation_step: float = 0.01,
         min_parcel_mass: float = 30000.0,
         max_parcel_mass: float = 50000.0,
         initial_parcel_mass: Optional[float] = None,
         warming_period: float = 0.0,
+        attribute_generator: Optional[Callable[[], Mapping[str, float]]] = None,
         seed: Optional[int] = None,
     ):
         super().__init__()
         self.name = name
         self._total_tonnes = float(total_tonnes)
-        self.generator = generator
+        self.mean_attributes = dict(mean_attributes or {"ore2_fraction": 0.30})
+        self.attribute_std_dev = float(attribute_std_dev)
+        self.variation_autocorrelation = float(variation_autocorrelation)
+        self.variation_step = float(variation_step)
         self.min_parcel_mass = float(min_parcel_mass)
         self.max_parcel_mass = float(max_parcel_mass)
         self.warming_period = float(warming_period)
+        self.attribute_generator = attribute_generator
 
         self.rng = random.Random(seed) if seed is not None else random
         self._active_entity: Optional[Entity] = None
 
+        # Autocorrelation Markov state
+        self._next_is_new: bool = True
+        self._current_fraction: float = float(self.mean_attributes.get("ore2_fraction", 0.30))
+
         self.cumulative_extracted_mass = drs.Level(
-            f"{name}_cumulative_extracted_mass", initial_value=0.0
+            f"{name}_cumulative_extracted_mass", initial_value=0.0, owner=self
         )
         self.cumulative_extracted_mass.upper_threshold = (
             warming_period if warming_period > 0.0 else total_tonnes
         )
 
         self.entity_extracted_mass = drs.Level(
-            f"{name}_entity_extracted_mass", initial_value=0.0
+            f"{name}_entity_extracted_mass", initial_value=0.0, owner=self
         )
 
         if initial_parcel_mass is not None:
-            attrs = {generator.attribute_name: generator.mean_fraction}
+            attrs = dict(self.mean_attributes)
             self._active_entity = Entity(
                 mass=min(initial_parcel_mass, self.remaining_reserve),
                 attributes=attrs,
             )
             self.entity_extracted_mass.upper_threshold = self._active_entity.mass
         else:
-            self.load_next_entity()
+            self.next_entity()
 
     @property
     def total_tonnes(self) -> float:
@@ -124,7 +82,7 @@ class StochasticReserve(GeologySource):
         self._total_tonnes = float(value)
         self.cumulative_extracted_mass.upper_threshold = float(value)
         if self._active_entity is None and not self.is_exhausted:
-            self.load_next_entity()
+            self.next_entity()
 
     @property
     def remaining_reserve(self) -> float:
@@ -148,13 +106,10 @@ class StochasticReserve(GeologySource):
     def current_attributes(self) -> Mapping[str, float]:
         if self._active_entity is not None:
             return self._active_entity.attributes
-        return {}
+        return self.mean_attributes
 
-    @property
-    def net_extracted_mass(self) -> float:
-        return max(0.0, float(self.cumulative_extracted_mass.value) - self.warming_period)
-
-    def load_next_entity(self) -> Optional[Entity]:
+    def next_entity(self) -> Optional[Entity]:
+        """Draw the next discrete entity batch from the source."""
         if self.remaining_reserve <= 1e-6:
             self._active_entity = None
             return None
@@ -165,13 +120,33 @@ class StochasticReserve(GeologySource):
         self.entity_extracted_mass.value = 0.0
         self.entity_extracted_mass.upper_threshold = p_mass
 
-        attrs = self.generator.generate_next()
+        if self.attribute_generator is not None:
+            attrs = self.attribute_generator()
+        else:
+            if self._next_is_new:
+                if self.attribute_std_dev != 0.0:
+                    fraction = self.rng.gauss(
+                        self.mean_attributes.get("ore2_fraction", 0.30),
+                        self.attribute_std_dev,
+                    )
+                else:
+                    fraction = self.mean_attributes.get("ore2_fraction", 0.30)
+            else:
+                fraction = (
+                    self._current_fraction
+                    + self.variation_step * self.rng.uniform(-1.0, 1.0)
+                )
+
+            self._current_fraction = max(0.0, min(1.0, fraction))
+            self._next_is_new = self.rng.random() <= self.variation_autocorrelation
+            attrs = {"ore2_fraction": self._current_fraction}
+
         self._active_entity = Entity(mass=p_mass, attributes=attrs)
         return self._active_entity
 
     def advance_state(self) -> None:
         if self.is_entity_exhausted:
-            self.load_next_entity()
+            self.next_entity()
 
         if self.cumulative_extracted_mass.value < self.warming_period:
             self.cumulative_extracted_mass.upper_threshold = self.warming_period
@@ -182,26 +157,13 @@ class StochasticReserve(GeologySource):
             self.entity_extracted_mass.upper_threshold = self._active_entity.mass
 
     def extract(self, rate: float) -> Flow:
-        """Extract material from the reserve at the requested rate.
-
-        Sets level rates and returns the resulting Flow with current quality attributes.
-        """
+        """Extract continuous flow from the source at the requested rate."""
         self.advance_state()
-        if self.is_exhausted:
-            actual_rate = 0.0
-        else:
-            actual_rate = max(0.0, rate)
+        actual_rate = 0.0 if self.is_exhausted else max(0.0, float(rate))
 
         self.cumulative_extracted_mass.rate = actual_rate
         self.entity_extracted_mass.rate = actual_rate
-        return Flow(rate=actual_rate, attributes=self.current_attributes)
-
-    def levels(self) -> Sequence[drs.Level]:
-        return (self.cumulative_extracted_mass, self.entity_extracted_mass)
+        return Flow(rate=actual_rate, attributes=dict(self.current_attributes))
 
     def is_terminating_condition_met(self) -> bool:
         return self.is_exhausted
-
-    def step(self, dt: float) -> None:
-        self.cumulative_extracted_mass.step(dt)
-        self.entity_extracted_mass.step(dt)

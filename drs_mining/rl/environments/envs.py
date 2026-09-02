@@ -6,13 +6,9 @@ from gymnasium import spaces
 import numpy as np
 
 import drs
-from drs import DRSEngine, Telemetry, Processor
+from drs import DRSEngine, Telemetry, Processor, Storage, Flow, blend_flows
 from drs_mining.components import (
-    Flow,
-    blend_flows,
-    Stockpile,
-    StochasticReserve,
-    StochasticFaciesGenerator,
+    MaterialSource,
     RequireDecision,
 )
 from .controllers import RL_MineController
@@ -99,18 +95,14 @@ class MiningRLEnv(gym.Env):
         return 0.0
 
     def _setup_simulation(self):
-        """Constructs lean simulation network with StochasticReserve, Stockpiles, and Processor."""
-        gen = StochasticFaciesGenerator(
-            mean_fraction=self.mean_ore_fraction,
-            std_dev=self.std_dev_ore_fraction,
-            prob_new_facies=self.prob_new_facies,
-            variation_same_facies=self.variation_same_facies,
-            attribute_name="ore2_fraction",
-        )
-        self.reserve = StochasticReserve(
+        """Constructs lean simulation network with MaterialSource, Storage, and Processor."""
+        self.reserve = MaterialSource(
             name="reserve",
             total_tonnes=self.total_ore_to_extract,
-            generator=gen,
+            mean_attributes={"ore2_fraction": self.mean_ore_fraction},
+            attribute_std_dev=self.std_dev_ore_fraction,
+            variation_autocorrelation=self.prob_new_facies,
+            variation_step=self.variation_same_facies,
             min_parcel_mass=self.min_ore_mass,
             max_parcel_mass=self.max_ore_mass,
             warming_period=self.ore_to_be_extracted_during_warming_period,
@@ -119,14 +111,14 @@ class MiningRLEnv(gym.Env):
         init_mass1 = (1.0 - self.mean_ore_fraction) * self.target_ore_stock_level
         init_mass2 = self.mean_ore_fraction * self.target_ore_stock_level
 
-        self.ore1_stock = Stockpile(
+        self.ore1_stock = Storage(
             name="Ore1Stock",
-            initial_mass=init_mass1,
+            initial_level=init_mass1,
             initial_attributes={"ore2_fraction": 0.0},
         )
-        self.ore2_stock = Stockpile(
+        self.ore2_stock = Storage(
             name="Ore2Stock",
-            initial_mass=init_mass2,
+            initial_level=init_mass2,
             initial_attributes={"ore2_fraction": 1.0},
         )
 

@@ -57,6 +57,7 @@ class OperatingModeController(drs.Module):
             timer = drs.Timer(f"cumulative_time_{mode_name.lower()}", initial_value=0.0)
             timer.rate = 0.0
             self.mode_timers[mode_name] = timer
+            setattr(self, f"_timer_{mode_name.lower()}", timer)
 
         self.is_rl_controlled: bool = False
         self.pending_rl_action: Optional[int] = None

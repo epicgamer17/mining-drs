@@ -1,25 +1,27 @@
 import pytest
-from drs_mining.components import HaulRoute
+from drs_mining.components import truck_haul_capacity
 
 
-def test_haul_route_cycle_time_and_congestion():
-    route = HaulRoute(
-        distance_km=2.0,
+def test_truck_haul_capacity_calculations():
+    # 1 truck: 100t, 20 min cycle time -> (24*60 / 20) * 100 = 7200 t/day
+    cap_1 = truck_haul_capacity(
+        distance_km=1.0,
+        num_trucks=1,
+        truck_payload_tonnes=100.0,
         base_cycle_time_min=20.0,
         congestion_factor=0.05,
-        truck_payload_tonnes=100.0,
     )
-    # 1 truck: no congestion penalty
-    assert route.cycle_time(1) == 20.0
+    assert cap_1 == pytest.approx(7200.0)
 
-    # 5 trucks: 1 + 4*0.05 = 1.20x base cycle time = 24.0 min
-    assert route.cycle_time(5) == 24.0
-
-    # 1 truck haulage in 24 hours: (24*60 / 20) * 100 = 7200 t
-    assert route.max_daily_haulage(1) == 7200.0
-
-    # 5 trucks haulage in 24 hours: 5 * (24*60 / 24) * 100 = 30000 t
-    assert route.max_daily_haulage(5) == 30000.0
+    # 5 trucks: 1 + 4*0.05 = 1.2x cycle time = 24 min -> 5 * (1440/24) * 100 = 30000 t/day
+    cap_5 = truck_haul_capacity(
+        distance_km=1.0,
+        num_trucks=5,
+        truck_payload_tonnes=100.0,
+        base_cycle_time_min=20.0,
+        congestion_factor=0.05,
+    )
+    assert cap_5 == pytest.approx(30000.0)
 
     # 0 trucks
-    assert route.max_daily_haulage(0) == 0.0
+    assert truck_haul_capacity(num_trucks=0) == 0.0

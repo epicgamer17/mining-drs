@@ -6,7 +6,7 @@ Implements the tactical operational framework from NAVARRA_MEETING.md:
   higher Ore 2 concentration for stockpile balancing, longer haul cycle times.
 - Concentrator (Mill Processor): Mode A (primary target), Mode B, and Contingency.
 - Tactical Policy: Keep concentrator in Mode A while using the satellite as little as possible.
-- Direct extraction from StochasticReserve to Stockpiles to Mill Processor.
+- Direct extraction from MaterialSource to Stockpiles to Mill Processor.
 """
 
 from __future__ import annotations
@@ -23,17 +23,13 @@ import numpy as np
 import pandas as pd
 
 import drs
-from drs import DRSEngine, Telemetry, Processor
+from drs import DRSEngine, Telemetry, Processor, Storage, Flow, blend_flows
 
 from drs_mining.components import (
-    Flow,
-    blend_flows,
-    HaulRoute,
     OperatingMode,
     OperatingModeController,
-    Stockpile,
-    StochasticFaciesGenerator,
-    StochasticReserve,
+    MaterialSource,
+    truck_haul_capacity,
 )
 from drs_mining.config import MILL_MODES
 
@@ -53,17 +49,13 @@ def build_navarra_network(
     rng = random.Random(seed)
 
     # 1. Main Ore Body (70% Ore 1, 30% Ore 2 on average, near haulage)
-    gen_main = StochasticFaciesGenerator(
-        mean_fraction=0.30,
-        std_dev=0.04,
-        prob_new_facies=0.25,
-        variation_same_facies=0.01,
-        attribute_name="ore2_fraction",
-    )
-    res_main = StochasticReserve(
+    res_main = MaterialSource(
         name="main_reserve",
         total_tonnes=main_reserve_tonnes,
-        generator=gen_main,
+        mean_attributes={"ore2_fraction": 0.30},
+        attribute_std_dev=0.04,
+        variation_autocorrelation=0.25,
+        variation_step=0.01,
         min_parcel_mass=30_000.0,
         max_parcel_mass=50_000.0,
         initial_parcel_mass=40_000.0,
@@ -71,17 +63,13 @@ def build_navarra_network(
     )
 
     # 2. Satellite Ore Body (35% Ore 1, 65% Ore 2 on average, far haulage, sporadic)
-    gen_sat = StochasticFaciesGenerator(
-        mean_fraction=0.65,
-        std_dev=0.06,
-        prob_new_facies=0.30,
-        variation_same_facies=0.02,
-        attribute_name="ore2_fraction",
-    )
-    res_sat = StochasticReserve(
+    res_sat = MaterialSource(
         name="satellite_reserve",
         total_tonnes=sat_reserve_tonnes,
-        generator=gen_sat,
+        mean_attributes={"ore2_fraction": 0.65},
+        attribute_std_dev=0.06,
+        variation_autocorrelation=0.30,
+        variation_step=0.02,
         min_parcel_mass=25_000.0,
         max_parcel_mass=45_000.0,
         initial_parcel_mass=35_000.0,
@@ -91,14 +79,14 @@ def build_navarra_network(
     # 3. Stockpiles
     init_ore1 = target_ore_stock_level * 0.65
     init_ore2 = target_ore_stock_level * 0.35
-    ore1_stock = Stockpile(
+    ore1_stock = Storage(
         name="Ore1Stock",
-        initial_mass=init_ore1,
+        initial_level=init_ore1,
         initial_attributes={"ore2_fraction": 0.0},
     )
-    ore2_stock = Stockpile(
+    ore2_stock = Storage(
         name="Ore2Stock",
-        initial_mass=init_ore2,
+        initial_level=init_ore2,
         initial_attributes={"ore2_fraction": 1.0},
     )
 
