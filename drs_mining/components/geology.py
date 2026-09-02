@@ -4,53 +4,62 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Callable, Mapping, Optional
+from typing import Iterable, Iterator, Mapping, Optional
 
 import drs
 from drs import Flow, Entity
 
 
-class MaterialSource(drs.Module):
-    """Source of material with reserve depletion and attribute generation.
+def autocorrelated_generator(
+    mean_fraction: float = 0.30,
+    std_dev: float = 0.05,
+    prob_new_facies: float = 0.30,
+    variation_step: float = 0.01,
+    min_mass: float = 30000.0,
+    max_mass: float = 50000.0,
+    initial_mass: Optional[float] = None,
+    attribute_name: str = "ore2_fraction",
+    seed: Optional[int] = None,
+) -> Iterator[Entity]:
+    """Generates an infinite sequence of Entity batches with an autocorrelated random walk."""
+    rng = random.Random(seed) if seed is not None else random
+    is_new = True
+    curr_frac = float(mean_fraction)
 
-    Generates quality attributes either from statistical parameters (autocorrelated
-    random walk), a block model iterator, or a custom attribute generator function.
-    Seamlessly extracts continuous Flow (DRS) or discrete Entity batches (DES).
+    if initial_mass is not None:
+        yield Entity(mass=float(initial_mass), attributes={attribute_name: curr_frac})
+
+    while True:
+        mass = rng.uniform(min_mass, max_mass)
+        if is_new:
+            curr_frac = rng.gauss(mean_fraction, std_dev) if std_dev != 0.0 else mean_fraction
+        else:
+            curr_frac += variation_step * rng.uniform(-1.0, 1.0)
+        curr_frac = max(0.0, min(1.0, curr_frac))
+        is_new = rng.random() <= prob_new_facies
+
+        yield Entity(mass=mass, attributes={attribute_name: curr_frac})
+
+
+class MaterialSource(drs.Module):
+    """Source of material with reserve depletion and continuous/discrete extraction.
+
+    Consumes an arbitrary stream (Iterable[Entity]) representing blocks, parcels,
+    or geostatistical realizations, and exposes continuous Flow extraction.
     """
 
     def __init__(
         self,
         name: str = "source",
         total_tonnes: float = math.inf,
-        mean_attributes: Optional[Mapping[str, float]] = None,
-        attribute_std_dev: float = 0.05,
-        variation_autocorrelation: float = 0.30,
-        variation_step: float = 0.01,
-        min_parcel_mass: float = 30000.0,
-        max_parcel_mass: float = 50000.0,
-        initial_parcel_mass: Optional[float] = None,
+        stream: Optional[Iterable[Entity]] = None,
         warming_period: float = 0.0,
-        attribute_generator: Optional[Callable[[], Mapping[str, float]]] = None,
-        seed: Optional[int] = None,
     ):
         super().__init__()
         self.name = name
         self._total_tonnes = float(total_tonnes)
-        self.mean_attributes = dict(mean_attributes or {"ore2_fraction": 0.30})
-        self.attribute_std_dev = float(attribute_std_dev)
-        self.variation_autocorrelation = float(variation_autocorrelation)
-        self.variation_step = float(variation_step)
-        self.min_parcel_mass = float(min_parcel_mass)
-        self.max_parcel_mass = float(max_parcel_mass)
         self.warming_period = float(warming_period)
-        self.attribute_generator = attribute_generator
-
-        self.rng = random.Random(seed) if seed is not None else random
-        self._active_entity: Optional[Entity] = None
-
-        # Autocorrelation Markov state
-        self._next_is_new: bool = True
-        self._current_fraction: float = float(self.mean_attributes.get("ore2_fraction", 0.30))
+        self._stream = iter(stream) if stream is not None else autocorrelated_generator()
 
         self.cumulative_extracted_mass = drs.Level(
             f"{name}_cumulative_extracted_mass", initial_value=0.0, owner=self
@@ -63,15 +72,8 @@ class MaterialSource(drs.Module):
             f"{name}_entity_extracted_mass", initial_value=0.0, owner=self
         )
 
-        if initial_parcel_mass is not None:
-            attrs = dict(self.mean_attributes)
-            self._active_entity = Entity(
-                mass=min(initial_parcel_mass, self.remaining_reserve),
-                attributes=attrs,
-            )
-            self.entity_extracted_mass.upper_threshold = self._active_entity.mass
-        else:
-            self.next_entity()
+        self._active_entity: Optional[Entity] = None
+        self.next_entity()
 
     @property
     def total_tonnes(self) -> float:
@@ -106,42 +108,25 @@ class MaterialSource(drs.Module):
     def current_attributes(self) -> Mapping[str, float]:
         if self._active_entity is not None:
             return self._active_entity.attributes
-        return self.mean_attributes
+        return {}
 
     def next_entity(self) -> Optional[Entity]:
-        """Draw the next discrete entity batch from the source."""
+        """Draw the next discrete entity batch from the stream."""
         if self.remaining_reserve <= 1e-6:
             self._active_entity = None
             return None
 
-        p_mass = self.rng.uniform(self.min_parcel_mass, self.max_parcel_mass)
-        p_mass = min(p_mass, self.remaining_reserve)
+        try:
+            entity = next(self._stream)
+        except StopIteration:
+            self._active_entity = None
+            return None
 
+        actual_mass = min(entity.mass, self.remaining_reserve)
         self.entity_extracted_mass.value = 0.0
-        self.entity_extracted_mass.upper_threshold = p_mass
+        self.entity_extracted_mass.upper_threshold = actual_mass
 
-        if self.attribute_generator is not None:
-            attrs = self.attribute_generator()
-        else:
-            if self._next_is_new:
-                if self.attribute_std_dev != 0.0:
-                    fraction = self.rng.gauss(
-                        self.mean_attributes.get("ore2_fraction", 0.30),
-                        self.attribute_std_dev,
-                    )
-                else:
-                    fraction = self.mean_attributes.get("ore2_fraction", 0.30)
-            else:
-                fraction = (
-                    self._current_fraction
-                    + self.variation_step * self.rng.uniform(-1.0, 1.0)
-                )
-
-            self._current_fraction = max(0.0, min(1.0, fraction))
-            self._next_is_new = self.rng.random() <= self.variation_autocorrelation
-            attrs = {"ore2_fraction": self._current_fraction}
-
-        self._active_entity = Entity(mass=p_mass, attributes=attrs)
+        self._active_entity = Entity(mass=actual_mass, attributes=dict(entity.attributes))
         return self._active_entity
 
     def advance_state(self) -> None:

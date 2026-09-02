@@ -29,6 +29,7 @@ from drs_mining.components import (
     OperatingMode,
     OperatingModeController,
     MaterialSource,
+    autocorrelated_generator,
     truck_haul_capacity,
 )
 from drs_mining.config import MILL_MODES
@@ -49,31 +50,37 @@ def build_navarra_network(
     rng = random.Random(seed)
 
     # 1. Main Ore Body (70% Ore 1, 30% Ore 2 on average, near haulage)
+    stream_main = autocorrelated_generator(
+        mean_fraction=0.30,
+        std_dev=0.04,
+        prob_new_facies=0.25,
+        variation_step=0.01,
+        min_mass=30_000.0,
+        max_mass=50_000.0,
+        initial_mass=40_000.0,
+        seed=seed,
+    )
     res_main = MaterialSource(
         name="main_reserve",
         total_tonnes=main_reserve_tonnes,
-        mean_attributes={"ore2_fraction": 0.30},
-        attribute_std_dev=0.04,
-        variation_autocorrelation=0.25,
-        variation_step=0.01,
-        min_parcel_mass=30_000.0,
-        max_parcel_mass=50_000.0,
-        initial_parcel_mass=40_000.0,
-        seed=seed,
+        stream=stream_main,
     )
 
     # 2. Satellite Ore Body (35% Ore 1, 65% Ore 2 on average, far haulage, sporadic)
+    stream_sat = autocorrelated_generator(
+        mean_fraction=0.65,
+        std_dev=0.06,
+        prob_new_facies=0.30,
+        variation_step=0.02,
+        min_mass=25_000.0,
+        max_mass=45_000.0,
+        initial_mass=35_000.0,
+        seed=seed + 100,
+    )
     res_sat = MaterialSource(
         name="satellite_reserve",
         total_tonnes=sat_reserve_tonnes,
-        mean_attributes={"ore2_fraction": 0.65},
-        attribute_std_dev=0.06,
-        variation_autocorrelation=0.30,
-        variation_step=0.02,
-        min_parcel_mass=25_000.0,
-        max_parcel_mass=45_000.0,
-        initial_parcel_mass=35_000.0,
-        seed=seed + 100,
+        stream=stream_sat,
     )
 
     # 3. Stockpiles

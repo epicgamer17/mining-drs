@@ -9,6 +9,7 @@ import drs
 from drs import DRSEngine, Telemetry, Processor, Storage, Flow, blend_flows
 from drs_mining.components import (
     MaterialSource,
+    autocorrelated_generator,
     RequireDecision,
 )
 from .controllers import RL_MineController
@@ -95,16 +96,19 @@ class MiningRLEnv(gym.Env):
         return 0.0
 
     def _setup_simulation(self):
-        """Constructs lean simulation network with MaterialSource, Storage, and Processor."""
+        stream = autocorrelated_generator(
+            mean_fraction=self.mean_ore_fraction,
+            std_dev=self.std_dev_ore_fraction,
+            prob_new_facies=self.prob_new_facies,
+            variation_step=self.variation_same_facies,
+            min_mass=self.min_ore_mass,
+            max_mass=self.max_ore_mass,
+            attribute_name="ore2_fraction",
+        )
         self.reserve = MaterialSource(
             name="reserve",
             total_tonnes=self.total_ore_to_extract,
-            mean_attributes={"ore2_fraction": self.mean_ore_fraction},
-            attribute_std_dev=self.std_dev_ore_fraction,
-            variation_autocorrelation=self.prob_new_facies,
-            variation_step=self.variation_same_facies,
-            min_parcel_mass=self.min_ore_mass,
-            max_parcel_mass=self.max_ore_mass,
+            stream=stream,
             warming_period=self.ore_to_be_extracted_during_warming_period,
         )
 

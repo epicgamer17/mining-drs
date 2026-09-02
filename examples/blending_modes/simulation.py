@@ -15,6 +15,7 @@ from drs import (
 from drs_mining.components import (
     OperatingModeController,
     MaterialSource,
+    autocorrelated_generator,
 )
 from drs_mining.config import MILL_MODES
 from drs_mining.components.plot import (
@@ -41,16 +42,20 @@ def build_blending_network(
     duration_of_contingency_segments: float = 1.0,
     **kwargs,
 ) -> tuple:
+    stream = autocorrelated_generator(
+        mean_fraction=mean_ore_fraction,
+        std_dev=std_dev_ore_fraction,
+        prob_new_facies=prob_new_facies,
+        variation_step=variation_same_facies,
+        min_mass=min_ore_mass,
+        max_mass=max_ore_mass,
+        initial_mass=40000.0,
+        attribute_name="ore2_fraction",
+    )
     source = MaterialSource(
         name="mine_face_reserve",
         total_tonnes=total_ore_to_extract,
-        mean_attributes={"ore2_fraction": mean_ore_fraction},
-        attribute_std_dev=std_dev_ore_fraction,
-        variation_autocorrelation=prob_new_facies,
-        variation_step=variation_same_facies,
-        min_parcel_mass=min_ore_mass,
-        max_parcel_mass=max_ore_mass,
-        initial_parcel_mass=40000.0,
+        stream=stream,
         warming_period=ore_to_be_extracted_during_warming_period,
     )
 
