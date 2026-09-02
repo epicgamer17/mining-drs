@@ -23,8 +23,7 @@ class MillModeConfig:
 
     name: str
     id: int
-    ore1_draw_rate: Optional[float] = None  # Planned Ore 1 draw rate [tonnes/day]
-    ore2_draw_rate: Optional[float] = None  # Planned Ore 2 draw rate [tonnes/day]
+    draw_rates: Mapping[str, float] = field(default_factory=dict)
     description: str = ""
 
 
@@ -44,46 +43,43 @@ MILL_MODE_CONFIGS: Dict[str, MillModeConfig] = {
     "MODE_A": MillModeConfig(
         name="MODE_A",
         id=0,
-        ore1_draw_rate=3600.0,
-        ore2_draw_rate=2400.0,
+        draw_rates={"Ore1Stock": 3600.0, "Ore2Stock": 2400.0},
         description="High Ore 2 draw campaign (6,000 t/d total feed: 60% Ore 1 / 40% Ore 2)",
     ),
     "MODE_A_CONTINGENCY": MillModeConfig(
         name="MODE_A_CONTINGENCY",
         id=1,
-        ore1_draw_rate=3900.0,
-        ore2_draw_rate=0.0,
+        draw_rates={"Ore1Stock": 3900.0, "Ore2Stock": 0.0},
         description="Ore 1 emergency contingency campaign when Ore 2 stockpile is starved",
     ),
     "MODE_A_MINE_SURGING": MillModeConfig(
         name="MODE_A_MINE_SURGING",
         id=2,
+        draw_rates={"Ore1Stock": 3600.0, "Ore2Stock": 2400.0},
         description="Mine surging reduced haulage target to manage high stockpile surges",
     ),
     "MODE_B": MillModeConfig(
         name="MODE_B",
         id=3,
-        ore1_draw_rate=4600.0,
-        ore2_draw_rate=800.0,
+        draw_rates={"Ore1Stock": 4600.0, "Ore2Stock": 800.0},
         description="Low Ore 2 draw campaign (5,400 t/d total feed: 85% Ore 1 / 15% Ore 2)",
     ),
     "MODE_B_CONTINGENCY": MillModeConfig(
         name="MODE_B_CONTINGENCY",
         id=4,
-        ore1_draw_rate=0.0,
-        ore2_draw_rate=2500.0,
+        draw_rates={"Ore1Stock": 0.0, "Ore2Stock": 2500.0},
         description="Ore 2 emergency contingency campaign when Ore 1 stockpile is starved",
     ),
     "MODE_B_MINE_SURGING": MillModeConfig(
         name="MODE_B_MINE_SURGING",
         id=5,
+        draw_rates={"Ore1Stock": 4600.0, "Ore2Stock": 800.0},
         description="Mine surging reduced haulage target during high stockpile buildup",
     ),
     "SHUTDOWN": MillModeConfig(
         name="SHUTDOWN",
         id=6,
-        ore1_draw_rate=0.0,
-        ore2_draw_rate=0.0,
+        draw_rates={"Ore1Stock": 0.0, "Ore2Stock": 0.0},
         description="Planned metallurgical plant maintenance shutdown",
     ),
 }

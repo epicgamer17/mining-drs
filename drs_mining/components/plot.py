@@ -809,6 +809,8 @@ def prepare_history(df):
     if "cumulative_extracted_mass" not in df.columns:
         if "mine_face_cumulative_extracted_mass" in df.columns:
             df["cumulative_extracted_mass"] = df["mine_face_cumulative_extracted_mass"]
+        elif "mine_face_reserve_cumulative_extracted_mass" in df.columns:
+            df["cumulative_extracted_mass"] = df["mine_face_reserve_cumulative_extracted_mass"]
         elif "cumulative_milled_mass" in df.columns:
             df["cumulative_extracted_mass"] = df["cumulative_milled_mass"]
 

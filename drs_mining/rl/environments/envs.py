@@ -1,20 +1,25 @@
-import numpy as np
-import gymnasium as gym
-from gymnasium import spaces
 import random
 from typing import Optional
 
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+
 import drs
-from drs import DRSEngine, Telemetry
+from drs import DRSEngine, Telemetry, Processor
 from drs_mining.components import (
-    build_mining_simulation,
+    Flow,
+    blend_flows,
+    Stockpile,
+    StochasticReserve,
+    StochasticFaciesGenerator,
     RequireDecision,
 )
 from .controllers import RL_MineController
 
 
 class MiningRLEnv(gym.Env):
-    """Reinforcement Learning Environment for Mining Operations."""
+    """Reinforcement Learning Environment for Tactical Blending Operations."""
 
     metadata = {"render_modes": ["human"]}
 
@@ -77,107 +82,126 @@ class MiningRLEnv(gym.Env):
             low=0.0, high=np.inf, shape=(5,), dtype=np.float32
         )
 
-        self.mine = None
-        self.fleet = None
-        self.plant = None
+        self.reserve = None
+        self.mill = None
         self.mode_controller = None
-        self.fleet_controller = None
-        self.controller = None
         self.ore1_stock = None
         self.ore2_stock = None
-        self.global_time = None
         self.engine = None
         self.telemetry = None
         self.last_extraction = 0.0
         self.last_time = 0.0
         self.current_step = 0
 
-    def _get_current_time(self):
-        """Helper to calculate total elapsed simulation days directly from engine clock."""
-        if hasattr(self, "engine") and self.engine is not None:
+    def _get_current_time(self) -> float:
+        if self.engine is not None:
             return self.engine.current_time
         return 0.0
 
     def _setup_simulation(self):
-        """Builds the flat leaf components, registers them, and wires the policy."""
-        faces, self.fleet, self.plant, self.mode_controller, self.fleet_controller, self.ore1_stock, self.ore2_stock = (
-            build_mining_simulation(
-                num_faces=1,
-                mode_controller_cls=RL_MineController,
-                mean_ore_fraction=self.mean_ore_fraction,
-                std_dev_ore_fraction=self.std_dev_ore_fraction,
-                target_ore_stock_level=self.target_ore_stock_level,
-                total_ore_to_extract=self.total_ore_to_extract,
-                ore_to_be_extracted_during_warming_period=self.ore_to_be_extracted_during_warming_period,
-                critical_ore2_level=self.critical_ore2_level,
-                duration_of_production_campaigns=self.duration_of_production_campaigns,
-                duration_of_shutdowns=self.duration_of_shutdowns,
-                duration_of_contingency_segments=self.duration_of_contingency_segments,
-                min_ore_mass=self.min_ore_mass,
-                max_ore_mass=self.max_ore_mass,
-                prob_new_facies=self.prob_new_facies,
-                variation_same_facies=self.variation_same_facies,
-            )
+        """Constructs lean simulation network with StochasticReserve, Stockpiles, and Processor."""
+        gen = StochasticFaciesGenerator(
+            mean_fraction=self.mean_ore_fraction,
+            std_dev=self.std_dev_ore_fraction,
+            prob_new_facies=self.prob_new_facies,
+            variation_same_facies=self.variation_same_facies,
+            attribute_name="ore2_fraction",
         )
-        self.mine = faces[0]
-        self.controller = self.mode_controller
-        self.global_time = drs.Timer("GlobalTime", initial_value=0.0)
+        self.reserve = StochasticReserve(
+            name="reserve",
+            total_tonnes=self.total_ore_to_extract,
+            generator=gen,
+            min_parcel_mass=self.min_ore_mass,
+            max_parcel_mass=self.max_ore_mass,
+            warming_period=self.ore_to_be_extracted_during_warming_period,
+        )
+
+        init_mass1 = (1.0 - self.mean_ore_fraction) * self.target_ore_stock_level
+        init_mass2 = self.mean_ore_fraction * self.target_ore_stock_level
+
+        self.ore1_stock = Stockpile(
+            name="Ore1Stock",
+            initial_mass=init_mass1,
+            initial_attributes={"ore2_fraction": 0.0},
+        )
+        self.ore2_stock = Stockpile(
+            name="Ore2Stock",
+            initial_mass=init_mass2,
+            initial_attributes={"ore2_fraction": 1.0},
+        )
+
+        self.mill = Processor(name="mill", max_rate=6000.0)
+
+        self.mode_controller = RL_MineController(
+            duration_of_production_campaigns=self.duration_of_production_campaigns,
+            duration_of_shutdowns=self.duration_of_shutdowns,
+            duration_of_contingency_segments=self.duration_of_contingency_segments,
+            critical_ore2_level=self.critical_ore2_level,
+            target_total_stock=self.target_ore_stock_level,
+        )
 
         self.engine = DRSEngine()
         self.engine.register(
-            self.mine,
-            self.fleet,
-            self.plant,
+            self.reserve,
+            self.mill,
             self.mode_controller,
-            self.fleet_controller,
             self.ore1_stock,
             self.ore2_stock,
         )
 
         @self.engine.on_step
-        def _policy(time):
-            self._step_policy(time)
+        def _policy(t):
+            self._step_policy(t)
 
-    def _step_policy(self, time):
+    def _step_policy(self, time: float):
         """Top-level control policy invoked by the engine once per step."""
-        self.global_time.rate = 1.0
-
-        # 1. Mode decision
-        mode = self.mode_controller.update(self.ore2_stock.level)
-
-        # 2. Plant draw rates and mine target
-        plant_draw, mine_target = self.plant.get_target_rates(
-            mode,
+        campaign_mode = self.mode_controller.update_campaign(self.ore2_stock.level)
+        active_mode = self.mode_controller.resolve_operating_mode(
+            campaign_mode,
             ore1_level=self.ore1_stock.level,
             ore2_level=self.ore2_stock.level,
-            stockpile2_routing_fraction=self.fleet.stockpile2_routing_fraction.value,
         )
 
-        # 3. Fleet extraction allocation
-        face_rates = self.fleet_controller.allocate(
-            mine_target, self.plant.active_operating_mode.value
+        draw_rates = self.mode_controller.get_draw_rates(active_mode)
+        ore1_target = draw_rates.get("Ore1Stock", 0.0)
+        ore2_target = draw_rates.get("Ore2Stock", 0.0)
+
+        ore2_frac = self.reserve.current_attributes.get("ore2_fraction", 0.0)
+        mode_name = active_mode.name
+        if "_MINE_SURGING" in mode_name:
+            if mode_name == "MODE_A_MINE_SURGING":
+                effective_fraction = max(1.0 - ore2_frac, 0.01)
+                mine_target = ore1_target / effective_fraction
+            else:
+                effective_fraction = max(ore2_frac, 0.01)
+                mine_target = ore2_target / effective_fraction
+        else:
+            mine_target = ore1_target + ore2_target
+
+        extraction_flow = self.reserve.extract(mine_target)
+
+        in_flow1 = Flow(
+            rate=extraction_flow.rate * (1.0 - ore2_frac),
+            attributes=extraction_flow.attributes,
         )
-        self.mine.target_rate = face_rates[0]
+        in_flow2 = Flow(
+            rate=extraction_flow.rate * ore2_frac,
+            attributes=extraction_flow.attributes,
+        )
 
-        # 4. Routing, stockpile draw, and milling
-        ore1_in, ore2_in = self.fleet.route(sources=[self.mine])
-        out1 = self.ore1_stock.feed_and_draw(ore1_in, plant_draw.ore1)
-        out2 = self.ore2_stock.feed_and_draw(ore2_in, plant_draw.ore2)
+        out1 = self.ore1_stock.feed_and_draw(in_flow1, ore1_target)
+        out2 = self.ore2_stock.feed_and_draw(in_flow2, ore2_target)
 
-        self.plant.process(out1 + out2)
+        blended_feed = blend_flows([out1, out2])
+        self.mill.rate = blended_feed.rate
 
     def _setup_telemetry(self):
         if not self.enable_telemetry:
             return
         self.telemetry = Telemetry(model=self.engine)
-
         self.telemetry.register_metric(
-            "MassOfCurrentParcel",
-            lambda t, m, s, _: self.mine.active_parcel_initial_mass.value,
-        )
-        self.telemetry.register_metric(
-            "CurrentParcelRoutingFraction",
-            lambda t, m, s, _: self.fleet.stockpile2_routing_fraction.value,
+            "active_operating_mode",
+            lambda t, m, s, _: self.mode_controller.active_operating_mode.value.name,
         )
         self.telemetry.register_metric(
             "Campaign_Shutdown",
@@ -185,13 +209,12 @@ class MiningRLEnv(gym.Env):
         )
         self.telemetry.register_metric(
             "Contingency",
-            lambda t, m, s, _: self.plant.current_contingency_duration.value,
+            lambda t, m, s, _: self.mode_controller.current_contingency_duration.value,
         )
-
         self.engine.attach_telemetry(self.telemetry)
 
     def _is_terminating_condition_met(self) -> bool:
-        return self.mine.cumulative_extracted_mass.value >= self.total_ore_to_extract
+        return self.reserve.is_exhausted
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -211,7 +234,7 @@ class MiningRLEnv(gym.Env):
             pass
 
         self.last_time = self._get_current_time()
-        self.last_extraction = self.mine.cumulative_extracted_mass.value
+        self.last_extraction = self.reserve.cumulative_extracted_mass.value
 
         return self._get_obs(), {}
 
@@ -251,7 +274,7 @@ class MiningRLEnv(gym.Env):
             truncated = True
 
         current_time = self._get_current_time()
-        current_extraction = self.mine.cumulative_extracted_mass.value
+        current_extraction = self.reserve.cumulative_extracted_mass.value
 
         dt = current_time - self.last_time
         tons_processed = current_extraction - self.last_extraction
@@ -270,13 +293,14 @@ class MiningRLEnv(gym.Env):
         target = self.target_ore_stock_level
         ore1_mass = self.ore1_stock.level
         ore2_mass = self.ore2_stock.level
+        ore2_frac = self.reserve.current_attributes.get("ore2_fraction", 0.0)
 
         return np.array(
             [
                 ore1_mass / target,
                 ore2_mass / target,
                 (ore1_mass + ore2_mass) / target,
-                self.fleet.stockpile2_routing_fraction.value,
+                ore2_frac,
                 self._get_current_time() / self.time_scaling_factor,
             ],
             dtype=np.float32,

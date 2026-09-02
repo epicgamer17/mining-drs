@@ -3,86 +3,103 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping, Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import drs
 from drs import Storage
+from .material import Flow, blend_flows
 
 
 class Stockpile(Storage):
     """Multi-attribute stockpile component specializing drs.Storage.
 
-    Tracks total ore mass while maintaining balances for discrete quality
-    attributes (such as contained metal mass, grades, or deleterious elements).
+    Tracks total ore mass while maintaining exact CSTR conservation of mass
+    and dynamic grade/attribute balances for arbitrary quality attributes.
     """
 
     def __init__(
         self,
         name: str,
-        expected_attributes: Sequence[str] = (),
+        capacity: float = math.inf,
         initial_mass: float = 0.0,
         initial_attributes: Optional[Mapping[str, float]] = None,
-        capacity: float = math.inf,
-        attr_inflow: float = 1.0,
     ):
-        super().__init__(
-            name=f"{name}_mass", capacity=capacity, initial_level=initial_mass
-        )
+        super().__init__(name=f"{name}_mass", capacity=capacity, initial_level=initial_mass)
         self.name = name
-        self.expected_attributes = list(expected_attributes)
-        self.attr_inflow = float(attr_inflow)
+        self.attribute_masses: dict[str, drs.Level] = {}
 
-        self.actual_outflow_rate = drs.Variable(f"{name}_actual_outflow_rate", 0.0)
+        if initial_attributes:
+            for attr, concentration in initial_attributes.items():
+                attr_lvl = drs.Level(
+                    f"{name}_{attr}_mass",
+                    initial_value=float(initial_mass) * float(concentration),
+                )
+                attr_lvl.lower_threshold = 0.0
+                self.attribute_masses[attr] = attr_lvl
 
-        attrs = dict(initial_attributes or {})
-        self.attributes: dict[str, drs.Level] = {}
-        for attr in self.expected_attributes:
-            attr_lvl = drs.Level(f"{name}_{attr}", initial_value=attrs.get(attr, 0.0))
-            attr_lvl.lower_threshold = 0.0
-            self.attributes[attr] = attr_lvl
+    def grade(self, attr: str) -> float:
+        """Calculate current concentration / grade of an attribute in the stockpile."""
+        lvl = self.attribute_masses.get(attr)
+        if lvl is None:
+            return 0.0
+        m = self.level
+        if m <= 1e-6:
+            return 0.0
+        return max(0.0, float(lvl.value) / m)
 
-    def __getattr__(self, name: str) -> Any:
-        if "attributes" in self.__dict__ and name in self.attributes:
-            return self.attributes[name]
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    @property
+    def current_attributes(self) -> dict[str, float]:
+        """Return a dictionary of current concentrations for all tracked attributes."""
+        return {attr: self.grade(attr) for attr in self.attribute_masses}
 
-    def current_concentration(self, attr: str) -> float:
-        """Calculates current concentration (e.g. grade) of an attribute."""
-        level = self.attributes[attr]
-        return level.value / max(1e-6, self.level)
+    def _ensure_attribute(self, attr: str) -> drs.Level:
+        if attr not in self.attribute_masses:
+            lvl = drs.Level(f"{self.name}_{attr}_mass", initial_value=0.0)
+            lvl.lower_threshold = 0.0
+            self.attribute_masses[attr] = lvl
+        return self.attribute_masses[attr]
 
-    def feed_and_draw(self, inflow_rate: float, outflow_rate: float) -> float:
-        """Feed stockpile from routing inflow and draw into plant."""
-        return self.set_inout(inflow_rate, outflow_rate, attr_inflow=self.attr_inflow)
-
-    def set_inout(
+    def feed_and_draw(
         self,
-        inflow_rate: float,
-        outflow_rate: float,
-        attr_inflow: float = 1.0,
-    ) -> float:
-        """Set net inflow/outflow rates for one engine step."""
-        actual_outflow = outflow_rate
+        inflow: Flow | Sequence[Flow],
+        draw_rate: float,
+    ) -> Flow:
+        """Feed stockpile from incoming flow(s) and draw material to downstream processors.
+
+        Applies mass balance, empty buffer starvation limits, and dynamic grade dilution.
+        Returns the outgoing Flow with instantaneous stockpile attributes.
+        """
+        if isinstance(inflow, Sequence):
+            net_inflow = blend_flows(inflow)
+        else:
+            net_inflow = inflow
+
+        actual_draw = max(0.0, float(draw_rate))
         if self.is_empty or self.level <= 1e-6:
-            actual_outflow = min(actual_outflow, inflow_rate)
+            actual_draw = min(actual_draw, net_inflow.rate)
 
-        self.rate = inflow_rate - actual_outflow
+        # Net mass rate of change
+        self.rate = net_inflow.rate - actual_draw
 
-        for attr, level in self.attributes.items():
-            level.rate = (
-                inflow_rate * attr_inflow
-                - actual_outflow * self.current_concentration(attr)
-            )
+        # Track outgoing attribute concentrations before updating rates
+        out_attrs = self.current_attributes
 
-        self.actual_outflow_rate.value = actual_outflow
-        return actual_outflow
+        # Update rates for all incoming and existing attributes
+        all_attrs = set(self.attribute_masses.keys()) | set(net_inflow.attributes.keys())
+        for attr in all_attrs:
+            attr_lvl = self._ensure_attribute(attr)
+            g_in = net_inflow.attributes.get(attr, 0.0)
+            g_out = out_attrs.get(attr, 0.0)
+            attr_lvl.rate = (net_inflow.rate * g_in) - (actual_draw * g_out)
+
+        return Flow(rate=actual_draw, attributes=out_attrs)
 
     def levels(self) -> Sequence[drs.Level]:
-        """Return the stateful levels owned by this stockpile."""
-        return (self._level, *self.attributes.values())
+        """Return all stateful levels owned by this stockpile (mass + attributes)."""
+        return (self._level, *self.attribute_masses.values())
 
     def time_to_event(self) -> float:
-        """Time until this stockpile or any attribute hits a state boundary."""
+        """Time until this stockpile mass or any attribute hits a threshold."""
         min_dt = math.inf
         for lvl in self.levels():
             dt = lvl.time_to_event()

@@ -4,9 +4,9 @@ Implements the tactical operational framework from NAVARRA_MEETING.md:
 - Main Ore Body: High reserve, primary source, close to plant.
 - Satellite Ore Body: Requires development to reach, sporadic daily availability,
   higher Ore 2 concentration for stockpile balancing, longer haul cycle times.
-- Concentrator (Metallurgical Plant): Mode A (primary target), Mode B, and Contingency.
+- Concentrator (Mill Processor): Mode A (primary target), Mode B, and Contingency.
 - Tactical Policy: Keep concentrator in Mode A while using the satellite as little as possible.
-- Rough Truck Allocation: Cycle times determined by haul route distance and face congestion.
+- Direct extraction from StochasticReserve to Stockpiles to Mill Processor.
 """
 
 from __future__ import annotations
@@ -23,16 +23,14 @@ import numpy as np
 import pandas as pd
 
 import drs
-from drs import DRSEngine, Telemetry
+from drs import DRSEngine, Telemetry, Processor
 
 from drs_mining.components import (
+    Flow,
+    blend_flows,
     HaulRoute,
-    MetallurgicalPlant,
-    MillingSetpoints,
-    MineFace,
     OperatingMode,
     OperatingModeController,
-    Parcel,
     Stockpile,
     StochasticFaciesGenerator,
     StochasticReserve,
@@ -60,6 +58,7 @@ def build_navarra_network(
         std_dev=0.04,
         prob_new_facies=0.25,
         variation_same_facies=0.01,
+        attribute_name="ore2_fraction",
     )
     res_main = StochasticReserve(
         name="main_reserve",
@@ -70,18 +69,6 @@ def build_navarra_network(
         initial_parcel_mass=40_000.0,
         seed=seed,
     )
-    haul_main = HaulRoute(
-        distance_km=1.2,
-        base_cycle_time_min=16.0,
-        congestion_factor=0.02,
-        truck_payload_tonnes=100.0,
-    )
-    main_face = MineFace(
-        name="main_face",
-        geology=res_main,
-        haulage=haul_main,
-        max_rate=8000.0 / 86400.0,
-    )
 
     # 2. Satellite Ore Body (35% Ore 1, 65% Ore 2 on average, far haulage, sporadic)
     gen_sat = StochasticFaciesGenerator(
@@ -89,6 +76,7 @@ def build_navarra_network(
         std_dev=0.06,
         prob_new_facies=0.30,
         variation_same_facies=0.02,
+        attribute_name="ore2_fraction",
     )
     res_sat = StochasticReserve(
         name="satellite_reserve",
@@ -99,63 +87,37 @@ def build_navarra_network(
         initial_parcel_mass=35_000.0,
         seed=seed + 100,
     )
-    haul_sat = HaulRoute(
-        distance_km=4.8,
-        base_cycle_time_min=38.0,
-        congestion_factor=0.05,
-        truck_payload_tonnes=100.0,
-    )
-    satellite_face = MineFace(
-        name="satellite_face",
-        geology=res_sat,
-        haulage=haul_sat,
-        max_rate=5000.0 / 86400.0,
-    )
 
     # 3. Stockpiles
     init_ore1 = target_ore_stock_level * 0.65
     init_ore2 = target_ore_stock_level * 0.35
     ore1_stock = Stockpile(
         name="Ore1Stock",
-        expected_attributes=["contained_ore_fraction_mass"],
         initial_mass=init_ore1,
-        initial_attributes={"contained_ore_fraction_mass": init_ore1 * 0.30},
-        attr_inflow=0.0,
+        initial_attributes={"ore2_fraction": 0.0},
     )
     ore2_stock = Stockpile(
         name="Ore2Stock",
-        expected_attributes=["contained_ore_fraction_mass"],
         initial_mass=init_ore2,
-        initial_attributes={"contained_ore_fraction_mass": init_ore2 * 0.30},
-        attr_inflow=0.0,
+        initial_attributes={"ore2_fraction": 1.0},
     )
 
-    # 4. Concentrator (Metallurgical Plant)
-    plant = MetallurgicalPlant(
-        stockpiles=[ore1_stock, ore2_stock],
-        setpoints=MillingSetpoints(
-            mode_a_ore1=3600.0,
-            mode_a_ore2=2400.0,
-            mode_a_contingency_ore1=3900.0,
-            mode_b_ore1=4600.0,
-            mode_b_ore2=800.0,
-            mode_b_contingency_ore2=2500.0,
-        ),
-        target_ore_stock_level=target_ore_stock_level,
-        duration_of_contingency_segments=contingency_segment_duration,
-    )
+    # 4. Concentrator Mill Processor
+    mill = Processor(name="mill", max_rate=6000.0)
 
     # 5. Operating Mode Controller
     mode_ctrl = OperatingModeController(
         duration_of_production_campaigns=campaign_duration,
         duration_of_shutdowns=shutdown_duration,
+        duration_of_contingency_segments=contingency_segment_duration,
         critical_ore2_level=critical_ore2_level,
+        target_total_stock=target_ore_stock_level,
     )
 
     return (
-        main_face,
-        satellite_face,
-        plant,
+        res_main,
+        res_sat,
+        mill,
         mode_ctrl,
         ore1_stock,
         ore2_stock,
@@ -178,9 +140,9 @@ class NavarraTacticalSimulation:
         self.development_rate_m_per_day = development_rate_m_per_day
 
         (
-            self.main_face,
-            self.satellite_face,
-            self.plant,
+            self.res_main,
+            self.res_sat,
+            self.mill,
             self.mode_ctrl,
             self.ore1_stock,
             self.ore2_stock,
@@ -191,20 +153,29 @@ class NavarraTacticalSimulation:
         self.satellite_sporadic_available = False
         self.satellite_cumulative_dev = 0.0
 
+        self.cumulative_milled_mass = drs.Level(
+            "cumulative_concentrator_throughput", initial_value=0.0, owner=self.mill
+        )
+        self.mill.cumulative_concentrator_throughput = self.cumulative_milled_mass
+
         self.engine = DRSEngine()
         self._setup_policy()
 
     def _setup_policy(self) -> None:
-        self.engine.register_processors(
-            [self.main_face, self.satellite_face, self.plant]
+        self.engine.register(
+            self.res_main,
+            self.res_sat,
+            self.mill,
+            self.mode_ctrl,
+            self.ore1_stock,
+            self.ore2_stock,
         )
-        self.engine.register_storages([self.ore1_stock, self.ore2_stock])
-        self.engine.register_module(self.mode_ctrl)
 
         last_eval_day = [-1]
 
+        @self.engine.on_step
         def _policy(t: float):
-            day = int(t // 86400.0)
+            day = int(t)
 
             # Daily tactical review & sporadic evaluation
             if day > last_eval_day[0]:
@@ -214,86 +185,86 @@ class NavarraTacticalSimulation:
                 )
 
             # 1. Update campaign mode
-            active_campaign = self.mode_ctrl.update(
-                ore2_stock_level=self.ore2_stock.level,
-                total_stock_level=self.ore1_stock.level + self.ore2_stock.level,
+            active_campaign = self.mode_ctrl.update_campaign(
+                ore2_stock_level=self.ore2_stock.level
             )
 
             # 2. Advance development when in Mode B or shutdown
-            dt_step = 86400.0  # reference rate base
             if not self.satellite_unlocked:
                 if "MODE_B" in active_campaign.name or active_campaign.name == "SHUTDOWN":
-                    self.satellite_cumulative_dev += (
-                        self.development_rate_m_per_day / 86400.0 * dt_step
-                    )
+                    self.satellite_cumulative_dev += self.development_rate_m_per_day
                     if self.satellite_cumulative_dev >= self.sat_required_dev_m:
                         self.satellite_unlocked = True
 
-            # 3. Determine available faces and blend fraction
-            f_blend = 0.0
-            p1 = (
-                self.main_face.geology.active_parcel.ore2_fraction
-                if self.main_face.geology.active_parcel
-                else 0.30
-            )
-            f_blend = p1
-
-            # 4. Get plant target rates
-            ore1_rate, ore2_rate, mine_target = self.plant.get_target_rates(
+            # 3. Resolve active operating mode (handling contingency / surging)
+            active_mode = self.mode_ctrl.resolve_operating_mode(
                 active_campaign,
                 ore1_level=self.ore1_stock.level,
                 ore2_level=self.ore2_stock.level,
-                stockpile2_routing_fraction=f_blend,
             )
 
-            # 5. Tactical Face Allocation (Navarra requirement: use satellite as little as possible)
-            # Check if Ore 2 needs balancing and satellite is unlocked & available
+            # 4. Get draw rates
+            draw_rates = self.mode_ctrl.get_draw_rates(active_mode)
+            ore1_rate = draw_rates.get("Ore1Stock", 0.0)
+            ore2_rate = draw_rates.get("Ore2Stock", 0.0)
+
+            p1 = self.res_main.current_attributes.get("ore2_fraction", 0.30)
+            mode_name = active_mode.name
+            if "_MINE_SURGING" in mode_name:
+                if mode_name == "MODE_A_MINE_SURGING":
+                    effective_fraction = max(1.0 - p1, 0.01)
+                    mine_target = ore1_rate / effective_fraction
+                else:
+                    effective_fraction = max(p1, 0.01)
+                    mine_target = ore2_rate / effective_fraction
+            else:
+                mine_target = ore1_rate + ore2_rate
+
+            # 5. Tactical Source Allocation (Navarra requirement: use satellite as little as possible)
             sat_weight = 0.0
             if (
                 self.satellite_unlocked
                 and self.satellite_sporadic_available
-                and not self.satellite_face.is_exhausted
+                and not self.res_sat.is_exhausted
             ):
                 ore2_buffer = self.ore2_stock.level - self.mode_ctrl.critical_ore2_level
                 if ore2_buffer < 10_000.0:
-                    # Allocate just enough to restore Ore 2 buffer
                     sat_weight = min(0.40, max(0.10, (10_000.0 - ore2_buffer) / 25_000.0))
 
             main_weight = 1.0 - sat_weight
 
-            # 6. Apply extraction rates
-            target_per_sec = mine_target / 86400.0
-            self.main_face.target_rate = target_per_sec * main_weight
-            self.satellite_face.target_rate = target_per_sec * sat_weight
+            # 6. Extract material directly from sources
+            main_target = mine_target * main_weight
+            sat_target = mine_target * sat_weight
 
-            # 7. Collect mined parcels and route to stockpiles
-            actual_main = self.main_face.actual_rate
-            actual_sat = self.satellite_face.actual_rate
+            flow_main = self.res_main.extract(main_target)
+            flow_sat = self.res_sat.extract(sat_target)
 
-            p_sat = (
-                self.satellite_face.geology.active_parcel.ore2_fraction
-                if self.satellite_face.geology.active_parcel
-                else 0.65
+            p_sat = flow_sat.attributes.get("ore2_fraction", 0.65)
+
+            # Route to stockpiles
+            inflow1 = Flow(
+                rate=flow_main.rate * (1.0 - p1) + flow_sat.rate * (1.0 - p_sat),
+                attributes={"ore2_fraction": 0.0},
+            )
+            inflow2 = Flow(
+                rate=flow_main.rate * p1 + flow_sat.rate * p_sat,
+                attributes={"ore2_fraction": 1.0},
             )
 
-            ore1_inflow = actual_main * (1.0 - p1) + actual_sat * (1.0 - p_sat)
-            ore2_inflow = actual_main * p1 + actual_sat * p_sat
+            out1 = self.ore1_stock.feed_and_draw(inflow1, ore1_rate)
+            out2 = self.ore2_stock.feed_and_draw(inflow2, ore2_rate)
 
-            out1 = self.ore1_stock.feed_and_draw(ore1_inflow, ore1_rate / 86400.0)
-            out2 = self.ore2_stock.feed_and_draw(ore2_inflow, ore2_rate / 86400.0)
-
-            self.plant.process(out1 + out2)
-
-        self.engine.register_policy(_policy)
+            blended_feed = blend_flows([out1, out2])
+            self.mill.rate = blended_feed.rate
+            self.cumulative_milled_mass.rate = self.mill.actual_rate
 
     def run(self, days: float = 365.0) -> pd.DataFrame:
         """Run the tactical simulation for specified duration and record telemetry."""
-        until_sec = days * 86400.0
-
         telemetry = Telemetry(model=self.engine)
         telemetry.register_metric(
             "active_operating_mode",
-            lambda t, m, s, _: self.plant.active_operating_mode.value.name,
+            lambda t, m, s, _: self.mode_ctrl.active_operating_mode.value.name,
         )
         telemetry.register_metric(
             "ore1_stock",
@@ -309,11 +280,11 @@ class NavarraTacticalSimulation:
         )
         telemetry.register_metric(
             "main_face_extracted",
-            lambda t, m, s, _: self.main_face.geology.cumulative_extracted_mass.value,
+            lambda t, m, s, _: self.res_main.cumulative_extracted_mass.value,
         )
         telemetry.register_metric(
             "satellite_face_extracted",
-            lambda t, m, s, _: self.satellite_face.geology.cumulative_extracted_mass.value,
+            lambda t, m, s, _: self.res_sat.cumulative_extracted_mass.value,
         )
         telemetry.register_metric(
             "satellite_development",
@@ -325,13 +296,14 @@ class NavarraTacticalSimulation:
         )
         telemetry.register_metric(
             "cumulative_concentrator_throughput",
-            lambda t, m, s, _: self.plant.cumulative_milled_mass.value,
+            lambda t, m, s, _: self.cumulative_milled_mass.value,
         )
 
-        res = self.engine.run(until=until_sec, telemetry=telemetry)
+        self.engine.attach_telemetry(telemetry)
+        res = self.engine.run(until=days)
         df = telemetry.to_dataframe()
         if not df.empty and "time" in df.columns:
-            df["day"] = df["time"] / 86400.0
+            df["day"] = df["time"]
         return df
 
 
@@ -375,7 +347,6 @@ def main():
     parser = argparse.ArgumentParser(description="Navarra Tactical Blending Simulation")
     parser.add_argument("--days", type=float, default=365.0, help="Simulation duration (days)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--no-plot", action="store_true", help="Disable plotting")
     args = parser.parse_args()
 
     sim = NavarraTacticalSimulation(seed=args.seed)

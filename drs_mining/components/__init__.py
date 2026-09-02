@@ -1,31 +1,29 @@
 from drs import Storage, Processor
+from .material import Flow, Entity, blend_flows, split_flow
 from .modes import OperatingMode, RequireDecision
 from .generators import StochasticFaciesGenerator
-from .geology import GeologySource, StochasticReserve, Parcel
+from .geology import GeologySource, StochasticReserve
 from .haulage import HaulRoute
-from .mine_face import MineFace
-from .plant import MetallurgicalPlant, MillingSetpoints
-from .controllers import OperatingModeController
+from .controllers import OperatingModeController, ModeSetpoints
 from .stockpiles import Stockpile
 from .planning import (
     AreaReadinessTarget,
     select_fleet_mode,
     TacticalReviewController,
 )
-from .tactical_simulation import TacticalMiningSimulation
-
 
 __all__ = [
     "Storage",
     "Processor",
+    "Flow",
+    "Entity",
+    "blend_flows",
+    "split_flow",
     "GeologySource",
     "StochasticReserve",
-    "Parcel",
     "HaulRoute",
-    "MineFace",
-    "MetallurgicalPlant",
-    "MillingSetpoints",
     "OperatingModeController",
+    "ModeSetpoints",
     "Stockpile",
     "StochasticFaciesGenerator",
     "OperatingMode",
@@ -33,8 +31,4 @@ __all__ = [
     "AreaReadinessTarget",
     "select_fleet_mode",
     "TacticalReviewController",
-    "TacticalMiningSimulation",
 ]
-
-
-
