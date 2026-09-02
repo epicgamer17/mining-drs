@@ -1,7 +1,14 @@
 """Unit tests for Analytical Face Allocation Equations (Slide 29)."""
 
+import sys
+import os
 import pytest
-from drs_mining.components.allocation import (
+
+# Add the example directory to sys.path for import
+_EXAMPLE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "examples", "two_area_full_hierarchy"))
+sys.path.insert(0, _EXAMPLE_DIR)
+
+from allocation import (
     FaceAllocationResult,
     solve_face_allocation_rates,
 )
@@ -34,7 +41,7 @@ def test_mode_b_allocation():
     assert res.face2_rate == 0.0
     assert res.face1_weight == 1.0
     assert res.face2_weight == 0.0
-    assert res.is_feasible is False  # Target requires 85.18% Ore 1, max face1 is 85%
+    assert res.is_feasible is False
 
 
 def test_contingency_allocation():

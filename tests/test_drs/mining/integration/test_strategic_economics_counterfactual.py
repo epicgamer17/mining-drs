@@ -5,7 +5,7 @@ from examples.two_area_economics.simulation import (
     TwoAreaEconomicSimulation,
     run_two_area_economic_simulation,
 )
-from drs_mining.components.planning import AreaReadinessTarget, StrategicYearTarget
+from drs_mining.components.planning import AreaReadinessTarget
 
 
 def test_area2_counterfactual_npv_positive():

@@ -1,17 +1,12 @@
-"""Integration tests for Area 2 readiness tracking, physical unlock, and deadline monitoring."""
+"""Integration tests for Area 2 readiness tracking and physical unlock."""
 
 import pytest
-from drs_mining.components.planning import (
-    AreaReadinessTarget,
-    StrategicYearTarget,
-    trajectory_progress_ratio,
-    select_fleet_mode,
-)
-from drs_mining.config import FLEET_MODES
-from examples.two_area_readiness.simulation import TwoAreaReadinessSimulation
+from drs_mining.components.planning import AreaReadinessTarget
 
 
 def test_area2_readiness_and_physical_unlock():
+    from examples.two_area_readiness.simulation import TwoAreaReadinessSimulation
+
     sim = TwoAreaReadinessSimulation(
         num_trucks=18,
         area2_readiness_target=AreaReadinessTarget(
@@ -42,6 +37,8 @@ def test_area2_readiness_and_physical_unlock():
 
 
 def test_area2_deadline_miss_persists_after_late_completion():
+    from examples.two_area_readiness.simulation import TwoAreaReadinessSimulation
+
     sim = TwoAreaReadinessSimulation(
         num_trucks=18,
         area2_readiness_target=AreaReadinessTarget(

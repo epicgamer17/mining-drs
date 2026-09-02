@@ -18,7 +18,9 @@ import sys
 from typing import Optional, Tuple, Any
 
 # Ensure repository root is in sys.path
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
@@ -34,7 +36,6 @@ from drs_mining.components import (
     AreaReadinessTarget,
     StrategicYearTarget,
 )
-from drs_mining.components.allocation import solve_face_allocation_rates
 from drs_mining.components.plot import (
     MODE_PALETTE,
     prepare_history,
@@ -87,8 +88,12 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     tot_ore_p1 = p1_last.get("total_mined", face1_p1 + face2_p1)
     tot_ore_p2 = p2_last.get("total_mined", face1_p2 + face2_p2)
 
-    dev_p1 = p1_last.get("cumulative_mine_development", p1_last.get("cumulative_development", 0.0))
-    dev_p2 = p2_last.get("cumulative_mine_development", p2_last.get("cumulative_development", 0.0))
+    dev_p1 = p1_last.get(
+        "cumulative_mine_development", p1_last.get("cumulative_development", 0.0)
+    )
+    dev_p2 = p2_last.get(
+        "cumulative_mine_development", p2_last.get("cumulative_development", 0.0)
+    )
     cap_dev_p1 = p1_last.get("area2_cumulative_development", 0.0)
     cap_dev_p2 = p2_last.get("area2_cumulative_development", 0.0)
 
@@ -138,15 +143,25 @@ def print_full_hierarchy_summary(df_p1: pd.DataFrame, df_p2: pd.DataFrame) -> No
     print(f"{'Metric':<40} {'Policy 1 (Myopic)':<18} {'Policy 2 (Hierarchy)':<18}")
     print("-" * 78)
     print(f"{'Total Ore Mined (t)':<40} {tot_ore_p1:>16,.1f}  {tot_ore_p2:>16,.1f}")
-    print(f"{'  ↳ Face 1 Ore (Level 3) (t)':<40} {face1_p1:>16,.1f}  {face1_p2:>16,.1f}")
-    print(f"{'  ↳ Face 2 Ore (Level 6) (t)':<40} {face2_p1:>16,.1f}  {face2_p2:>16,.1f}")
+    print(
+        f"{'  ↳ Face 1 Ore (Level 3) (t)':<40} {face1_p1:>16,.1f}  {face1_p2:>16,.1f}"
+    )
+    print(
+        f"{'  ↳ Face 2 Ore (Level 6) (t)':<40} {face2_p1:>16,.1f}  {face2_p2:>16,.1f}"
+    )
     print(f"{'Area 2 Unlock Day':<40} {u1_day:>16}  {u2_day:>16}")
     print(f"{'Area 1 Depletion Day':<40} {d1_p1_day:>16}  {d1_p2_day:>16}")
     print(f"{'Area 2 Depletion Day':<40} {d2_p1_day:>16}  {d2_p2_day:>16}")
-    print(f"{'Area 2 Capital Dev Advance (m)':<40} {cap_dev_p1:>16,.1f}  {cap_dev_p2:>16,.1f}")
-    print(f"{'Total Mine Development Advance (m)':<40} {dev_p1:>16,.1f}  {dev_p2:>16,.1f}")
+    print(
+        f"{'Area 2 Capital Dev Advance (m)':<40} {cap_dev_p1:>16,.1f}  {cap_dev_p2:>16,.1f}"
+    )
+    print(
+        f"{'Total Mine Development Advance (m)':<40} {dev_p1:>16,.1f}  {dev_p2:>16,.1f}"
+    )
     print(f"{'Cumulative Net NPV ($M)':<40} {npv_p1/1e6:>16.2f}M {npv_p2/1e6:>16.2f}M")
-    print(f"{'Incremental NPV Benefit ($M)':<40} {'-':>16}  {npv_gain/1e6:>+15.2f}M ({npv_gain_pct:+.1f}%)")
+    print(
+        f"{'Incremental NPV Benefit ($M)':<40} {'-':>16}  {npv_gain/1e6:>+15.2f}M ({npv_gain_pct:+.1f}%)"
+    )
     print("=" * 78 + "\n")
 
 
@@ -169,8 +184,16 @@ def run_full_hierarchy_study(
         min_ore1_production=cfg.planning.annual_min_ore1_production_t,
         min_ore2_production=cfg.planning.annual_min_ore2_production_t,
     )
-    req_dev = area2_required_dev if area2_required_dev is not None else cfg.planning.area2_required_development
-    rdy_day = area2_ready_by_day if area2_ready_by_day is not None else cfg.planning.area2_ready_by_day
+    req_dev = (
+        area2_required_dev
+        if area2_required_dev is not None
+        else cfg.planning.area2_required_development
+    )
+    rdy_day = (
+        area2_ready_by_day
+        if area2_ready_by_day is not None
+        else cfg.planning.area2_ready_by_day
+    )
     area2_target = AreaReadinessTarget(
         required_development=req_dev,
         ready_by_day=rdy_day,
@@ -178,7 +201,11 @@ def run_full_hierarchy_study(
 
     duration_p1 = (total_days * 86400.0) if total_days is not None else float("inf")
     duration_p2 = (total_days * 86400.0) if total_days is not None else float("inf")
-    tot_ore = total_ore_to_extract if total_ore_to_extract is not None else cfg.plant.total_ore_to_extract
+    tot_ore = (
+        total_ore_to_extract
+        if total_ore_to_extract is not None
+        else cfg.plant.total_ore_to_extract
+    )
     warm = warmup_ore if warmup_ore is not None else 0.0
 
     print("Running Policy 1 (Myopic Baseline)...")
@@ -224,11 +251,29 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Full Three-Level Hierarchy Simulation Study"
     )
-    parser.add_argument("--total_days", type=float, default=None, help="Total days to simulate (default: run until Area 1 and Area 2 are both depleted)")
-    parser.add_argument("--total_ore", type=float, default=DEFAULT_CONFIG.plant.total_ore_to_extract, help=f"Total ore to extract across Area 1 and Area 2 (default: {DEFAULT_CONFIG.plant.total_ore_to_extract:,.1f} t)")
+    parser.add_argument(
+        "--total_days",
+        type=float,
+        default=None,
+        help="Total days to simulate (default: run until Area 1 and Area 2 are both depleted)",
+    )
+    parser.add_argument(
+        "--total_ore",
+        type=float,
+        default=DEFAULT_CONFIG.plant.total_ore_to_extract,
+        help=f"Total ore to extract across Area 1 and Area 2 (default: {DEFAULT_CONFIG.plant.total_ore_to_extract:,.1f} t)",
+    )
     parser.add_argument("--warmup_ore", type=float, default=0.0)
-    parser.add_argument("--area2_required_dev", type=float, default=DEFAULT_CONFIG.planning.area2_required_development)
-    parser.add_argument("--area2_ready_by_day", type=float, default=DEFAULT_CONFIG.planning.area2_ready_by_day)
+    parser.add_argument(
+        "--area2_required_dev",
+        type=float,
+        default=DEFAULT_CONFIG.planning.area2_required_development,
+    )
+    parser.add_argument(
+        "--area2_ready_by_day",
+        type=float,
+        default=DEFAULT_CONFIG.planning.area2_ready_by_day,
+    )
     parser.add_argument("--trucks", type=int, default=DEFAULT_CONFIG.fleet.num_trucks)
     parser.add_argument("--seed", type=int, default=DEFAULT_CONFIG.seed)
     parser.add_argument("--no_plot", action="store_true")

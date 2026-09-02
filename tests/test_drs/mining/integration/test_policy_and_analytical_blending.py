@@ -1,7 +1,7 @@
 """Integration tests for Policy Comparison and Analytical Face Allocation."""
 
 import pytest
-from drs_mining.components import StrategicYearTarget, AreaReadinessTarget
+from drs_mining.components import AreaReadinessTarget
 from examples.two_area_full_hierarchy.simulation import (
     TwoAreaFullHierarchyEngine,
     run_full_hierarchy_study,
@@ -49,4 +49,3 @@ def test_full_hierarchy_study_short():
     final_p2_cap = df_p2["area2_cumulative_development"].iloc[-1]
     assert final_p2_cap >= 800.0
     assert final_p2_cap > final_p1_cap
-
