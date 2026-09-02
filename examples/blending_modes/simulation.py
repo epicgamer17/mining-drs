@@ -16,6 +16,7 @@ from drs_mining.components import (
     StochasticReserve,
     HaulRoute,
     MetallurgicalPlant,
+    MillingSetpoints,
     OperatingModeController,
     Stockpile,
     StochasticFaciesGenerator,
@@ -92,22 +93,22 @@ def build_blending_network(
 
     plant = MetallurgicalPlant(
         stockpiles=[ore1_stock, ore2_stock],
+        setpoints=MillingSetpoints(
+            mode_a_ore1=3600.0,
+            mode_a_ore2=2400.0,
+            mode_a_contingency_ore1=3900.0,
+            mode_b_ore1=4600.0,
+            mode_b_ore2=800.0,
+            mode_b_contingency_ore2=2500.0,
+        ),
         target_ore_stock_level=target_ore_stock_level,
         duration_of_contingency_segments=duration_of_contingency_segments,
-        mode_a_ore1_milling_rate=3600.0,
-        mode_a_ore2_milling_rate=2400.0,
-        mode_a_contingency_ore1_milling_rate=3900.0,
-        mode_b_ore1_milling_rate=4600.0,
-        mode_b_ore2_milling_rate=800.0,
-        mode_b_contingency_ore2_milling_rate=2500.0,
     )
 
     mode_controller = OperatingModeController(
         duration_of_production_campaigns=duration_of_production_campaigns,
         duration_of_shutdowns=duration_of_shutdowns,
         critical_ore2_level=critical_ore2_level,
-        target_ore_stock_level=target_ore_stock_level,
-        total_ore_to_extract=total_ore_to_extract,
     )
 
     return mine, plant, mode_controller, ore1_stock, ore2_stock

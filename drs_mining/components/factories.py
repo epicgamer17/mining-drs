@@ -4,7 +4,7 @@ from typing import Sequence, Mapping, List
 import math
 from .stockpiles import Stockpile
 from .mine_face import MineFace
-from .plant import MetallurgicalPlant
+from .plant import MetallurgicalPlant, MillingSetpoints
 from .controllers import OperatingModeController
 from .generators import StochasticFaciesGenerator
 
@@ -104,22 +104,22 @@ def build_tactical_simulation(
 
     plant = MetallurgicalPlant(
         stockpiles=[ore1_stock, ore2_stock],
+        setpoints=MillingSetpoints(
+            mode_a_ore1=mode_a_ore1_milling_rate,
+            mode_a_ore2=mode_a_ore2_milling_rate,
+            mode_a_contingency_ore1=mode_a_contingency_ore1_milling_rate,
+            mode_b_ore1=mode_b_ore1_milling_rate,
+            mode_b_ore2=mode_b_ore2_milling_rate,
+            mode_b_contingency_ore2=mode_b_contingency_ore2_milling_rate,
+        ),
         target_ore_stock_level=target_ore_stock_level,
         duration_of_contingency_segments=duration_of_contingency_segments,
-        mode_a_ore1_milling_rate=mode_a_ore1_milling_rate,
-        mode_a_ore2_milling_rate=mode_a_ore2_milling_rate,
-        mode_a_contingency_ore1_milling_rate=mode_a_contingency_ore1_milling_rate,
-        mode_b_ore1_milling_rate=mode_b_ore1_milling_rate,
-        mode_b_ore2_milling_rate=mode_b_ore2_milling_rate,
-        mode_b_contingency_ore2_milling_rate=mode_b_contingency_ore2_milling_rate,
     )
 
     mode_controller = OperatingModeController(
         duration_of_production_campaigns=duration_of_production_campaigns,
         duration_of_shutdowns=duration_of_shutdowns,
         critical_ore2_level=critical_ore2_level,
-        target_ore_stock_level=target_ore_stock_level,
-        total_ore_to_extract=total_ore_to_extract,
     )
 
     return faces, plant, mode_controller, ore1_stock, ore2_stock

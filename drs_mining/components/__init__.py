@@ -4,7 +4,7 @@ from .generators import StochasticFaciesGenerator
 from .geology import GeologySource, StochasticReserve, Parcel
 from .haulage import HaulRoute
 from .mine_face import MineFace
-from .plant import MetallurgicalPlant
+from .plant import MetallurgicalPlant, MillingSetpoints
 from .controllers import OperatingModeController
 from .stockpiles import Stockpile
 from .planning import (
@@ -24,6 +24,7 @@ __all__ = [
     "HaulRoute",
     "MineFace",
     "MetallurgicalPlant",
+    "MillingSetpoints",
     "OperatingModeController",
     "Stockpile",
     "StochasticFaciesGenerator",

@@ -11,4 +11,5 @@ class RL_MineController(OperatingModeController):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.is_rl_controlled = True
         self.pending_rl_action = None

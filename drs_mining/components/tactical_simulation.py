@@ -28,7 +28,7 @@ from drs_mining.config import (
     DEFAULT_CONFIG,
 )
 from drs_mining.components.modes import OperatingMode
-from drs_mining.components.plant import MetallurgicalPlant
+from drs_mining.components.plant import MetallurgicalPlant, MillingSetpoints
 from drs_mining.components.stockpiles import Stockpile
 from drs_mining.components.controllers import OperatingModeController
 from drs_mining.components.mine_face import MineFace
@@ -214,43 +214,43 @@ class TacticalMiningSimulation(drs.Module):
             duration_of_production_campaigns=campaign_dur,
             duration_of_shutdowns=shutdown_dur,
             critical_ore2_level=self.critical_ore2_level,
-            target_ore_stock_level=self.target_ore_stock_level,
-            total_ore_to_extract=self.total_ore_to_extract,
         )
         self.plant = MetallurgicalPlant(
             stockpiles=[self.ore1_stock, self.ore2_stock],
+            setpoints=MillingSetpoints(
+                mode_a_ore1=(
+                    mode_a_ore1_milling_rate
+                    if mode_a_ore1_milling_rate is not None
+                    else cfg.plant.mode_a_ore1_milling_rate
+                ),
+                mode_a_ore2=(
+                    mode_a_ore2_milling_rate
+                    if mode_a_ore2_milling_rate is not None
+                    else cfg.plant.mode_a_ore2_milling_rate
+                ),
+                mode_a_contingency_ore1=(
+                    mode_a_contingency_ore1_milling_rate
+                    if mode_a_contingency_ore1_milling_rate is not None
+                    else cfg.plant.mode_a_contingency_ore1_milling_rate
+                ),
+                mode_b_ore1=(
+                    mode_b_ore1_milling_rate
+                    if mode_b_ore1_milling_rate is not None
+                    else cfg.plant.mode_b_ore1_milling_rate
+                ),
+                mode_b_ore2=(
+                    mode_b_ore2_milling_rate
+                    if mode_b_ore2_milling_rate is not None
+                    else cfg.plant.mode_b_ore2_milling_rate
+                ),
+                mode_b_contingency_ore2=(
+                    mode_b_contingency_ore2_milling_rate
+                    if mode_b_contingency_ore2_milling_rate is not None
+                    else cfg.plant.mode_b_contingency_ore2_milling_rate
+                ),
+            ),
             target_ore_stock_level=self.target_ore_stock_level,
             duration_of_contingency_segments=contingency_dur,
-            mode_a_ore1_milling_rate=(
-                mode_a_ore1_milling_rate
-                if mode_a_ore1_milling_rate is not None
-                else cfg.plant.mode_a_ore1_milling_rate
-            ),
-            mode_a_ore2_milling_rate=(
-                mode_a_ore2_milling_rate
-                if mode_a_ore2_milling_rate is not None
-                else cfg.plant.mode_a_ore2_milling_rate
-            ),
-            mode_a_contingency_ore1_milling_rate=(
-                mode_a_contingency_ore1_milling_rate
-                if mode_a_contingency_ore1_milling_rate is not None
-                else cfg.plant.mode_a_contingency_ore1_milling_rate
-            ),
-            mode_b_ore1_milling_rate=(
-                mode_b_ore1_milling_rate
-                if mode_b_ore1_milling_rate is not None
-                else cfg.plant.mode_b_ore1_milling_rate
-            ),
-            mode_b_ore2_milling_rate=(
-                mode_b_ore2_milling_rate
-                if mode_b_ore2_milling_rate is not None
-                else cfg.plant.mode_b_ore2_milling_rate
-            ),
-            mode_b_contingency_ore2_milling_rate=(
-                mode_b_contingency_ore2_milling_rate
-                if mode_b_contingency_ore2_milling_rate is not None
-                else cfg.plant.mode_b_contingency_ore2_milling_rate
-            ),
         )
 
         # 4. Strategic / Tactical Planning Controller
