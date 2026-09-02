@@ -40,8 +40,8 @@ def plot_ore_with_modes(
 
     mode_colors = {}
     for i, mode in enumerate(unique_modes):
-        mode_name = getattr(mode, "name", str(mode))
-        mode_str = str(mode).split('.')[-1].upper()
+        mode_name = str(mode)
+        mode_str = mode_name.split('.')[-1].upper()
 
         if mode_name in palette:
             mode_colors[mode] = palette[mode_name]
@@ -555,10 +555,8 @@ def plot_mode_distribution(
     df_sorted = df.copy()
     df_sorted["dt"] = df_sorted[time_col].diff().shift(-1).fillna(0)
 
-    df_sorted["mode_str"] = df_sorted[mode_col].apply(
-        lambda x: getattr(x, "name", str(x))
-    )
-
+    df_sorted["mode_str"] = df_sorted[mode_col].apply(str)
+ 
     durations = df_sorted.groupby("mode_str")["dt"].sum()
     total_time = durations.sum()
 
@@ -582,8 +580,8 @@ def plot_mode_distribution(
 
     colors = []
     for mode in percentages.index:
-        mode_name = getattr(mode, "name", str(mode))
-        mode_str = str(mode).split(".")[-1].upper()
+        mode_name = str(mode)
+        mode_str = mode_name.split(".")[-1].upper()
         if mode_name in palette:
             colors.append(palette[mode_name])
         elif mode_str in palette:
