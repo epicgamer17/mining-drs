@@ -14,16 +14,17 @@ dependencies = [
     "python-drs>=0.1.1",
     "pandas>=1.0",
     "numpy>=1.20",
+    "scipy>=1.8",
+    "shapely>=2.0",
     "matplotlib>=3.5",
-    "rich>=13.0"
+    "seaborn>=0.12",
 ]
 
 [project.optional-dependencies]
-mining = ["gstools>=1.4"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "pytest-benchmark"
+    "pytest-benchmark",
 ]
 rl = [
     "torch>=2.0",
@@ -31,9 +32,8 @@ rl = [
     "wandb",
     "tensordict",
     "einops",
-    "rl-stuff"
 ]
-all = ["mining_drs[mining,rl,dev]"]
+all = ["mining_drs[rl,dev]"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["drs_mining"]

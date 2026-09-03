@@ -5,6 +5,11 @@ from .components import (
     truck_haul_capacity,
     OperatingMode,
     RequireDecision,
+    polygonal_estimation,
+    polygonal_reserve_summary,
+    format_reserve_summary,
+    grade_tonnage_table,
+    plot_polygonal_map,
 )
 
 __all__ = [
@@ -18,4 +23,9 @@ __all__ = [
     "truck_haul_capacity",
     "OperatingMode",
     "RequireDecision",
+    "polygonal_estimation",
+    "polygonal_reserve_summary",
+    "format_reserve_summary",
+    "grade_tonnage_table",
+    "plot_polygonal_map",
 ]
