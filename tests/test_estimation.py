@@ -23,6 +23,12 @@ from drs_mining.components.estimation import (
     format_resource_statement,
     plot_swath_analysis,
     plot_cell_declustering_curve,
+    calculate_cut_off_grade,
+    convert_resource_to_reserve,
+    format_reserve_statement,
+    plot_resource_to_reserve_waterfall,
+    plot_reserve_classification_map,
+    plot_in_situ_vs_diluted_curves,
     _theoretical_covariance,
 )
 
@@ -312,14 +318,26 @@ def test_simple_kriging_mask_extrapolation():
 
     # Unmasked: both evaluated
     est_unmasked, var_unmasked = simple_kriging_grid_estimation(
-        samples_xy, sample_grades, grid_points, mean=2.0, mask_extrapolation=False
+        samples_xy,
+        sample_grades,
+        grid_points,
+        mean=2.0,
+        sill=1.0,
+        range_param=100.0,
+        mask_extrapolation=False,
     )
     assert not np.isnan(est_unmasked[0])
     assert not np.isnan(est_unmasked[1])
 
     # Masked: outside point masked to NaN
     est_masked, var_masked = simple_kriging_grid_estimation(
-        samples_xy, sample_grades, grid_points, mean=2.0, mask_extrapolation=True
+        samples_xy,
+        sample_grades,
+        grid_points,
+        mean=2.0,
+        sill=1.0,
+        range_param=100.0,
+        mask_extrapolation=True,
     )
     assert not np.isnan(est_masked[0])
     assert not np.isnan(var_masked[0])
@@ -371,7 +389,13 @@ def test_ordinary_kriging_max_radius_and_mask_extrapolation():
 
     # Unmasked with max_radius: far point gets NaN, others estimated
     est, var = ordinary_kriging_grid_estimation(
-        samples_xy, sample_grades, grid_points, max_radius=30.0, mask_extrapolation=False
+        samples_xy,
+        sample_grades,
+        grid_points,
+        sill=1.0,
+        range_param=100.0,
+        max_radius=30.0,
+        mask_extrapolation=False,
     )
     assert not np.isnan(est[0])
     assert not np.isnan(est[1])
@@ -379,7 +403,13 @@ def test_ordinary_kriging_max_radius_and_mask_extrapolation():
 
     # Masked: outside point masked to NaN
     est_masked, var_masked = ordinary_kriging_grid_estimation(
-        samples_xy, sample_grades, grid_points, max_radius=30.0, mask_extrapolation=True
+        samples_xy,
+        sample_grades,
+        grid_points,
+        sill=1.0,
+        range_param=100.0,
+        max_radius=30.0,
+        mask_extrapolation=True,
     )
     assert not np.isnan(est_masked[0])
     assert np.isnan(est_masked[1])  # Outside hull -> NaN
@@ -603,6 +633,223 @@ def test_kriging_twin_holes_duplicate_handling():
     assert not np.isnan(ok_est[0])
     # Midpoint between twin hole (avg=1.5) and third hole (3.0): symmetric midpoint should be ~2.25
     assert np.isclose(ok_est[0], 2.25, atol=0.05)
+
+
+def test_kriging_missing_required_sill_and_range_raises_type_error():
+    samples_xy = np.array([[0.0, 0.0], [10.0, 10.0]])
+    grades = np.array([1.0, 2.0])
+    target = np.array([[5.0, 5.0]])
+
+    # Simple kriging requires sill and range_param
+    with pytest.raises(TypeError):
+        simple_kriging_grid_estimation(samples_xy, grades, target, mean=1.5)  # Missing sill & range_param
+
+    # Ordinary kriging requires sill and range_param
+    with pytest.raises(TypeError):
+        ordinary_kriging_grid_estimation(samples_xy, grades, target)  # Missing sill & range_param
+
+
+def test_calculate_cut_off_grade_breakeven_and_marginal():
+    # Base case: Cu mine with $3.80/lb Cu price, $12/t processing, $2/t G&A, $2.50/t mining
+    # Met recovery = 88%, 1% Cu = 22.0462 lbs/t
+    # Net price = $3.80/lb
+    # Revenue per 1% Cu = 3.80 * 0.88 * 22.0462 = $73.7225 / (% Cu)
+    # Breakeven cost = 12 + 2 + 2.50 = $16.50/t -> cutoff = 16.50 / 73.7225 = 0.2238% Cu
+    # Marginal cost = 12 + 2 = $14.00/t -> cutoff = 14.00 / 73.7225 = 0.1899% Cu
+
+    co_be = calculate_cut_off_grade(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=2.50,
+        commodity_price=3.80,
+        metallurgical_recovery=88.0,
+        metal_conversion_factor=22.0462,
+    )
+    assert np.isclose(co_be, 0.2238, atol=0.001)
+
+    co_marg = calculate_cut_off_grade(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=None,  # Marginal / Internal (sunk mining cost)
+        commodity_price=3.80,
+        metallurgical_recovery=88.0,
+        metal_conversion_factor=22.0462,
+    )
+    assert np.isclose(co_marg, 0.1899, atol=0.001)
+    assert co_marg < co_be
+
+    # Royalties and selling deductions reduce net price and increase cut-off grade
+    co_royalty = calculate_cut_off_grade(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=2.50,
+        commodity_price=3.80,
+        selling_cost=0.30,  # $0.30/lb deduction
+        royalty_pct=2.0,    # 2% NSR royalty
+        metallurgical_recovery=88.0,
+        metal_conversion_factor=22.0462,
+    )
+    assert co_royalty > co_be
+
+    # Validation errors
+    with pytest.raises(ValueError, match="negative"):
+        calculate_cut_off_grade(processing_cost=-5.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0)
+    with pytest.raises(ValueError, match="positive"):
+        calculate_cut_off_grade(processing_cost=12.0, ga_cost=2.0, commodity_price=-3.80, metallurgical_recovery=88.0)
+
+
+def test_convert_resource_to_reserve_strict_inferred_exclusion_and_modifying_factors():
+    # 4 blocks: Measured, Indicated, Inferred, and low-grade Measured
+    resource_df = pd.DataFrame({
+        "category": ["Measured", "Indicated", "Inferred", "Measured"],
+        "grade": [1.20, 0.90, 1.50, 0.30],  # 0.30 is below cutoff
+        "tonnes": [1000.0, 2000.0, 5000.0, 1000.0],
+    })
+
+    cutoff = 0.50
+    dilution_pct = 10.0  # 10% dilution with 0.0% grade
+    recovery_pct = 95.0  # 95% mining recovery (5% ore loss)
+
+    reserve_df = convert_resource_to_reserve(
+        resource_df,
+        mining_dilution_pct=dilution_pct,
+        mining_recovery_pct=recovery_pct,
+        cutoff_grade=cutoff,
+        dilution_grade=0.0,
+        allow_inferred=False,
+    )
+
+    # 1. Verification of Inferred exclusion: Inferred block (5000t, grade 1.50%) MUST NOT BE in reserves!
+    assert "Inferred" not in reserve_df["reserve_category"].values
+    assert reserve_df.attrs["excluded_inferred_tonnes"] == 5000.0
+
+    # 2. Verification of Cutoff filtering: block with grade 0.30% (< 0.50%) must be excluded
+    assert len(reserve_df) == 2  # Only Measured (1.20%) and Indicated (0.90%)
+
+    # 3. Verification of category mapping:
+    # Measured -> Proven Reserve, Indicated -> Probable Reserve
+    assert list(reserve_df["reserve_category"]) == ["Proven Reserve", "Probable Reserve"]
+
+    # 4. Verification of Modifying Factors on Block 0 (Measured: 1000t in-situ, 1.20% grade):
+    # Dilution: T_dil = 1000 * 1.10 = 1100t, g_dil = (1000 * 1.20 + 100 * 0.0) / 1100 = 1.0909%
+    # Recovery: T_rom = 1100 * 0.95 = 1045t, g_rom = 1.0909%
+    row0 = reserve_df.iloc[0]
+    assert np.isclose(row0["rom_tonnes"], 1045.0)
+    assert np.isclose(row0["rom_grade"], 1.0909, atol=1e-3)
+    assert np.isclose(row0["contained_metal"], 1045.0 * (1.090909 / 100.0), atol=1e-3)
+
+    # Missing required modifying factor raises TypeError
+    with pytest.raises(TypeError):
+        convert_resource_to_reserve(resource_df, mining_dilution_pct=5.0, cutoff_grade=0.5)  # Missing mining_recovery_pct
+
+
+def test_format_reserve_statement_sig_figs_and_footnotes():
+    reserve_df = pd.DataFrame({
+        "reserve_category": ["Proven Reserve", "Probable Reserve", "Proven Reserve"],
+        "rom_tonnes": [1_234_567.0, 3_456_789.0, 2_345_678.0],
+        "rom_grade": [1.25, 0.85, 1.15],
+    })
+
+    stmt = format_reserve_statement(
+        reserve_df,
+        cutoff_grade=0.50,
+        mining_dilution_pct=6.0,
+        mining_recovery_pct=94.0,
+        commodity_price="$3.80/lb Cu",
+        metallurgical_recovery=88.5,
+        tonnage_unit="Mt",
+        grade_unit="% Cu",
+        metal_unit="kt",
+    )
+
+    # 3 rows: Proven Reserve, Probable Reserve, Total Proven + Probable
+    assert len(stmt) == 3
+    assert list(stmt["Classification"]) == ["Proven Reserve", "Probable Reserve", "Total Proven + Probable"]
+
+    # Verify regulatory footnotes
+    fns = stmt.attrs["footnotes"]
+    assert len(fns) == 5
+    assert any("CIM Definition Standards" in f for f in fns)
+    assert any("Mining Dilution = 6.0%" in f for f in fns)
+    assert any("Mining Recovery = 94.0%" in f for f in fns)
+    assert any("Metallurgical Recovery = 88.5%" in f for f in fns)
+    assert any("Pre-Feasibility" in f for f in fns)
+
+
+def test_plot_resource_to_reserve_waterfall():
+    res_df = pd.DataFrame({
+        "category": ["Measured", "Indicated", "Inferred", "Measured"],
+        "grade": [1.2, 0.9, 1.5, 0.3],
+        "tonnes": [1e6, 2e6, 3e6, 0.5e6],
+    })
+    res_reserve = convert_resource_to_reserve(
+        res_df,
+        mining_dilution_pct=5.0,
+        mining_recovery_pct=95.0,
+        cutoff_grade=0.50,
+        dilution_grade=0.0,
+    )
+
+    fig, (ax1, ax2) = plot_resource_to_reserve_waterfall(
+        res_df,
+        res_reserve,
+        cutoff_grade=0.50,
+        mining_dilution_pct=5.0,
+        mining_recovery_pct=95.0,
+        tonnage_unit="Mt",
+        metal_unit="kt",
+        grade_unit="% Cu",
+    )
+    assert fig is not None
+    assert ax1.get_ylabel().startswith("Ore Tonnage")
+    assert ax2.get_ylabel().startswith("Contained Metal")
+    plt.close(fig)
+
+
+def test_plot_reserve_classification_map():
+    block_model = pd.DataFrame({
+        "x": [10.0, 20.0, 30.0, 40.0],
+        "y": [10.0, 20.0, 30.0, 40.0],
+        "status": ["Proven Reserve", "Probable Reserve", "Inferred Resource (Excluded)", "Sub-Economic / Waste"],
+    })
+    boundary = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0), (0.0, 50.0)]
+    drillholes = pd.DataFrame({"x": [15.0, 35.0], "y": [15.0, 35.0]})
+
+    fig, ax = plot_reserve_classification_map(
+        block_model,
+        boundary=boundary,
+        drillholes=drillholes,
+        title="Test Classification Map",
+    )
+    assert fig is not None
+    assert ax.get_title() == "Test Classification Map"
+    plt.close(fig)
+
+
+def test_plot_in_situ_vs_diluted_curves():
+    cutoffs = [0.0, 0.4, 0.8, 1.2]
+    insitu_gt = pd.DataFrame({
+        "ore_tonnes": [10e6, 8e6, 5e6, 2e6],
+        "ore_grade": [1.0, 1.2, 1.5, 1.8],
+    }, index=cutoffs)
+
+    diluted_gt = pd.DataFrame({
+        "ore_tonnes": [10.5e6, 8.4e6, 5.2e6, 2.1e6],
+        "ore_grade": [0.95, 1.14, 1.42, 1.71],
+    }, index=cutoffs)
+
+    fig, ax = plot_in_situ_vs_diluted_curves(
+        insitu_gt,
+        diluted_gt,
+        grade_unit="% Cu",
+        tonnage_unit="Mt",
+        title="Test Grade-Tonnage Shift",
+    )
+    assert fig is not None
+    assert ax.get_title() == "Test Grade-Tonnage Shift"
+    plt.close(fig)
+
+
 
 
 

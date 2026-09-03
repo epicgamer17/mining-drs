@@ -658,10 +658,10 @@ def simple_kriging_grid_estimation(
     sample_grades: np.ndarray,
     grid_points: np.ndarray,
     mean: float,
+    sill: float,
+    range_param: float,
     variogram_model: str = "spherical",
     nugget: float = 0.0,
-    sill: float = 1.0,
-    range_param: float = 100.0,
     k_neighbors: int = 16,
     max_radius: Optional[float] = None,
     mask_extrapolation: bool = False,
@@ -755,7 +755,9 @@ def simple_kriging_grid_estimation(
             h_matrix = np.linalg.norm(diff_matrix, axis=2)
             np.fill_diagonal(h_matrix, np.inf)
             if np.any(h_matrix < 1e-6):
-                unique_coords, inverse_indices = np.unique(coords_m.round(decimals=5), axis=0, return_inverse=True)
+                unique_coords, inverse_indices = np.unique(
+                    coords_m.round(decimals=5), axis=0, return_inverse=True
+                )
                 if len(unique_coords) < k_m:
                     new_grades = np.zeros(len(unique_coords), dtype=float)
                     for u_idx in range(len(unique_coords)):
@@ -803,10 +805,10 @@ def ordinary_kriging_grid_estimation(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
     grid_points: np.ndarray,
+    sill: float,
+    range_param: float,
     variogram_model: str = "spherical",
     nugget: float = 0.0,
-    sill: float = 1.0,
-    range_param: float = 100.0,
     k_neighbors: int = 16,
     max_radius: Optional[float] = None,
     mask_extrapolation: bool = False,
@@ -903,7 +905,9 @@ def ordinary_kriging_grid_estimation(
             h_matrix = np.linalg.norm(diff_matrix, axis=2)
             np.fill_diagonal(h_matrix, np.inf)
             if np.any(h_matrix < 1e-6):
-                unique_coords, inverse_indices = np.unique(coords_m.round(decimals=5), axis=0, return_inverse=True)
+                unique_coords, inverse_indices = np.unique(
+                    coords_m.round(decimals=5), axis=0, return_inverse=True
+                )
                 if len(unique_coords) < k_m:
                     new_grades = np.zeros(len(unique_coords), dtype=float)
                     for u_idx in range(len(unique_coords)):
@@ -925,9 +929,7 @@ def ordinary_kriging_grid_estimation(
         K_m[np.diag_indices(k_m)] += 1e-9  # Regularizer to guarantee invertibility
 
         # Build sample-to-target covariance vector k0_m of shape (k_m,)
-        k0_m = _theoretical_covariance(
-            d_m, variogram_model, nugget, sill, range_param
-        )
+        k0_m = _theoretical_covariance(d_m, variogram_model, nugget, sill, range_param)
 
         # Build augmented Ordinary Kriging matrix K_aug of shape (k_m + 1, k_m + 1):
         # [ K_m   1 ]
@@ -1072,8 +1074,15 @@ def plot_grade_tonnage_curve(
         labels.append("Metal Recovery (%)")
 
     ax1.set_xlabel(f"Cutoff Grade ({grade_unit})", fontsize=11, fontweight="bold")
-    ax1.set_ylabel(f"Ore Tonnage ({tonnage_unit})", fontsize=11, fontweight="bold", color="#1f77b4")
-    ax2.set_ylabel(f"Average Ore Grade ({grade_unit})", fontsize=11, fontweight="bold", color="#d62728")
+    ax1.set_ylabel(
+        f"Ore Tonnage ({tonnage_unit})", fontsize=11, fontweight="bold", color="#1f77b4"
+    )
+    ax2.set_ylabel(
+        f"Average Ore Grade ({grade_unit})",
+        fontsize=11,
+        fontweight="bold",
+        color="#d62728",
+    )
     ax1.tick_params(axis="y", labelcolor="#1f77b4")
     ax2.tick_params(axis="y", labelcolor="#d62728")
     ax1.grid(True, linestyle=":", alpha=0.6)
@@ -1183,11 +1192,13 @@ def cell_declustering(
         means.append(mean_val)
         variances.append(var_val)
 
-    sensitivity_df = pd.DataFrame({
-        "cell_size": cell_sizes_list,
-        "declustered_mean": means,
-        "declustered_variance": variances,
-    })
+    sensitivity_df = pd.DataFrame(
+        {
+            "cell_size": cell_sizes_list,
+            "declustered_mean": means,
+            "declustered_variance": variances,
+        }
+    )
 
     if min_mean:
         opt_idx = int(sensitivity_df["declustered_mean"].idxmin())
@@ -1249,7 +1260,9 @@ def plot_cell_declustering_curve(
         optimal_cell_size = float(cell_sizes[opt_idx])
         optimal_mean = float(means[opt_idx])
     else:
-        opt_matches = sensitivity_df[np.isclose(sensitivity_df["cell_size"], optimal_cell_size)]
+        opt_matches = sensitivity_df[
+            np.isclose(sensitivity_df["cell_size"], optimal_cell_size)
+        ]
         if len(opt_matches) > 0:
             optimal_mean = float(opt_matches["declustered_mean"].iloc[0])
         else:
@@ -1291,7 +1304,9 @@ def plot_cell_declustering_curve(
         label=f"Optimal Mean ({optimal_mean:.3f}{grade_unit})",
     )
 
-    bias_pct = ((naive_mean - optimal_mean) / naive_mean) * 100.0 if naive_mean != 0 else 0.0
+    bias_pct = (
+        ((naive_mean - optimal_mean) / naive_mean) * 100.0 if naive_mean != 0 else 0.0
+    )
     ax.annotate(
         f"Selected: {optimal_cell_size:.1f}m\nBias Removed: {bias_pct:+.1f}%",
         xy=(optimal_cell_size, optimal_mean),
@@ -1304,7 +1319,9 @@ def plot_cell_declustering_curve(
     )
 
     ax.set_xlabel("Declustering Cell Size (m)", fontsize=11, fontweight="bold")
-    ax.set_ylabel(f"Declustered Mean Grade ({grade_unit})", fontsize=11, fontweight="bold")
+    ax.set_ylabel(
+        f"Declustered Mean Grade ({grade_unit})", fontsize=11, fontweight="bold"
+    )
     ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
     ax.grid(True, linestyle=":", alpha=0.6)
     ax.legend(loc="upper right", framealpha=0.9, fontsize=9)
@@ -1544,18 +1561,14 @@ def format_resource_statement(
 
     # Extract raw data by standardized category
     raw_stats: Dict[str, Dict[str, float]] = {}
-    standardized_cats = (
-        valid_blocks[category_col].astype(str).str.strip().str.lower()
-    )
+    standardized_cats = valid_blocks[category_col].astype(str).str.strip().str.lower()
 
     for key, formal_name in cat_names.items():
         sub = valid_blocks[standardized_cats == key]
         if len(sub) > 0:
             tonnes = float(sub[tonnes_col].sum())
             metal_raw = float((sub[tonnes_col] * sub[grade_col] * metal_factor).sum())
-            grade = (
-                float(metal_raw / (tonnes * metal_factor)) if tonnes > 0 else 0.0
-            )
+            grade = float(metal_raw / (tonnes * metal_factor)) if tonnes > 0 else 0.0
             raw_stats[formal_name] = {
                 "tonnes": tonnes,
                 "grade": grade,
@@ -1567,9 +1580,7 @@ def format_resource_statement(
     # Calculate raw Measured + Indicated subtotal
     mi_tonnes = raw_stats["Measured"]["tonnes"] + raw_stats["Indicated"]["tonnes"]
     mi_metal = raw_stats["Measured"]["metal"] + raw_stats["Indicated"]["metal"]
-    mi_grade = (
-        float(mi_metal / (mi_tonnes * metal_factor)) if mi_tonnes > 0 else 0.0
-    )
+    mi_grade = float(mi_metal / (mi_tonnes * metal_factor)) if mi_tonnes > 0 else 0.0
     raw_stats["Measured + Indicated"] = {
         "tonnes": mi_tonnes,
         "grade": mi_grade,
@@ -1727,7 +1738,9 @@ def plot_swath_analysis(
     # Establish swath bins
     valid_blocks = block_model.dropna(subset=[coord_col, grade_col]).copy()
     if valid_blocks.empty:
-        raise ValueError(f"No valid blocks with coordinates in '{coord_col}' and '{grade_col}'.")
+        raise ValueError(
+            f"No valid blocks with coordinates in '{coord_col}' and '{grade_col}'."
+        )
 
     min_coord = float(valid_blocks[coord_col].min())
     max_coord = float(valid_blocks[coord_col].max())
@@ -1747,12 +1760,17 @@ def plot_swath_analysis(
     slice_tonnes = []
     valid_centers = []
 
-    has_val = validation_grade_col is not None and validation_grade_col in valid_blocks.columns
+    has_val = (
+        validation_grade_col is not None
+        and validation_grade_col in valid_blocks.columns
+    )
     has_tonnes = tonnes_col is not None and tonnes_col in valid_blocks.columns
 
     for k in range(n_bins):
         low, high = bins[k], bins[k + 1]
-        in_bin = valid_blocks[(valid_blocks[coord_col] >= low) & (valid_blocks[coord_col] < high)]
+        in_bin = valid_blocks[
+            (valid_blocks[coord_col] >= low) & (valid_blocks[coord_col] < high)
+        ]
         if len(in_bin) == 0:
             continue
 
@@ -1781,11 +1799,17 @@ def plot_swath_analysis(
     # Aggregate drillholes slices if provided
     dh_centers = []
     dh_grades = []
-    if drillholes is not None and not drillholes.empty and coord_col in drillholes.columns:
+    if (
+        drillholes is not None
+        and not drillholes.empty
+        and coord_col in drillholes.columns
+    ):
         valid_dh = drillholes.dropna(subset=[coord_col, drillhole_grade_col])
         for k in range(n_bins):
             low, high = bins[k], bins[k + 1]
-            in_bin_dh = valid_dh[(valid_dh[coord_col] >= low) & (valid_dh[coord_col] < high)]
+            in_bin_dh = valid_dh[
+                (valid_dh[coord_col] >= low) & (valid_dh[coord_col] < high)
+            ]
             if len(in_bin_dh) > 0:
                 dh_centers.append(bin_centers[k])
                 dh_grades.append(float(in_bin_dh[drillhole_grade_col].mean()))
@@ -1870,15 +1894,861 @@ def plot_swath_analysis(
     labels.append(tonnage_label)
 
     ax1.set_xlabel(axis_label, fontsize=11, fontweight="bold")
-    ax1.set_ylabel(f"Average Grade ({grade_unit})", fontsize=11, fontweight="bold", color="#1f77b4")
+    ax1.set_ylabel(
+        f"Average Grade ({grade_unit})", fontsize=11, fontweight="bold", color="#1f77b4"
+    )
     ax1.tick_params(axis="y", labelcolor="#1f77b4")
     ax1.grid(True, linestyle=":", alpha=0.6)
     ax1.set_zorder(ax2.get_zorder() + 1)
     ax1.patch.set_visible(False)
 
-    plot_title = title if title else f"Swath Plot (Local Drift Analysis) Along {default_dir}"
+    plot_title = (
+        title if title else f"Swath Plot (Local Drift Analysis) Along {default_dir}"
+    )
     ax1.set_title(plot_title, fontsize=12, fontweight="bold", pad=12)
     ax1.legend(lines, labels, loc="upper right", framealpha=0.9, fontsize=9)
 
     fig.tight_layout()
     return fig, ax1
+
+
+# =============================================================================
+# RESOURCE TO RESERVE DELINEATION (CIM / NI 43-101 / JORC MODIFYING FACTORS)
+# =============================================================================
+
+
+def calculate_cut_off_grade(
+    processing_cost: float,
+    ga_cost: float,
+    commodity_price: float,
+    metallurgical_recovery: float,
+    mining_cost: Optional[float] = None,
+    selling_cost: float = 0.0,
+    royalty_pct: float = 0.0,
+    metal_conversion_factor: float = 1.0,
+) -> float:
+    """Calculates engineering cut-off grades with zero assumed default costs or prices.
+
+    In mining economics (Lane, 1988; Taylor, 1972):
+    - Breakeven Cut-Off Grade: Covers total costs (mining + processing + G&A + selling).
+      Used to delineate the ultimate economic pit limit / stope envelope.
+    - Marginal / Internal Cut-Off Grade: Covers processing + G&A + selling (mining cost
+      is treated as sunk because the rock must be excavated anyway to access deeper ore).
+
+    Parameters
+    ----------
+    processing_cost : float
+        Processing / milling cost per tonne of ore ($/t ore). Required.
+    ga_cost : float
+        General & Administrative (G&A) overhead cost per tonne of ore ($/t ore). Required.
+    commodity_price : float
+        Base commodity price per unit metal ($/lb, $/oz, $/t). Required.
+    metallurgical_recovery : float
+        Plant metallurgical recovery percentage (0 < recovery <= 100.0) or fraction
+        (0 < recovery <= 1.0). Required.
+    mining_cost : float, optional
+        Mining cost per tonne of rock ($/t rock).
+        If provided: calculates Breakeven Cut-Off Grade.
+        If None: calculates Marginal / Internal Cut-Off Grade.
+    selling_cost : float, default 0.0
+        Refining, smelting, freight, and realization deduction per unit metal ($/unit).
+    royalty_pct : float, default 0.0
+        Net Smelter Return (NSR) or gross revenue royalty percentage (e.g., 2.0 for 2%).
+    metal_conversion_factor : float, default 1.0
+        Multiplier to convert grade unit into pricing unit:
+        - Copper (% Cu grade to $/lb price): 1% Cu = 22.0462 lbs Cu per metric tonne -> 22.0462
+        - Gold (g/t Au grade to $/oz price): 1 g/t = 1/31.1035 oz/t -> 0.0321507
+        - Base metals in $/tonne metal with % grade: 1% = 0.01 tonnes metal -> 0.01
+
+    Returns
+    -------
+    float
+        Economic cut-off grade in the corresponding grade unit.
+    """
+    if processing_cost < 0 or ga_cost < 0:
+        raise ValueError("Operating costs (processing, G&A) cannot be negative.")
+    if commodity_price <= 0:
+        raise ValueError("Commodity price must be strictly positive.")
+
+    # Normalize metallurgical recovery
+    # TODO: somewhat dangerous here.
+    rec = (
+        metallurgical_recovery / 100.0
+        if metallurgical_recovery > 1.0
+        else metallurgical_recovery
+    )
+    if rec <= 0.0 or rec > 1.0:
+        raise ValueError(
+            f"Metallurgical recovery must be in (0, 100]%, got {metallurgical_recovery}"
+        )
+
+    # Net realized revenue per unit metal after deductions and royalties
+    royalty_factor = max(0.0, 1.0 - (royalty_pct / 100.0))
+    net_price = (commodity_price - selling_cost) * royalty_factor
+    if net_price <= 0:
+        raise ValueError(
+            f"Net price ({net_price:.4f}) is non-positive after selling deductions and royalties."
+        )
+
+    revenue_per_grade_unit = net_price * rec * metal_conversion_factor
+
+    total_ore_cost = processing_cost + ga_cost
+    if mining_cost is not None:
+        if mining_cost < 0:
+            raise ValueError("Mining cost cannot be negative.")
+        total_cost = total_ore_cost + mining_cost
+    else:
+        total_cost = total_ore_cost
+
+    return float(total_cost / revenue_per_grade_unit)
+
+
+def convert_resource_to_reserve(
+    resource_df: pd.DataFrame,
+    mining_dilution_pct: float,
+    mining_recovery_pct: float,
+    cutoff_grade: float,
+    dilution_grade: float = 0.0,
+    category_col: str = "category",
+    grade_col: str = "grade",
+    tonnes_col: str = "tonnes",
+    allow_inferred: bool = False,
+) -> pd.DataFrame:
+    """Converts classified Mineral Resources into Mineral Reserves applying Modifying Factors.
+
+    Under CIM Definition Standards (2014), JORC Code (2012), and SEC S-K 1300:
+    1. 'Measured' Mineral Resources convert into 'Proven' (or 'Proved') Reserves.
+    2. 'Indicated' Mineral Resources convert into 'Probable' Reserves.
+    3. 'Inferred' Mineral Resources CANNOT be converted into Mineral Reserves under
+       any circumstances due to low geological confidence. They are excluded by default.
+    4. Applies Mining Dilution: waste rock inadvertently blasted and hauled with ore,
+       increasing run-of-mine tonnage and lowering delivered head grade.
+    5. Applies Mining Recovery (Ore Loss): unrecovered ore due to blast scatter or
+       stability pillars, reducing delivered tonnage.
+
+    Parameters
+    ----------
+    resource_df : pd.DataFrame
+        Classified block model or polygon table containing classification, grade, and tonnage.
+    mining_dilution_pct : float
+        Mining dilution percentage (e.g., 5.0 for 5% dilution). Required without default.
+    mining_recovery_pct : float
+        Mining extraction recovery percentage (e.g., 95.0 for 95% recovery, meaning 5% ore loss).
+        Required without default.
+    cutoff_grade : float
+        Economic cut-off grade for reserve delineation. Material below cutoff is excluded.
+        Required without default.
+    dilution_grade : float, default 0.0
+        Grade of the diluting waste or contact rock.
+    category_col : str, default "category"
+        Column containing resource classifications ('Measured', 'Indicated', 'Inferred').
+    grade_col : str, default "grade"
+        In-situ grade column name.
+    tonnes_col : str, default "tonnes"
+        In-situ tonnage column name.
+    allow_inferred : bool, default False
+        Strict compliance enforcement. If False (default), Inferred material is strictly
+        excluded from reserves in compliance with international reporting codes.
+
+    Returns
+    -------
+    pd.DataFrame
+        Run-of-Mine (ROM) Mineral Reserve DataFrame with columns:
+        - 'reserve_category': 'Proven Reserve' or 'Probable Reserve'
+        - 'rom_tonnes': Diluted and recovered ore tonnage delivered to plant
+        - 'rom_grade': Diluted head grade delivered to plant
+        - 'contained_metal': Contained metal after dilution and recovery
+        - 'in_situ_tonnes', 'in_situ_grade': Original resource values before modifying factors
+        - Spatial coordinate columns ('x', 'y', 'z') if present in resource_df.
+    """
+    for col in (category_col, grade_col, tonnes_col):
+        if col not in resource_df.columns:
+            raise ValueError(
+                f"Required column '{col}' not found in resource DataFrame."
+            )
+
+    if mining_dilution_pct < 0.0:
+        raise ValueError(
+            f"Mining dilution cannot be negative, got {mining_dilution_pct}%"
+        )
+    if mining_recovery_pct <= 0.0 or mining_recovery_pct > 100.0:
+        raise ValueError(
+            f"Mining recovery must be in (0, 100]%, got {mining_recovery_pct}%"
+        )
+
+    # Normalize category strings for robust matching
+    cat_series = resource_df[category_col].astype(str).str.strip().str.capitalize()
+
+    # Segregate and audit Inferred material
+    is_inferred = cat_series.str.startswith("Infer")
+    n_inferred = int(is_inferred.sum())
+    inferred_tonnes = float(resource_df.loc[is_inferred, tonnes_col].sum())
+
+    if n_inferred > 0 and not allow_inferred:
+        # Strictly excluded from reserves
+        eligible_mask = ~is_inferred
+    else:
+        eligible_mask = np.ones(len(resource_df), dtype=bool)
+
+    # Filter by economic cut-off grade
+    above_cutoff = eligible_mask & (resource_df[grade_col] >= cutoff_grade)
+    res_subset = resource_df.loc[above_cutoff].copy()
+
+    if len(res_subset) == 0:
+        empty_df = pd.DataFrame(
+            columns=[
+                "reserve_category",
+                "rom_tonnes",
+                "rom_grade",
+                "contained_metal",
+                "in_situ_tonnes",
+                "in_situ_grade",
+            ]
+        )
+        empty_df.attrs["excluded_inferred_tonnes"] = inferred_tonnes
+        return empty_df
+
+    # Map categories to reserve classifications
+    subset_cats = cat_series.loc[above_cutoff]
+    reserve_cats = np.empty(len(res_subset), dtype=object)
+
+    is_meas = subset_cats.str.startswith("Meas")
+    is_ind = subset_cats.str.startswith("Ind")
+
+    reserve_cats[is_meas.to_numpy()] = "Proven Reserve"
+    reserve_cats[is_ind.to_numpy()] = "Probable Reserve"
+
+    # Any remaining (e.g. Inferred if allow_inferred was true, or unclassified)
+    unmapped = ~(is_meas | is_ind)
+    if unmapped.any():
+        reserve_cats[unmapped.to_numpy()] = "Probable Reserve"
+
+    # In-situ values
+    t_insitu = res_subset[tonnes_col].to_numpy(dtype=float)
+    g_insitu = res_subset[grade_col].to_numpy(dtype=float)
+
+    # 1. Apply Mining Dilution:
+    # T_dil = T_insitu * (1 + Dilution)
+    # g_dil = (T_insitu * g_insitu + T_waste * g_waste) / T_dil
+    dil_frac = mining_dilution_pct / 100.0
+    t_diluted = t_insitu * (1.0 + dil_frac)
+    t_waste = t_diluted - t_insitu
+    g_diluted = (t_insitu * g_insitu + t_waste * float(dilution_grade)) / np.maximum(
+        1e-9, t_diluted
+    )
+
+    # 2. Apply Mining Recovery (Ore Loss):
+    # T_rom = T_diluted * Mining_Recovery
+    # g_rom = g_diluted (ore loss drops mass, but does not alter blended head grade)
+    rec_frac = mining_recovery_pct / 100.0
+    t_rom = t_diluted * rec_frac
+    g_rom = g_diluted
+    contained_metal = t_rom * (g_rom / 100.0)
+
+    reserve_df = pd.DataFrame(
+        {
+            "reserve_category": reserve_cats,
+            "rom_tonnes": t_rom,
+            "rom_grade": g_rom,
+            "contained_metal": contained_metal,
+            "in_situ_tonnes": t_insitu,
+            "in_situ_grade": g_insitu,
+        },
+        index=res_subset.index,
+    )
+
+    # Preserve spatial coordinates if present
+    for coord in ("x", "y", "z", "easting", "northing", "elevation"):
+        if coord in res_subset.columns:
+            reserve_df[coord] = res_subset[coord]
+
+    # Attach conversion audit metadata
+    reserve_df.attrs["excluded_inferred_tonnes"] = inferred_tonnes
+    reserve_df.attrs["mining_dilution_pct"] = mining_dilution_pct
+    reserve_df.attrs["mining_recovery_pct"] = mining_recovery_pct
+    reserve_df.attrs["cutoff_grade"] = cutoff_grade
+    return reserve_df
+
+
+def format_reserve_statement(
+    reserve_df: pd.DataFrame,
+    cutoff_grade: float,
+    mining_dilution_pct: float,
+    mining_recovery_pct: float,
+    commodity_price: str,
+    metallurgical_recovery: float,
+    category_col: str = "reserve_category",
+    grade_col: str = "rom_grade",
+    tonnes_col: str = "rom_tonnes",
+    grade_unit: str = "% Cu",
+    tonnage_unit: str = "Mt",
+    metal_unit: str = "kt",
+    rpeee_constraint: str = "Constrained within engineered final pit design",
+    sig_figs: Optional[dict[str, int]] = None,
+) -> pd.DataFrame:
+    """Formats an official NI 43-101 / JORC compliant Mineral Reserve Statement.
+
+    Enforces:
+    - Segregation into Proven, Probable, and Total Proven + Probable reserves.
+    - Tiered significant figures rounding to eliminate false precision.
+    - Mandatory regulatory footnotes disclosing all applied Modifying Factors.
+
+    Parameters
+    ----------
+    reserve_df : pd.DataFrame
+        Mineral reserve DataFrame generated by convert_resource_to_reserve.
+    cutoff_grade : float
+        Cut-off grade used for reserve delineation. Required without default.
+    mining_dilution_pct : float
+        Mining dilution percentage applied. Required without default.
+    mining_recovery_pct : float
+        Mining recovery percentage applied. Required without default.
+    commodity_price : str
+        Commodity price disclosure (e.g., "$3.80/lb Cu"). Required without default.
+    metallurgical_recovery : float
+        Metallurgical recovery percentage (e.g., 88.0). Required without default.
+    category_col : str, default "reserve_category"
+        Column indicating reserve classification.
+    grade_col : str, default "rom_grade"
+        Run-of-mine grade column name.
+    tonnes_col : str, default "rom_tonnes"
+        Run-of-mine tonnage column name.
+    grade_unit : str, default "% Cu"
+        Grade display unit.
+    tonnage_unit : str, default "Mt"
+        Tonnage display unit ("t", "kt", "Mt").
+    metal_unit : str, default "kt"
+        Contained metal display unit.
+    rpeee_constraint : str, default "Constrained within engineered final pit design"
+        Engineering design constraint statement.
+    sig_figs : dict, optional
+        Custom significant figures per category.
+
+    Returns
+    -------
+    pd.DataFrame
+        Formatted Mineral Reserve Statement with attached compliance footnotes.
+    """
+    for col in (category_col, grade_col, tonnes_col):
+        if col not in reserve_df.columns:
+            raise ValueError(f"Required column '{col}' not found in reserve DataFrame.")
+
+    default_sig_figs = {
+        "Proven Reserve": 3,
+        "Probable Reserve": 2,
+        "Total Proven + Probable": 3,
+    }
+    if sig_figs:
+        default_sig_figs.update(sig_figs)
+
+    # Unit scaling
+    t_scale = 1e6 if tonnage_unit == "Mt" else (1e3 if tonnage_unit == "kt" else 1.0)
+    m_scale = 1e3 if metal_unit == "kt" else (1e6 if metal_unit == "Mt" else 1.0)
+
+    rows = []
+    # 1. Proven Reserves
+    prov_mask = reserve_df[category_col].astype(str).str.strip().str.startswith("Prov")
+    prov_df = reserve_df.loc[prov_mask]
+
+    t_prov = float(prov_df[tonnes_col].sum())
+    g_prov = (
+        float((prov_df[tonnes_col] * prov_df[grade_col]).sum() / max(1e-9, t_prov))
+        if t_prov > 0
+        else 0.0
+    )
+    m_prov = t_prov * (g_prov / 100.0) if t_prov > 0 else 0.0
+
+    # 2. Probable Reserves
+    prob_mask = reserve_df[category_col].astype(str).str.strip().str.startswith("Prob")
+    prob_df = reserve_df.loc[prob_mask]
+
+    t_prob = float(prob_df[tonnes_col].sum())
+    g_prob = (
+        float((prob_df[tonnes_col] * prob_df[grade_col]).sum() / max(1e-9, t_prob))
+        if t_prob > 0
+        else 0.0
+    )
+    m_prob = t_prob * (g_prob / 100.0) if t_prob > 0 else 0.0
+
+    # 3. Total Proven + Probable
+    t_tot = t_prov + t_prob
+    g_tot = (
+        float((t_prov * g_prov + t_prob * g_prob) / max(1e-9, t_tot))
+        if t_tot > 0
+        else 0.0
+    )
+    m_tot = t_prov * (g_prov / 100.0) + t_prob * (g_prob / 100.0)
+
+    for cat_name, t_val, g_val, m_val in [
+        ("Proven Reserve", t_prov, g_prov, m_prov),
+        ("Probable Reserve", t_prob, g_prob, m_prob),
+        ("Total Proven + Probable", t_tot, g_tot, m_tot),
+    ]:
+        n_sf = default_sig_figs.get(cat_name, 3)
+        rows.append(
+            {
+                "Classification": cat_name,
+                f"Cutoff ({grade_unit})": f"{cutoff_grade:.2f}",
+                f"Tonnage ({tonnage_unit})": _round_sig_figs(t_val / t_scale, n_sf),
+                f"Grade ({grade_unit})": _round_sig_figs(g_val, n_sf),
+                f"Contained Metal ({metal_unit})": _round_sig_figs(
+                    m_val / m_scale, n_sf
+                ),
+            }
+        )
+
+    statement_df = pd.DataFrame(rows)
+
+    # Mandatory CIM / JORC Compliance Footnotes
+    footnotes = [
+        "1. Mineral Reserves are reported in accordance with CIM Definition Standards (2014) / JORC Code (2012).",
+        "2. Tonnages, grades, and contained metal are Run-of-Mine (ROM) and rounded to reflect relative uncertainty. Totals may not sum due to rounding.",
+        "3. Mineral Reserves represent the economically mineable part of Measured and Indicated Mineral Resources demonstrated by at least a Pre-Feasibility Study.",
+        (
+            f"4. Modifying Factors applied: Mining Dilution = {mining_dilution_pct:.1f}%, Mining Recovery = {mining_recovery_pct:.1f}%, "
+            f"Metallurgical Recovery = {metallurgical_recovery:.1f}%, Base Cutoff Grade = {cutoff_grade:.2f}{grade_unit}, Commodity Price = {commodity_price}."
+        ),
+        f"5. {rpeee_constraint}.",
+    ]
+    statement_df.attrs["footnotes"] = footnotes
+    return statement_df
+
+
+# =============================================================================
+# RESERVE VISUALIZATION (WATERFALL BRIDGES, MAPS & GRADE-TONNAGE SHIFT)
+# =============================================================================
+
+
+def plot_resource_to_reserve_waterfall(
+    resource_df: pd.DataFrame,
+    reserve_df: pd.DataFrame,
+    cutoff_grade: float,
+    mining_dilution_pct: float,
+    mining_recovery_pct: float,
+    dilution_grade: float = 0.0,
+    category_col: str = "category",
+    grade_col: str = "grade",
+    tonnes_col: str = "tonnes",
+    tonnage_unit: str = "Mt",
+    metal_unit: str = "kt",
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: tuple[float, float] = (16, 7),
+) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
+    """Generates dual-panel waterfall reconciliation charts (Tonnage & Contained Metal).
+
+    Reconciles in-situ Measured & Indicated Mineral Resources to Run-of-Mine (ROM)
+    Mineral Reserves through each modifying factor step:
+    1. In-Situ M&I Resource Inventory
+    2. Sub-Economic Cutoff Truncation (< Cutoff Grade)
+    3. Mining Ore Loss (Recovery < 100%)
+    4. Mining Dilution Tonnage Added
+    5. Final Delivered Run-of-Mine (ROM) Mineral Reserve
+
+    Parameters
+    ----------
+    resource_df : pd.DataFrame
+        Classified mineral resource block model / polygon table.
+    reserve_df : pd.DataFrame
+        Run-of-Mine mineral reserve table produced by convert_resource_to_reserve.
+    cutoff_grade : float
+        Economic cut-off grade applied.
+    mining_dilution_pct : float
+        Mining dilution percentage applied.
+    mining_recovery_pct : float
+        Mining recovery percentage applied.
+    dilution_grade : float, default 0.0
+        Grade of diluting rock.
+    category_col : str, default "category"
+        Column in resource_df with classifications.
+    grade_col : str, default "grade"
+        In-situ grade column name.
+    tonnes_col : str, default "tonnes"
+        In-situ tonnage column name.
+    tonnage_unit : str, default "Mt"
+        Tonnage scale unit ("t", "kt", "Mt").
+    metal_unit : str, default "kt"
+        Metal scale unit ("t", "kt", "Mt").
+    grade_unit : str, default "% Cu"
+        Grade display unit.
+    title : str, optional
+        Overall figure title.
+    figsize : tuple[float, float], default (16, 7)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]
+        Matplotlib figure and pair of axes (tonnage_ax, metal_ax).
+    """
+    t_scale = 1e6 if tonnage_unit == "Mt" else (1e3 if tonnage_unit == "kt" else 1.0)
+    m_scale = 1e3 if metal_unit == "kt" else (1e6 if metal_unit == "Mt" else 1.0)
+
+    # 1. Filter for Measured & Indicated in-situ resource
+    cat_s = resource_df[category_col].astype(str).str.strip().str.capitalize()
+    is_mi = cat_s.str.startswith("Meas") | cat_s.str.startswith("Ind")
+    mi_df = resource_df.loc[is_mi].copy()
+
+    # Step 1: In-Situ M&I
+    t_step1 = float(mi_df[tonnes_col].sum())
+    m_step1 = float((mi_df[tonnes_col] * mi_df[grade_col] / 100.0).sum())
+
+    # Step 2: Cut-Off Loss
+    sub_cutoff = mi_df[mi_df[grade_col] < cutoff_grade]
+    delta_t_co = -float(sub_cutoff[tonnes_col].sum())
+    delta_m_co = -float((sub_cutoff[tonnes_col] * sub_cutoff[grade_col] / 100.0).sum())
+
+    t_above_co = t_step1 + delta_t_co
+    m_above_co = m_step1 + delta_m_co
+
+    # Step 3: Mining Ore Loss
+    ore_loss_frac = max(0.0, 1.0 - (mining_recovery_pct / 100.0))
+    delta_t_loss = -float(t_above_co * ore_loss_frac)
+    delta_m_loss = -float(m_above_co * ore_loss_frac)
+
+    # Step 4: Mining Dilution
+    dil_frac = (mining_dilution_pct / 100.0) * (mining_recovery_pct / 100.0)
+    delta_t_dil = float(t_above_co * dil_frac)
+    delta_m_dil = float(delta_t_dil * (dilution_grade / 100.0))
+
+    # Step 5: Final ROM Reserve
+    t_final = float(reserve_df["rom_tonnes"].sum())
+    m_final = float(reserve_df["contained_metal"].sum())
+
+    fig, (ax_t, ax_m) = plt.subplots(1, 2, figsize=figsize)
+
+    steps = [
+        "In-Situ M&I\nResource",
+        f"Sub-Cutoff\n(<{cutoff_grade:.2f}{grade_unit})",
+        f"Ore Loss\n({100-mining_recovery_pct:.1f}%)",
+        f"Dilution\n(+{mining_dilution_pct:.1f}%)",
+        "Run-of-Mine\nReserve",
+    ]
+
+    def _render_waterfall(ax, deltas, finals, unit, label):
+        n = len(deltas)
+        bottoms = np.zeros(n)
+        heights = np.zeros(n)
+        colors = []
+
+        # Step 0: Initial Total
+        bottoms[0] = 0.0
+        heights[0] = deltas[0]
+        colors.append("#1f77b4")  # Blue total
+
+        running_total = deltas[0]
+        for i in range(1, n - 1):
+            d = deltas[i]
+            if d < 0:
+                bottoms[i] = running_total + d
+                heights[i] = abs(d)
+                colors.append("#d62728")  # Red deduction
+            else:
+                bottoms[i] = running_total
+                heights[i] = d
+                colors.append("#ff7f0e")  # Orange addition
+            running_total += d
+
+        # Step n-1: Final Total
+        bottoms[-1] = 0.0
+        heights[-1] = finals
+        colors.append("#2ca02c")  # Green final reserve
+
+        bars = ax.bar(
+            range(n),
+            heights,
+            bottom=bottoms,
+            color=colors,
+            edgecolor="black",
+            linewidth=1.2,
+            width=0.6,
+        )
+
+        # Connecting dashed lines
+        cur_lev = deltas[0]
+        for i in range(1, n - 1):
+            ax.plot(
+                [i - 1 + 0.3, i - 0.3],
+                [cur_lev, cur_lev],
+                "k--",
+                linewidth=1.0,
+                alpha=0.6,
+            )
+            cur_lev += deltas[i]
+        ax.plot(
+            [n - 2 + 0.3, n - 1 - 0.3],
+            [cur_lev, cur_lev],
+            "k--",
+            linewidth=1.0,
+            alpha=0.6,
+        )
+
+        # Callout values
+        for i, bar in enumerate(bars):
+            val = heights[i]
+            val_signed = deltas[i] if (0 < i < n - 1) else (finals if i == n - 1 else val)
+            prefix = "+" if (0 < i < n - 1 and val_signed > 0) else ""
+            y_pos = bottoms[i] + heights[i] + (max(deltas[0], finals) * 0.02)
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                y_pos,
+                f"{prefix}{val_signed:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+            )
+
+        ax.set_xticks(range(n))
+        ax.set_xticklabels(steps, fontsize=9.5, fontweight="bold")
+        ax.set_ylabel(f"{label} ({unit})", fontsize=11, fontweight="bold")
+        ax.set_ylim(0, max(deltas[0], finals) * 1.18)
+        ax.grid(True, axis="y", linestyle=":", alpha=0.6)
+
+    # Render Tonnage Waterfall
+    _render_waterfall(
+        ax_t,
+        [
+            t_step1 / t_scale,
+            delta_t_co / t_scale,
+            delta_t_loss / t_scale,
+            delta_t_dil / t_scale,
+            t_final / t_scale,
+        ],
+        t_final / t_scale,
+        tonnage_unit,
+        "Ore Tonnage",
+    )
+    ax_t.set_title("Tonnage Reconciliation Waterfall", fontsize=12, fontweight="bold")
+
+    # Render Contained Metal Waterfall
+    _render_waterfall(
+        ax_m,
+        [
+            m_step1 / m_scale,
+            delta_m_co / m_scale,
+            delta_m_loss / m_scale,
+            delta_m_dil / m_scale,
+            m_final / m_scale,
+        ],
+        m_final / m_scale,
+        metal_unit,
+        "Contained Metal",
+    )
+    ax_m.set_title(
+        "Contained Metal Reconciliation Waterfall", fontsize=12, fontweight="bold"
+    )
+
+    fig_title = (
+        title
+        if title
+        else "Resource-to-Reserve Bridge (Modifying Factors Reconciliation)"
+    )
+    fig.suptitle(fig_title, fontsize=14, fontweight="bold", y=0.98)
+    fig.tight_layout()
+    return fig, (ax_t, ax_m)
+
+
+def plot_reserve_classification_map(
+    block_model: pd.DataFrame,
+    boundary: Optional[Sequence[tuple[float, float]]] = None,
+    drillholes: Optional[pd.DataFrame] = None,
+    status_col: str = "status",
+    x_col: str = "x",
+    y_col: str = "y",
+    title: str = "Mineral Reserve & Resource Classification Map",
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (10, 8),
+) -> tuple[plt.Figure, plt.Axes]:
+    """Renders 2D spatial mine plan map colored by regulatory reserve status.
+
+    Standard coloring:
+    - Proven Reserve: Forest Green (#2ca02c)
+    - Probable Reserve: Royal Blue (#1f77b4)
+    - Inferred Resource (Excluded): Purple / Magenta (#9467bd)
+    - Sub-Economic / Waste (< Cutoff): Light Grey (#d3d3d3)
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table with block coordinates and 'status' column indicating category.
+    boundary : Sequence[tuple[float, float]], optional
+        Perimeter boundary polygon coordinates.
+    drillholes : pd.DataFrame, optional
+        Collar coordinates table with 'x' and 'y' columns.
+    status_col : str, default "status"
+        Column containing status string.
+    x_col, y_col : str, default "x", "y"
+        Coordinate column names.
+    title : str, default "Mineral Reserve & Resource Classification Map"
+        Plot title.
+    ax : plt.Axes, optional
+        Existing axes to draw on.
+    figsize : tuple[float, float], default (10, 8)
+        Dimensions of figure.
+
+    Returns
+    -------
+    tuple[plt.Figure, plt.Axes]
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    color_palette = {
+        "Proven Reserve": "#2ca02c",  # Forest green
+        "Probable Reserve": "#1f77b4",  # Blue
+        "Inferred Resource (Excluded)": "#9467bd",  # Purple
+        "Sub-Economic / Waste": "#d3d3d3",  # Light grey
+    }
+
+    # Draw blocks grouped by status
+    for status_name, color in color_palette.items():
+        sub = block_model[
+            block_model[status_col].astype(str).str.strip().str.lower()
+            == status_name.lower()
+        ]
+        if len(sub) > 0:
+            ax.scatter(
+                sub[x_col],
+                sub[y_col],
+                c=color,
+                label=f"{status_name} ({len(sub):,} blocks)",
+                s=35,
+                marker="s",
+                alpha=0.85,
+                edgecolors="none",
+            )
+
+    # Draw boundary if provided
+    if boundary is not None:
+        b_pts = np.array(list(boundary) + [boundary[0]])
+        ax.plot(
+            b_pts[:, 0],
+            b_pts[:, 1],
+            "r--",
+            linewidth=2.0,
+            label="Pit / Concession Perimeter",
+        )
+
+    # Draw drillholes if provided
+    if drillholes is not None and not drillholes.empty:
+        ax.scatter(
+            drillholes["x"],
+            drillholes["y"],
+            c="black",
+            s=50,
+            marker="^",
+            label=f"Drillholes (N={len(drillholes)})",
+            zorder=6,
+        )
+
+    ax.set_xlabel("Easting (m)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Northing (m)", fontsize=11, fontweight="bold")
+    ax.set_title(title, fontsize=13, fontweight="bold", pad=12)
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend(loc="upper right", framealpha=0.9, fontsize=9.5)
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_in_situ_vs_diluted_curves(
+    in_situ_gt: pd.DataFrame,
+    diluted_gt: pd.DataFrame,
+    grade_unit: str = "% Cu",
+    tonnage_unit: str = "Mt",
+    title: str = "Grade–Tonnage Shift: In-Situ Resource vs. Diluted Reserve",
+    figsize: tuple[float, float] = (12, 6),
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plots comparative Grade-Tonnage curves demonstrating the dilution grade shift.
+
+    Visualizes the classic operational shift from in-situ resource to run-of-mine
+    reserve:
+    - Tonnage shifts higher (dashed to solid blue curve) due to wall rock dilution.
+    - Average head grade shifts downward (dashed to solid red curve) due to low-grade dilution.
+
+    Parameters
+    ----------
+    in_situ_gt : pd.DataFrame
+        Grade-tonnage table of in-situ resources.
+    diluted_gt : pd.DataFrame
+        Grade-tonnage table of diluted/recovered reserves.
+    grade_unit : str, default "% Cu"
+        Grade unit label.
+    tonnage_unit : str, default "Mt"
+        Tonnage unit label.
+    title : str
+        Figure title.
+    figsize : tuple[float, float], default (12, 6)
+        Figure size.
+
+    Returns
+    -------
+    tuple[plt.Figure, plt.Axes]
+    """
+    t_scale = 1e6 if tonnage_unit == "Mt" else (1e3 if tonnage_unit == "kt" else 1.0)
+
+    fig, ax1 = plt.subplots(figsize=figsize)
+    ax2 = ax1.twinx()
+
+    cutoffs = in_situ_gt.index.to_numpy(dtype=float)
+
+    # In-Situ Curves (Dashed)
+    (line1,) = ax1.plot(
+        cutoffs,
+        in_situ_gt["ore_tonnes"] / t_scale,
+        color="#1f77b4",
+        linestyle="--",
+        linewidth=2.0,
+        label="In-Situ Resource Tonnage",
+    )
+    (line2,) = ax2.plot(
+        cutoffs,
+        in_situ_gt["ore_grade"],
+        color="#d62728",
+        linestyle="--",
+        linewidth=2.0,
+        label="In-Situ Resource Grade",
+    )
+
+    # Diluted ROM Curves (Solid with markers)
+    (line3,) = ax1.plot(
+        cutoffs,
+        diluted_gt["ore_tonnes"] / t_scale,
+        color="#1f77b4",
+        linestyle="-",
+        linewidth=2.5,
+        marker="o",
+        label="Diluted Reserve Tonnage (ROM)",
+    )
+    (line4,) = ax2.plot(
+        cutoffs,
+        diluted_gt["ore_grade"],
+        color="#d62728",
+        linestyle="-",
+        linewidth=2.5,
+        marker="s",
+        label="Diluted Reserve Grade (ROM)",
+    )
+
+    ax1.set_xlabel(f"Cutoff Grade ({grade_unit})", fontsize=11, fontweight="bold")
+    ax1.set_ylabel(
+        f"Ore Tonnage ({tonnage_unit})", fontsize=11, fontweight="bold", color="#1f77b4"
+    )
+    ax2.set_ylabel(
+        f"Average Grade ({grade_unit})", fontsize=11, fontweight="bold", color="#d62728"
+    )
+
+    ax1.tick_params(axis="y", labelcolor="#1f77b4")
+    ax2.tick_params(axis="y", labelcolor="#d62728")
+    ax1.grid(True, linestyle=":", alpha=0.5)
+
+    lines = [line1, line3, line2, line4]
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc="upper right", framealpha=0.9, fontsize=9.5)
+
+    ax1.set_title(title, fontsize=12, fontweight="bold", pad=12)
+    fig.tight_layout()
+    return fig, ax1
+

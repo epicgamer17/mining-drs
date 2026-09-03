@@ -33,6 +33,12 @@ from drs_mining.components.estimation import (
     plot_cell_declustering_curve,
     plot_swath_analysis,
     format_resource_statement,
+    calculate_cut_off_grade,
+    convert_resource_to_reserve,
+    format_reserve_statement,
+    plot_resource_to_reserve_waterfall,
+    plot_reserve_classification_map,
+    plot_in_situ_vs_diluted_curves,
 )
 
 
@@ -278,7 +284,40 @@ def main():
     for fn in resource_stmt.attrs.get("footnotes", []):
         print(f"  {fn}")
 
-    # 10. Spatial Visualization & Comparative Grade-Tonnage Chart
+    # 10. Mineral Reserve Delineation: Applying Modifying Factors (CIM / NI 43-101)
+    dilution_pct = 5.0
+    dilution_grade = 0.05
+    recovery_pct = 95.0
+
+    reserve_df = convert_resource_to_reserve(
+        block_class_df,
+        mining_dilution_pct=dilution_pct,
+        mining_recovery_pct=recovery_pct,
+        cutoff_grade=base_cutoff,
+        dilution_grade=dilution_grade,
+        allow_inferred=False,
+    )
+
+    reserve_stmt = format_reserve_statement(
+        reserve_df,
+        cutoff_grade=base_cutoff,
+        mining_dilution_pct=dilution_pct,
+        mining_recovery_pct=recovery_pct,
+        commodity_price="$3.80/lb Cu",
+        metallurgical_recovery=88.0,
+        tonnage_unit="Mt",
+        grade_unit="% Cu",
+        metal_unit="kt",
+        rpeee_constraint="Constrained within Lerchs-Grossmann optimized pit shell",
+    )
+
+    print(f"\n--- Official Mineral Reserve Statement (IDW² Model, Cutoff: {base_cutoff:.2f}% Cu) ---")
+    print(reserve_stmt.to_string(index=False))
+    print("\nCompliance Footnotes:")
+    for fn in reserve_stmt.attrs.get("footnotes", []):
+        print(f"  {fn}")
+
+    # 11. Spatial Visualization & Comparative Grade-Tonnage Chart
     if not args.no_plot:
         plots_dir = Path(args.save_plot).parent
         plots_dir.mkdir(parents=True, exist_ok=True)
@@ -444,6 +483,109 @@ def main():
         fig_swath_y.savefig(swath_y_file, dpi=180, bbox_inches="tight")
         plt.close(fig_swath_y)
         print(f"  • Swath Plot (Northing): saved to {swath_y_file}")
+
+        # Resource-to-Reserve Waterfall Reconciliation (Bridge)
+        waterfall_file = str(plots_dir / "idw_reserve_waterfall.png")
+        fig_wf, _ = plot_resource_to_reserve_waterfall(
+            block_class_df,
+            reserve_df,
+            cutoff_grade=base_cutoff,
+            mining_dilution_pct=dilution_pct,
+            mining_recovery_pct=recovery_pct,
+            dilution_grade=dilution_grade,
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            metal_unit="kt",
+            title="IDW² Resource-to-Reserve Bridge (Modifying Factors Reconciliation)",
+        )
+        fig_wf.savefig(waterfall_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_wf)
+        print(f"  • Resource-to-Reserve Waterfall: saved to {waterfall_file}")
+
+        # Spatial Reserve & Resource Classification Map
+        status_arr = np.empty(len(grid_points), dtype=object)
+        for i in range(len(grid_points)):
+            cat = categories[i]
+            g = idw2_grades[i]
+            if cat == "Inferred":
+                status_arr[i] = "Inferred Resource (Excluded)"
+            elif g < base_cutoff:
+                status_arr[i] = "Sub-Economic / Waste"
+            elif cat == "Measured":
+                status_arr[i] = "Proven Reserve"
+            elif cat == "Indicated":
+                status_arr[i] = "Probable Reserve"
+            else:
+                status_arr[i] = "Sub-Economic / Waste"
+
+        map_blocks_df = pd.DataFrame(
+            {
+                "x": grid_points[:, 0],
+                "y": grid_points[:, 1],
+                "status": status_arr,
+            }
+        )
+
+        class_map_file = str(plots_dir / "idw_reserve_classification_map.png")
+        fig_map, _ = plot_reserve_classification_map(
+            map_blocks_df,
+            boundary=boundary,
+            drillholes=drillholes,
+            title="IDW² Mineral Reserve & Resource Classification Map",
+        )
+        fig_map.savefig(class_map_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_map)
+        print(f"  • Reserve Classification Map: saved to {class_map_file}")
+
+        # In-Situ Resource vs. Diluted Reserve Grade-Tonnage Shift Curve
+        cutoffs_eval = [
+            0.0,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            0.7,
+            0.8,
+            0.9,
+            1.0,
+            1.2,
+            1.4,
+            1.6,
+        ]
+        is_mi_mask = (categories == "Measured") | (categories == "Indicated")
+        insitu_mi_df = pd.DataFrame(
+            {
+                "grade": idw2_grades[is_mi_mask],
+                "tonnes": block_tonnes,
+            }
+        )
+        insitu_gt = grade_tonnage_table(insitu_mi_df, cutoffs=cutoffs_eval)
+
+        dil_mi_tonnes = (
+            block_tonnes * (1.0 + dilution_pct / 100.0) * (recovery_pct / 100.0)
+        )
+        dil_mi_grades = (
+            idw2_grades[is_mi_mask] + (dilution_pct / 100.0) * dilution_grade
+        ) / (1.0 + dilution_pct / 100.0)
+        dil_res_df = pd.DataFrame(
+            {
+                "grade": dil_mi_grades,
+                "tonnes": dil_mi_tonnes,
+            }
+        )
+        diluted_gt = grade_tonnage_table(dil_res_df, cutoffs=cutoffs_eval)
+
+        gt_shift_file = str(plots_dir / "idw_in_situ_vs_diluted_gt.png")
+        fig_shift, _ = plot_in_situ_vs_diluted_curves(
+            insitu_gt,
+            diluted_gt,
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            title="IDW² Grade–Tonnage Operational Shift: In-Situ Resource vs. Diluted Reserve",
+        )
+        fig_shift.savefig(gt_shift_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_shift)
+        print(f"  • In-Situ vs Diluted Shift Curve: saved to {gt_shift_file}")
 
 
 if __name__ == "__main__":

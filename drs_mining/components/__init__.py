@@ -20,6 +20,12 @@ from .estimation import (
     format_resource_statement,
     plot_swath_analysis,
     plot_cell_declustering_curve,
+    calculate_cut_off_grade,
+    convert_resource_to_reserve,
+    format_reserve_statement,
+    plot_resource_to_reserve_waterfall,
+    plot_reserve_classification_map,
+    plot_in_situ_vs_diluted_curves,
 )
 
 __all__ = [
@@ -51,4 +57,10 @@ __all__ = [
     "format_resource_statement",
     "plot_swath_analysis",
     "plot_cell_declustering_curve",
+    "calculate_cut_off_grade",
+    "convert_resource_to_reserve",
+    "format_reserve_statement",
+    "plot_resource_to_reserve_waterfall",
+    "plot_reserve_classification_map",
+    "plot_in_situ_vs_diluted_curves",
 ]
