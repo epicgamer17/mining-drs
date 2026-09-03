@@ -16,7 +16,7 @@ import math
 import os
 import random
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,24 +27,150 @@ from drs import DRSEngine, Telemetry, Processor, Storage, Flow, blend_flows
 
 from drs_mining.components import (
     OperatingMode,
-    OperatingModeController,
     MaterialSource,
     autocorrelated_generator,
     truck_haul_capacity,
 )
-from drs_mining.config import MILL_MODES
+
+# ==============================================================================
+# Navarra Simulation Hyperparameters & Constants
+# ==============================================================================
+MAIN_RESERVE_TONNES = 6_000_000.0
+SAT_RESERVE_TONNES = 2_000_000.0
+SAT_REQUIRED_DEV_METERS = 300.0
+
+TARGET_ORE_STOCK_TONNES = 60_000.0
+CRITICAL_ORE2_STOCK_TONNES = 20_400.0
+
+CAMPAIGN_DURATION_DAYS = 34.0
+SHUTDOWN_DURATION_DAYS = 1.0
+CONTINGENCY_SEGMENT_DURATION_DAYS = 1.0
+
+MILL_MAX_RATE_TPD = 6_000.0
+SATELLITE_AVAILABILITY_PROB = 0.80
+DEVELOPMENT_RATE_M_PER_DAY = 8.0
+
+
+def create_navarra_modes() -> dict[str, OperatingMode]:
+    """Instantiate discrete campaign and operating modes for the Navarra concentrator."""
+    return {
+        "MODE_A": OperatingMode("MODE_A", id=0, draw_rates={"Ore1Stock": 3600.0, "Ore2Stock": 2400.0}),
+        "MODE_A_CONTINGENCY": OperatingMode("MODE_A_CONTINGENCY", id=1, draw_rates={"Ore1Stock": 3900.0, "Ore2Stock": 0.0}),
+        "MODE_A_MINE_SURGING": OperatingMode("MODE_A_MINE_SURGING", id=2, draw_rates={"Ore1Stock": 3600.0, "Ore2Stock": 2400.0}),
+        "MODE_B": OperatingMode("MODE_B", id=3, draw_rates={"Ore1Stock": 4600.0, "Ore2Stock": 800.0}),
+        "MODE_B_CONTINGENCY": OperatingMode("MODE_B_CONTINGENCY", id=4, draw_rates={"Ore1Stock": 0.0, "Ore2Stock": 2500.0}),
+        "MODE_B_MINE_SURGING": OperatingMode("MODE_B_MINE_SURGING", id=5, draw_rates={"Ore1Stock": 4600.0, "Ore2Stock": 800.0}),
+        "SHUTDOWN": OperatingMode("SHUTDOWN", id=6, draw_rates={"Ore1Stock": 0.0, "Ore2Stock": 0.0}),
+    }
+
+
+class CampaignTimers(drs.Module):
+    """Holds campaign and contingency countdown timers for DRS integration."""
+
+    def __init__(
+        self,
+        campaign_duration: float = CAMPAIGN_DURATION_DAYS,
+        contingency_duration: float = CONTINGENCY_SEGMENT_DURATION_DAYS,
+    ):
+        super().__init__()
+        self.campaign_timer = drs.Timer("current_campaign_duration", initial_value=0.0)
+        self.campaign_timer.rate = 1.0
+        self.campaign_timer.upper_threshold = campaign_duration
+
+        self.contingency_timer = drs.Timer("current_contingency_duration", initial_value=0.0)
+        self.contingency_timer.rate = 0.0
+        self.contingency_timer.upper_threshold = contingency_duration
+
+    def levels(self) -> Sequence[drs.Level]:
+        return (self.campaign_timer, self.contingency_timer)
+
+    def variables(self) -> Iterator[drs.Variable]:
+        yield self.campaign_timer
+        yield self.contingency_timer
+
+
+def update_campaign_mode(
+    campaign_timer: drs.Timer,
+    active_campaign: drs.Variable,
+    ore2_stock_level: float,
+    modes: Mapping[str, OperatingMode],
+    campaign_duration: float = CAMPAIGN_DURATION_DAYS,
+    shutdown_duration: float = SHUTDOWN_DURATION_DAYS,
+    critical_ore2_level: float = CRITICAL_ORE2_STOCK_TONNES,
+) -> OperatingMode:
+    """Check campaign timer and transition between production and shutdown."""
+    target_duration = shutdown_duration if active_campaign.value.name == "SHUTDOWN" else campaign_duration
+    campaign_timer.upper_threshold = target_duration
+    if campaign_timer.value >= (target_duration - 1e-6):
+        campaign_timer.reset()
+        if active_campaign.value.name == "SHUTDOWN":
+            next_name = "MODE_A" if ore2_stock_level > critical_ore2_level else "MODE_B"
+            active_campaign.value = modes[next_name]
+        else:
+            active_campaign.value = modes["SHUTDOWN"]
+
+    target_duration = shutdown_duration if active_campaign.value.name == "SHUTDOWN" else campaign_duration
+    campaign_timer.upper_threshold = target_duration
+    return active_campaign.value
+
+
+def resolve_operating_mode(
+    campaign_mode: OperatingMode,
+    current_mode: OperatingMode,
+    ore1_level: float,
+    ore2_level: float,
+    contingency_timer: drs.Timer,
+    modes: Mapping[str, OperatingMode],
+    target_total_stock: float = TARGET_ORE_STOCK_TONNES,
+    contingency_duration: float = CONTINGENCY_SEGMENT_DURATION_DAYS,
+) -> OperatingMode:
+    """Resolve active operating mode, handling contingencies and stockpile surging."""
+    c_name = campaign_mode.name
+    if c_name == "SHUTDOWN":
+        return modes["SHUTDOWN"]
+
+    total_stock = ore1_level + ore2_level
+    current_name = current_mode.name
+
+    if not current_name.startswith(c_name):
+        return modes[f"{c_name}_MINE_SURGING"] if total_stock > target_total_stock + 1e-6 else modes[c_name]
+
+    if "_CONTINGENCY" in current_name:
+        if contingency_timer.value >= (contingency_duration - 1e-6):
+            contingency_timer.reset()
+            contingency_timer.rate = 0.0
+            return modes[c_name]
+        return modes[current_name]
+
+    # Check starvation triggers for contingency
+    if c_name == "MODE_A" and ore2_level <= 1e-6:
+        contingency_timer.reset()
+        contingency_timer.upper_threshold = contingency_duration
+        contingency_timer.rate = 1.0
+        return modes["MODE_A_CONTINGENCY"]
+    elif c_name == "MODE_B" and ore1_level <= 1e-6:
+        contingency_timer.reset()
+        contingency_timer.upper_threshold = contingency_duration
+        contingency_timer.rate = 1.0
+        return modes["MODE_B_CONTINGENCY"]
+
+    # Surging checks
+    if total_stock > target_total_stock + 1e-6:
+        return modes[f"{c_name}_MINE_SURGING"]
+    return modes[c_name]
 
 
 def build_navarra_network(
     seed: int = 42,
-    main_reserve_tonnes: float = 6_000_000.0,
-    sat_reserve_tonnes: float = 2_000_000.0,
-    sat_required_dev_m: float = 300.0,
-    target_ore_stock_level: float = 60_000.0,
-    critical_ore2_level: float = 20_400.0,
-    contingency_segment_duration: float = 1.0,
-    campaign_duration: float = 34.0,
-    shutdown_duration: float = 1.0,
+    main_reserve_tonnes: float = MAIN_RESERVE_TONNES,
+    sat_reserve_tonnes: float = SAT_RESERVE_TONNES,
+    sat_required_dev_m: float = SAT_REQUIRED_DEV_METERS,
+    target_ore_stock_level: float = TARGET_ORE_STOCK_TONNES,
+    critical_ore2_level: float = CRITICAL_ORE2_STOCK_TONNES,
+    contingency_segment_duration: float = CONTINGENCY_SEGMENT_DURATION_DAYS,
+    campaign_duration: float = CAMPAIGN_DURATION_DAYS,
+    shutdown_duration: float = SHUTDOWN_DURATION_DAYS,
+    modes: Optional[Mapping[str, OperatingMode]] = None,
 ):
     """Constructs the tactical simulation network for the Navarra operation."""
     rng = random.Random(seed)
@@ -98,22 +224,36 @@ def build_navarra_network(
     )
 
     # 4. Concentrator Mill Processor
-    mill = Processor(name="mill", max_rate=6000.0)
+    mill = Processor(name="mill", max_rate=MILL_MAX_RATE_TPD)
 
-    # 5. Operating Mode Controller
-    mode_ctrl = OperatingModeController(
-        duration_of_production_campaigns=campaign_duration,
-        duration_of_shutdowns=shutdown_duration,
-        duration_of_contingency_segments=contingency_segment_duration,
-        critical_ore2_level=critical_ore2_level,
-        target_total_stock=target_ore_stock_level,
+    navarra_modes = dict(modes or create_navarra_modes())
+    timers = CampaignTimers(
+        campaign_duration=campaign_duration,
+        contingency_duration=contingency_segment_duration,
     )
+    active_campaign = drs.Variable("active_campaign_mode", navarra_modes["MODE_A"])
+    active_mode = drs.Variable("active_operating_mode", navarra_modes["MODE_A"])
+    navarra_modes["MODE_A"].activate()
+
+    control_state = {
+        "timers": timers,
+        "campaign_timer": timers.campaign_timer,
+        "contingency_timer": timers.contingency_timer,
+        "active_campaign": active_campaign,
+        "active_mode": active_mode,
+        "modes": navarra_modes,
+        "campaign_duration": campaign_duration,
+        "shutdown_duration": shutdown_duration,
+        "contingency_duration": contingency_segment_duration,
+        "critical_ore2_level": critical_ore2_level,
+        "target_total_stock": target_ore_stock_level,
+    }
 
     return (
         res_main,
         res_sat,
         mill,
-        mode_ctrl,
+        control_state,
         ore1_stock,
         ore2_stock,
         sat_required_dev_m,
@@ -126,8 +266,8 @@ class NavarraTacticalSimulation:
     def __init__(
         self,
         seed: int = 42,
-        satellite_availability_prob: float = 0.80,
-        development_rate_m_per_day: float = 8.0,
+        satellite_availability_prob: float = SATELLITE_AVAILABILITY_PROB,
+        development_rate_m_per_day: float = DEVELOPMENT_RATE_M_PER_DAY,
     ):
         self.seed = seed
         self.rng = random.Random(seed)
@@ -138,7 +278,7 @@ class NavarraTacticalSimulation:
             self.res_main,
             self.res_sat,
             self.mill,
-            self.mode_ctrl,
+            self.control_state,
             self.ore1_stock,
             self.ore2_stock,
             self.sat_required_dev_m,
@@ -161,9 +301,10 @@ class NavarraTacticalSimulation:
             self.res_main,
             self.res_sat,
             self.mill,
-            self.mode_ctrl,
             self.ore1_stock,
             self.ore2_stock,
+            self.control_state["timers"],
+            *self.control_state["modes"].values(),
         )
 
         last_eval_day = [-1]
@@ -180,8 +321,14 @@ class NavarraTacticalSimulation:
                 )
 
             # 1. Update campaign mode
-            active_campaign = self.mode_ctrl.update_campaign(
-                ore2_stock_level=self.ore2_stock.level
+            active_campaign = update_campaign_mode(
+                self.control_state["campaign_timer"],
+                self.control_state["active_campaign"],
+                ore2_stock_level=self.ore2_stock.level,
+                modes=self.control_state["modes"],
+                campaign_duration=self.control_state["campaign_duration"],
+                shutdown_duration=self.control_state["shutdown_duration"],
+                critical_ore2_level=self.control_state["critical_ore2_level"],
             )
 
             # 2. Advance development when in Mode B or shutdown
@@ -192,14 +339,24 @@ class NavarraTacticalSimulation:
                         self.satellite_unlocked = True
 
             # 3. Resolve active operating mode (handling contingency / surging)
-            active_mode = self.mode_ctrl.resolve_operating_mode(
+            active_mode = resolve_operating_mode(
                 active_campaign,
+                self.control_state["active_mode"].value,
                 ore1_level=self.ore1_stock.level,
                 ore2_level=self.ore2_stock.level,
+                contingency_timer=self.control_state["contingency_timer"],
+                modes=self.control_state["modes"],
+                target_total_stock=self.control_state["target_total_stock"],
+                contingency_duration=self.control_state["contingency_duration"],
             )
 
+            if self.control_state["active_mode"].value != active_mode:
+                self.control_state["active_mode"].value.deactivate()
+                active_mode.activate()
+                self.control_state["active_mode"].value = active_mode
+
             # 4. Get draw rates
-            draw_rates = self.mode_ctrl.get_draw_rates(active_mode)
+            draw_rates = active_mode.draw_rates
             ore1_rate = draw_rates.get("Ore1Stock", 0.0)
             ore2_rate = draw_rates.get("Ore2Stock", 0.0)
 
@@ -222,7 +379,7 @@ class NavarraTacticalSimulation:
                 and self.satellite_sporadic_available
                 and not self.res_sat.is_exhausted
             ):
-                ore2_buffer = self.ore2_stock.level - self.mode_ctrl.critical_ore2_level
+                ore2_buffer = self.ore2_stock.level - self.control_state["critical_ore2_level"]
                 if ore2_buffer < 10_000.0:
                     sat_weight = min(0.40, max(0.10, (10_000.0 - ore2_buffer) / 25_000.0))
 
@@ -259,7 +416,7 @@ class NavarraTacticalSimulation:
         telemetry = Telemetry(model=self.engine)
         telemetry.register_metric(
             "active_operating_mode",
-            lambda t, m, s, _: self.mode_ctrl.active_operating_mode.value.name,
+            lambda t, m, s, _: self.control_state["active_mode"].value.name,
         )
         telemetry.register_metric(
             "ore1_stock",
@@ -295,58 +452,44 @@ class NavarraTacticalSimulation:
         )
 
         self.engine.attach_telemetry(telemetry)
-        res = self.engine.run(until=days)
-        df = telemetry.to_dataframe()
-        if not df.empty and "time" in df.columns:
-            df["day"] = df["time"]
-        return df
-
-
-def print_navarra_summary(
-    df: pd.DataFrame, sim: NavarraTacticalSimulation
-) -> None:
-    """Prints comprehensive tactical operational metrics."""
-    if df.empty:
-        print("Telemetry history is empty.")
-        return
-
-    last = df.iloc[-1]
-    days = last.get("day", 0.0)
-    milled = last.get("cumulative_concentrator_throughput", 0.0)
-    main_m = last.get("main_face_extracted", 0.0)
-    sat_m = last.get("satellite_face_extracted", 0.0)
-    dev_m = last.get("satellite_development", 0.0)
-
-    print("=" * 60)
-    print("      NAVARRA TACTICAL BLENDING SIMULATION SUMMARY")
-    print("=" * 60)
-    print(f"Simulation Duration:       {days:.1f} days")
-    print(f"Concentrator Throughput:   {milled:,.1f} tonnes")
-    print(f"Daily Mill Average:        {milled / max(1.0, days):,.1f} t/day")
-    print("-" * 60)
-    print(f"Main Face Extracted:       {main_m:,.1f} tonnes ({main_m / max(1.0, main_m + sat_m) * 100:.1f}%)")
-    print(f"Satellite Extracted:       {sat_m:,.1f} tonnes ({sat_m / max(1.0, main_m + sat_m) * 100:.1f}%)")
-    print(f"Satellite Development:     {dev_m:.1f} / {sim.sat_required_dev_m:.1f} meters ({'UNLOCKED' if sim.satellite_unlocked else 'LOCKED'})")
-    print("-" * 60)
-
-    # Mode distribution
-    if "active_operating_mode" in df.columns:
-        mode_counts = df["active_operating_mode"].value_counts(normalize=True) * 100
-        print("Concentrator Operating Mode Breakdown:")
-        for mode, pct in mode_counts.items():
-            print(f"  {mode:<25}: {pct:.1f}%")
-    print("=" * 60)
+        self.engine.run(until=days)
+        return telemetry.to_dataframe()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Navarra Tactical Blending Simulation")
     parser.add_argument("--days", type=float, default=365.0, help="Simulation duration (days)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--output", type=str, default="navarra_tactical_results.csv")
     args = parser.parse_args()
 
+    print(f"Starting Navarra Tactical Blending Simulation ({args.days} days, seed={args.seed})...")
     sim = NavarraTacticalSimulation(seed=args.seed)
     df = sim.run(days=args.days)
-    print_navarra_summary(df, sim)
+
+    total_throughput = sim.cumulative_milled_mass.value
+    sat_unlocked = sim.satellite_unlocked
+    main_extracted = sim.res_main.cumulative_extracted_mass.value
+    sat_extracted = sim.res_sat.cumulative_extracted_mass.value
+    total_extracted = main_extracted + sat_extracted
+    sat_share = (sat_extracted / total_extracted * 100.0) if total_extracted > 0 else 0.0
+
+    print(f"\n--- Simulation Results ({args.days:.0f} Days) ---")
+    print(f"Cumulative Concentrator Throughput : {total_throughput:,.0f} tonnes")
+    print(f"Main Face Extraction              : {main_extracted:,.0f} tonnes")
+    print(f"Satellite Face Extraction         : {sat_extracted:,.0f} tonnes ({sat_share:.1f}%)")
+    print(f"Satellite Developed Meters         : {sim.satellite_cumulative_dev:.1f} / {sim.sat_required_dev_m:.1f} m")
+    print(f"Satellite Unlocked Status          : {'YES' if sat_unlocked else 'NO'}")
+
+    modes = sim.control_state["modes"]
+    print("\nOperating Mode Breakdown:")
+    for name, mode in modes.items():
+        pct = (mode.cumulative_time / args.days * 100.0) if args.days > 0 else 0.0
+        print(f"  {name:20s}: {mode.cumulative_time:6.1f} days ({pct:5.1f}%)")
+
+    if args.output:
+        df.to_csv(args.output, index=False)
+        print(f"\nTelemetry saved to {args.output}")
 
 
 if __name__ == "__main__":

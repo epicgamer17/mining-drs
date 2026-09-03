@@ -1,5 +1,5 @@
 import argparse
-from typing import Optional
+from typing import Any, Iterator, Mapping, Optional, Sequence
 
 import pandas as pd
 
@@ -13,11 +13,10 @@ from drs import (
     blend_flows,
 )
 from drs_mining.components import (
-    OperatingModeController,
+    OperatingMode,
     MaterialSource,
     autocorrelated_generator,
 )
-from drs_mining.config import MILL_MODES
 from drs_mining.components.plot import (
     plot_single_face_dashboard,
     prepare_history,
@@ -25,21 +24,189 @@ from drs_mining.components.plot import (
     print_transition_log,
 )
 
+# ==============================================================================
+# Tactical Blending Hyperparameters & Simulation Constants
+# ==============================================================================
+TOTAL_ORE_TO_EXTRACT_TONNES = 6_600_000.0
+WARMING_PERIOD_ORE_TONNES = 600_000.0
+
+CAMPAIGN_DURATION_DAYS = 34.0
+SHUTDOWN_DURATION_DAYS = 1.0
+CONTINGENCY_SEGMENT_DURATION_DAYS = 1.0
+
+TARGET_ORE_STOCK_TONNES = 60_000.0
+CRITICAL_ORE2_STOCK_TONNES = 20_400.0
+
+MEAN_ORE_FRACTION = 0.30
+STD_DEV_ORE_FRACTION = 0.05
+PROB_NEW_FACIES = 0.30
+VARIATION_SAME_FACIES = 0.01
+MIN_PARCEL_MASS_TONNES = 30_000.0
+MAX_PARCEL_MASS_TONNES = 50_000.0
+INITIAL_PARCEL_MASS_TONNES = 40_000.0
+
+MILL_MAX_RATE_TPD = 6_000.0
+
+
+def create_blending_modes() -> dict[str, OperatingMode]:
+    """Instantiate discrete campaign and operating modes for the blending network."""
+    return {
+        "MODE_A": OperatingMode(
+            "MODE_A",
+            id=0,
+            category="mill",
+            draw_rates={"Ore1Stock": 3600.0, "Ore2Stock": 2400.0},
+        ),
+        "MODE_A_CONTINGENCY": OperatingMode(
+            "MODE_A_CONTINGENCY",
+            id=1,
+            category="mill",
+            draw_rates={"Ore1Stock": 3900.0, "Ore2Stock": 0.0},
+        ),
+        "MODE_A_MINE_SURGING": OperatingMode(
+            "MODE_A_MINE_SURGING",
+            id=2,
+            category="mill",
+            draw_rates={"Ore1Stock": 3600.0, "Ore2Stock": 2400.0},
+        ),
+        "MODE_B": OperatingMode(
+            "MODE_B",
+            id=3,
+            category="mill",
+            draw_rates={"Ore1Stock": 4600.0, "Ore2Stock": 800.0},
+        ),
+        "MODE_B_CONTINGENCY": OperatingMode(
+            "MODE_B_CONTINGENCY",
+            id=4,
+            category="mill",
+            draw_rates={"Ore1Stock": 0.0, "Ore2Stock": 2500.0},
+        ),
+        "MODE_B_MINE_SURGING": OperatingMode(
+            "MODE_B_MINE_SURGING",
+            id=5,
+            category="mill",
+            draw_rates={"Ore1Stock": 4600.0, "Ore2Stock": 800.0},
+        ),
+        "SHUTDOWN": OperatingMode(
+            "SHUTDOWN",
+            id=6,
+            category="mill",
+            draw_rates={"Ore1Stock": 0.0, "Ore2Stock": 0.0},
+        ),
+    }
+
+
+class CampaignTimers(drs.Module):
+    """Holds campaign and contingency countdown timers for DRS integration."""
+
+    def __init__(
+        self,
+        campaign_duration: float = CAMPAIGN_DURATION_DAYS,
+        contingency_duration: float = CONTINGENCY_SEGMENT_DURATION_DAYS,
+    ):
+        super().__init__()
+        self.campaign_timer = drs.Timer("current_campaign_duration", initial_value=0.0)
+        self.campaign_timer.rate = 1.0
+        self.campaign_timer.upper_threshold = campaign_duration
+
+        self.contingency_timer = drs.Timer("current_contingency_duration", initial_value=0.0)
+        self.contingency_timer.rate = 0.0
+        self.contingency_timer.upper_threshold = contingency_duration
+
+    def levels(self) -> Sequence[drs.Level]:
+        return (self.campaign_timer, self.contingency_timer)
+
+    def variables(self) -> Iterator[drs.Variable]:
+        yield self.campaign_timer
+        yield self.contingency_timer
+
+
+def update_campaign_mode(
+    campaign_timer: drs.Timer,
+    active_campaign: drs.Variable,
+    ore2_stock_level: float,
+    modes: Mapping[str, OperatingMode],
+    campaign_duration: float = CAMPAIGN_DURATION_DAYS,
+    shutdown_duration: float = SHUTDOWN_DURATION_DAYS,
+    critical_ore2_level: float = CRITICAL_ORE2_STOCK_TONNES,
+) -> OperatingMode:
+    """Check campaign timer and transition between production and shutdown."""
+    target_duration = shutdown_duration if active_campaign.value.name == "SHUTDOWN" else campaign_duration
+    campaign_timer.upper_threshold = target_duration
+    if campaign_timer.value >= (target_duration - 1e-6):
+        campaign_timer.reset()
+        if active_campaign.value.name == "SHUTDOWN":
+            next_name = "MODE_A" if ore2_stock_level > critical_ore2_level else "MODE_B"
+            active_campaign.value = modes[next_name]
+        else:
+            active_campaign.value = modes["SHUTDOWN"]
+
+    target_duration = shutdown_duration if active_campaign.value.name == "SHUTDOWN" else campaign_duration
+    campaign_timer.upper_threshold = target_duration
+    return active_campaign.value
+
+
+def resolve_operating_mode(
+    campaign_mode: OperatingMode,
+    current_mode: OperatingMode,
+    ore1_level: float,
+    ore2_level: float,
+    contingency_timer: drs.Timer,
+    modes: Mapping[str, OperatingMode],
+    target_total_stock: float = TARGET_ORE_STOCK_TONNES,
+    contingency_duration: float = CONTINGENCY_SEGMENT_DURATION_DAYS,
+) -> OperatingMode:
+    """Resolve active operating mode, handling contingencies and stockpile surging."""
+    c_name = campaign_mode.name
+    if c_name == "SHUTDOWN":
+        return modes["SHUTDOWN"]
+
+    total_stock = ore1_level + ore2_level
+    current_name = current_mode.name
+
+    if not current_name.startswith(c_name):
+        return modes[f"{c_name}_MINE_SURGING"] if total_stock > target_total_stock + 1e-6 else modes[c_name]
+
+    if "_CONTINGENCY" in current_name:
+        if contingency_timer.value >= (contingency_duration - 1e-6):
+            contingency_timer.reset()
+            contingency_timer.rate = 0.0
+            return modes[c_name]
+        return modes[current_name]
+
+    # Check starvation triggers for contingency
+    if c_name == "MODE_A" and ore2_level <= 1e-6:
+        contingency_timer.reset()
+        contingency_timer.upper_threshold = contingency_duration
+        contingency_timer.rate = 1.0
+        return modes["MODE_A_CONTINGENCY"]
+    elif c_name == "MODE_B" and ore1_level <= 1e-6:
+        contingency_timer.reset()
+        contingency_timer.upper_threshold = contingency_duration
+        contingency_timer.rate = 1.0
+        return modes["MODE_B_CONTINGENCY"]
+
+    # Surging checks
+    if total_stock > target_total_stock + 1e-6:
+        return modes[f"{c_name}_MINE_SURGING"]
+    return modes[c_name]
+
 
 def build_blending_network(
-    mean_ore_fraction: float = 0.30,
-    std_dev_ore_fraction: float = 0.05,
-    prob_new_facies: float = 0.3,
-    variation_same_facies: float = 0.01,
-    min_ore_mass: float = 30000.0,
-    max_ore_mass: float = 50000.0,
-    total_ore_to_extract: float = 6600000.0,
-    ore_to_be_extracted_during_warming_period: float = 600000.0,
-    target_ore_stock_level: float = 60000.0,
-    critical_ore2_level: float = 20400.0,
-    duration_of_production_campaigns: float = 34.0,
-    duration_of_shutdowns: float = 1.0,
-    duration_of_contingency_segments: float = 1.0,
+    mean_ore_fraction: float = MEAN_ORE_FRACTION,
+    std_dev_ore_fraction: float = STD_DEV_ORE_FRACTION,
+    prob_new_facies: float = PROB_NEW_FACIES,
+    variation_same_facies: float = VARIATION_SAME_FACIES,
+    min_ore_mass: float = MIN_PARCEL_MASS_TONNES,
+    max_ore_mass: float = MAX_PARCEL_MASS_TONNES,
+    total_ore_to_extract: float = TOTAL_ORE_TO_EXTRACT_TONNES,
+    ore_to_be_extracted_during_warming_period: float = WARMING_PERIOD_ORE_TONNES,
+    target_ore_stock_level: float = TARGET_ORE_STOCK_TONNES,
+    critical_ore2_level: float = CRITICAL_ORE2_STOCK_TONNES,
+    duration_of_production_campaigns: float = CAMPAIGN_DURATION_DAYS,
+    duration_of_shutdowns: float = SHUTDOWN_DURATION_DAYS,
+    duration_of_contingency_segments: float = CONTINGENCY_SEGMENT_DURATION_DAYS,
+    modes: Optional[Mapping[str, OperatingMode]] = None,
     **kwargs,
 ) -> tuple:
     stream = autocorrelated_generator(
@@ -49,7 +216,7 @@ def build_blending_network(
         variation_step=variation_same_facies,
         min_mass=min_ore_mass,
         max_mass=max_ore_mass,
-        initial_mass=40000.0,
+        initial_mass=INITIAL_PARCEL_MASS_TONNES,
         attribute_name="ore2_fraction",
     )
     source = MaterialSource(
@@ -72,40 +239,95 @@ def build_blending_network(
         initial_attributes={"ore2_fraction": 1.0},
     )
 
-    mill = Processor(name="mill", max_rate=6000.0)
+    mill = Processor(name="mill", max_rate=MILL_MAX_RATE_TPD)
 
-    mode_controller = OperatingModeController(
-        duration_of_production_campaigns=duration_of_production_campaigns,
-        duration_of_shutdowns=duration_of_shutdowns,
-        duration_of_contingency_segments=duration_of_contingency_segments,
-        critical_ore2_level=critical_ore2_level,
-        target_total_stock=target_ore_stock_level,
+    blending_modes = dict(modes or create_blending_modes())
+
+    timers = CampaignTimers(
+        campaign_duration=duration_of_production_campaigns,
+        contingency_duration=duration_of_contingency_segments,
     )
 
-    return source, mill, mode_controller, ore1_stock, ore2_stock
+    active_campaign = drs.Variable("active_campaign_mode", blending_modes["MODE_A"])
+    active_mode = drs.Variable("active_operating_mode", blending_modes["MODE_A"])
+    blending_modes["MODE_A"].activate()
+
+    control_state = {
+        "timers": timers,
+        "campaign_timer": timers.campaign_timer,
+        "contingency_timer": timers.contingency_timer,
+        "active_campaign": active_campaign,
+        "active_mode": active_mode,
+        "modes": blending_modes,
+        "campaign_duration": duration_of_production_campaigns,
+        "shutdown_duration": duration_of_shutdowns,
+        "contingency_duration": duration_of_contingency_segments,
+        "critical_ore2_level": critical_ore2_level,
+        "target_total_stock": target_ore_stock_level,
+    }
+
+    return source, mill, control_state, ore1_stock, ore2_stock
 
 
 def _register_and_policy(engine: DRSEngine, network: tuple) -> drs.Level:
-    source, mill, mode_ctrl, ore1_stock, ore2_stock = network
+    source, mill, control_state, ore1_stock, ore2_stock = network
     cumulative_milled_mass = drs.Level("cumulative_milled_mass", initial_value=0.0, owner=mill)
     mill.cumulative_milled_mass = cumulative_milled_mass
-    engine.register(source, mill, mode_ctrl, ore1_stock, ore2_stock)
+
+    modes = control_state["modes"]
+    timers = control_state["timers"]
+    campaign_timer = control_state["campaign_timer"]
+    contingency_timer = control_state["contingency_timer"]
+    active_campaign = control_state["active_campaign"]
+    active_mode = control_state["active_mode"]
+
+    engine.register(
+        source,
+        mill,
+        ore1_stock,
+        ore2_stock,
+        timers,
+        *modes.values(),
+    )
 
     @engine.on_step
     def manage_blending(t: float):
-        campaign_mode = mode_ctrl.update_campaign(ore2_stock.level)
-        active_mode = mode_ctrl.resolve_operating_mode(
-            campaign_mode,
-            ore1_level=ore1_stock.level,
-            ore2_level=ore2_stock.level,
+        # 1. Update campaign mode
+        campaign_mode = update_campaign_mode(
+            campaign_timer,
+            active_campaign,
+            ore2_stock.level,
+            modes,
+            campaign_duration=control_state["campaign_duration"],
+            shutdown_duration=control_state["shutdown_duration"],
+            critical_ore2_level=control_state["critical_ore2_level"],
         )
 
-        draw_rates = mode_ctrl.get_draw_rates(active_mode)
+        # 2. Resolve operating mode
+        next_mode = resolve_operating_mode(
+            campaign_mode,
+            active_mode.value,
+            ore1_stock.level,
+            ore2_stock.level,
+            contingency_timer,
+            modes,
+            target_total_stock=control_state["target_total_stock"],
+            contingency_duration=control_state["contingency_duration"],
+        )
+
+        # 3. Transition active mode if changed
+        if active_mode.value != next_mode:
+            active_mode.value.deactivate()
+            next_mode.activate()
+            active_mode.value = next_mode
+
+        # 4. Setpoints & milling
+        draw_rates = next_mode.draw_rates
         ore1_target = draw_rates.get("Ore1Stock", 0.0)
         ore2_target = draw_rates.get("Ore2Stock", 0.0)
 
         ore2_frac = source.current_attributes.get("ore2_fraction", 0.0)
-        mode_name = active_mode.name
+        mode_name = next_mode.name
         if "_MINE_SURGING" in mode_name:
             if mode_name == "MODE_A_MINE_SURGING":
                 effective_fraction = max(1.0 - ore2_frac, 0.01)
@@ -137,7 +359,7 @@ def _register_and_policy(engine: DRSEngine, network: tuple) -> drs.Level:
     return cumulative_milled_mass
 
 
-def print_statistics(mode_ctrl: OperatingModeController, cumulative_milled_mass: drs.Level, total_time: float):
+def print_statistics(modes: Mapping[str, OperatingMode], cumulative_milled_mass: drs.Level, total_time: float):
     print("\n--- Output Statistics ---")
     if total_time > 0:
         for mode_name, label in [
@@ -148,8 +370,8 @@ def print_statistics(mode_ctrl: OperatingModeController, cumulative_milled_mass:
             ("MODE_B_CONTINGENCY", "PortionOfTimeInModeBContingency"),
             ("SHUTDOWN", "PortionOfTimeInShutdown"),
         ]:
-            timer = mode_ctrl.mode_timers.get(mode_name)
-            fraction = (timer.value / total_time) if timer else 0.0
+            mode = modes.get(mode_name)
+            fraction = (mode.cumulative_time / total_time) if mode else 0.0
             print(f"{label}: {fraction:.4f}")
     print(f"CumulativeTonsMilled: {cumulative_milled_mass.value:.2f}")
 
@@ -167,27 +389,31 @@ def run_blending_simulation(
     np.random.seed(seed)
 
     network = build_blending_network(**kwargs)
-    source, mill, mode_ctrl, ore1_stock, ore2_stock = network
-
-    mode_ctrl.active_campaign_mode.value = MILL_MODES["MODE_A"]
+    source, mill, control_state, ore1_stock, ore2_stock = network
+    modes = control_state["modes"]
+    active_mode = control_state["active_mode"]
+    campaign_timer = control_state["campaign_timer"]
+    contingency_timer = control_state["contingency_timer"]
 
     engine = DRSEngine()
     cumulative_milled_mass = _register_and_policy(engine, network)
 
-    # Warmup phase (pre-burns 600,000 tonnes)
-    source.total_tonnes = 600000.0
-    warmup_result = engine.run(until=99999.0)
+    # Warmup phase (pre-burns warming period tonnage)
+    source.total_tonnes = WARMING_PERIOD_ORE_TONNES
+    engine.run(until=99999.0)
 
-    mode_ctrl.reset_mode_timers()
+    # Reset cumulative mode timers after warmup
+    for m in modes.values():
+        m.reset_timer()
 
-    # Production phase (6,600,000 tonnes)
-    source.total_tonnes = 6600000.0
+    # Production phase
+    source.total_tonnes = TOTAL_ORE_TO_EXTRACT_TONNES
 
     telemetry = None
     if plot:
         telemetry = Telemetry(model=engine)
-        telemetry.register_metric("active_operating_mode", lambda t, m, s, _: mode_ctrl.active_operating_mode.value.name)
-        telemetry.register_metric("active_operating_mode_name", lambda t, m, s, _: mode_ctrl.active_operating_mode.value.name)
+        telemetry.register_metric("active_operating_mode", lambda t, m, s, _: active_mode.value.name)
+        telemetry.register_metric("active_operating_mode_name", lambda t, m, s, _: active_mode.value.name)
         telemetry.register_metric("total_stock_level", lambda t, m, s, _: ore1_stock.level + ore2_stock.level)
         telemetry.register_metric(
             "MassOfCurrentParcel",
@@ -203,17 +429,17 @@ def run_blending_simulation(
         )
         telemetry.register_metric(
             "Campaign_Shutdown",
-            lambda t, m, s, _: mode_ctrl.current_campaign_duration.value,
+            lambda t, m, s, _: campaign_timer.value,
         )
         telemetry.register_metric(
             "Contingency",
-            lambda t, m, s, _: mode_ctrl.current_contingency_duration.value,
+            lambda t, m, s, _: contingency_timer.value,
         )
         engine.attach_telemetry(telemetry)
 
     result = engine.run(until=replication_length)
 
-    print_statistics(mode_ctrl, cumulative_milled_mass, result.duration)
+    print_statistics(modes, cumulative_milled_mass, result.duration)
 
     history = None
     if plot and telemetry is not None:
