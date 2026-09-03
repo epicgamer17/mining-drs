@@ -13,6 +13,7 @@ from drs_mining.components.estimation import (
     plot_polygonal_map,
     inverse_distance_weighting,
     nearest_neighbor_grid_estimation,
+    is_within_convex_hull,
 )
 
 
@@ -58,6 +59,32 @@ def test_polygonal_estimation_execution():
     assert (polys["tonnes"] > 0).all()
     assert (polys["contained_metal"] > 0).all()
     assert all(len(v) >= 3 for v in polys["vertices"])
+
+
+def test_polygonal_estimation_clip_to_convex_hull():
+    df_holes = pd.DataFrame({
+        "hole_id": ["DH01", "DH02", "DH03"],
+        "x": [100.0, 300.0, 200.0],
+        "y": [100.0, 100.0, 200.0],
+        "grade": [1.0, 1.0, 1.0],
+        "thickness": [10.0, 10.0, 10.0],
+    })
+    boundary = [(0.0, 0.0), (500.0, 0.0), (500.0, 500.0), (0.0, 500.0)]
+
+    # 1. Unclipped: polygons expand across entire 500x500 boundary (250,000 m2)
+    unclipped = polygonal_estimation(
+        df_holes, boundary=boundary, clip_to_convex_hull=False
+    )
+    assert unclipped["area_m2"].sum() == pytest.approx(250000.0)
+
+    # 2. Clipped to convex hull: total area matches exact triangle area (10,000 m2)
+    # Triangle: base=200, height=100 -> area = 0.5 * 200 * 100 = 10,000
+    clipped = polygonal_estimation(
+        df_holes, boundary=boundary, clip_to_convex_hull=True
+    )
+    assert clipped["area_m2"].sum() == pytest.approx(10000.0)
+    assert (clipped["area_m2"] > 0).all()
+
 
 
 def test_polygonal_reserve_summary(sample_polygons_df):
@@ -163,4 +190,39 @@ def test_nearest_neighbor_grid_estimation():
     assert np.isnan(grades[2])
     # dists should have 1D shape (M,) for k=1
     assert dists.shape == (3,)
+
+
+def test_is_within_convex_hull():
+    samples_xy = np.array([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]])
+    grid_points = np.array([
+        [5.0, 2.0],    # Centroid of triangle -> True
+        [15.0, 15.0],  # Far outside -> False
+        [-1.0, 0.0],   # Just outside -> False
+    ])
+    mask = is_within_convex_hull(samples_xy, grid_points)
+    assert mask[0] == True
+    assert mask[1] == False
+    assert mask[2] == False
+
+
+def test_idw_mask_extrapolation():
+    samples_xy = np.array([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]])
+    sample_grades = np.array([1.0, 2.0, 3.0])
+    # Point at (5, -2) is outside the convex hull, but close (dist=2 < max_radius=10)
+    grid_points = np.array([[5.0, 2.0], [5.0, -2.0]])
+
+    # Without masking: both points get estimated
+    grades_nomask, _ = inverse_distance_weighting(
+        samples_xy, sample_grades, grid_points, max_radius=10.0, mask_extrapolation=False
+    )
+    assert not np.isnan(grades_nomask[0])
+    assert not np.isnan(grades_nomask[1])
+
+    # With masking: outside point gets masked to NaN
+    grades_masked, _ = inverse_distance_weighting(
+        samples_xy, sample_grades, grid_points, max_radius=10.0, mask_extrapolation=True
+    )
+    assert not np.isnan(grades_masked[0])
+    assert np.isnan(grades_masked[1])
+
 

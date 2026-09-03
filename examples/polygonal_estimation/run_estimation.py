@@ -73,6 +73,11 @@ def main():
         help="Maximum radius of influence around drillholes in meters (e.g. 100.0)",
     )
     parser.add_argument(
+        "--clip-to-convex-hull",
+        action="store_true",
+        help="Clip polygons strictly to drillhole convex hull (prevent perimeter extrapolation)",
+    )
+    parser.add_argument(
         "--density",
         type=float,
         default=2.7,
@@ -103,12 +108,13 @@ def main():
     print(drillholes[["hole_id", "x", "y", "grade", "thickness"]].to_string(index=False))
 
     # 2. Run polygonal estimation
-    print(f"\nComputing Voronoi polygons of influence (max_radius={args.max_radius} m)...")
+    print(f"\nComputing Voronoi polygons (max_radius={args.max_radius} m, clip_to_convex_hull={args.clip_to_convex_hull})...")
     polygons_df = polygonal_estimation(
         drillholes,
         boundary=boundary,
         bulk_density=args.density,
         max_radius=args.max_radius,
+        clip_to_convex_hull=args.clip_to_convex_hull,
     )
 
     # 3. Print global reserve summary

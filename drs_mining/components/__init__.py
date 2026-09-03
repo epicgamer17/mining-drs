@@ -10,6 +10,7 @@ from .estimation import (
     plot_polygonal_map,
     inverse_distance_weighting,
     nearest_neighbor_grid_estimation,
+    is_within_convex_hull,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "plot_polygonal_map",
     "inverse_distance_weighting",
     "nearest_neighbor_grid_estimation",
+    "is_within_convex_hull",
 ]

@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import MultiPoint, Point, Polygon, box
 from shapely.ops import voronoi_diagram
-from scipy.spatial import KDTree
+from scipy.spatial import KDTree, Delaunay
 
 
 def polygonal_estimation(
@@ -25,6 +25,7 @@ def polygonal_estimation(
     boundary: Optional[Sequence[Tuple[float, float]]] = None,
     bulk_density: float = 2.7,
     max_radius: Optional[float] = None,
+    clip_to_convex_hull: bool = False,
     grade_col: str = "grade",
     thickness_col: str = "thickness",
     x_col: str = "x",
@@ -43,6 +44,9 @@ def polygonal_estimation(
         Specific gravity / bulk density in tonnes per cubic meter (t/m^3).
     max_radius : float, optional
         Maximum radius of influence (meters) to restrict spatial extrapolation around each drillhole.
+    clip_to_convex_hull : bool, default False
+        If True, clips all polygons strictly to the convex hull of the drillholes,
+        preventing extrapolation beyond the outermost drill pattern.
     grade_col : str, default "grade"
         Column name for assay grade (e.g., % Cu, g/t Au, or attribute fraction).
     thickness_col : str, default "thickness"
@@ -99,6 +103,12 @@ def polygonal_estimation(
             float(xs.max() + pad_x),
             float(ys.max() + pad_y),
         )
+        envelope = boundary_geom
+
+    # Restrict bounding geometry to the convex hull of informing drillholes if requested
+    if clip_to_convex_hull and len(points) >= 3:
+        hull_geom = MultiPoint(points).convex_hull
+        boundary_geom = boundary_geom.intersection(hull_geom)
         envelope = boundary_geom
 
     # 2. Tessellation: Single hole vs Multi-hole Voronoi
@@ -432,6 +442,32 @@ def plot_polygonal_map(
     return ax
 
 
+def is_within_convex_hull(
+    samples_xy: np.ndarray,
+    grid_points: np.ndarray,
+) -> np.ndarray:
+    """Classifies target points as Interpolation (True) or Extrapolation (False).
+
+    A target point x* is interpolated if it lies strictly within the Convex Hull
+    of the informing drillhole samples S.
+
+    Parameters
+    ----------
+    samples_xy : np.ndarray
+        Sample collar/assay coordinates of shape (N, 2) or (N, 3).
+    grid_points : np.ndarray
+        Target estimation coordinates of shape (M, 2) or (M, 3).
+
+    Returns
+    -------
+    np.ndarray of bool
+        Boolean mask of shape (M,) where True indicates interpolation and False
+        indicates extrapolation outside the drillhole envelope.
+    """
+    delaunay = Delaunay(samples_xy)
+    return delaunay.find_simplex(grid_points) >= 0
+
+
 def inverse_distance_weighting(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
@@ -439,6 +475,7 @@ def inverse_distance_weighting(
     power: float = 2.0,
     k_neighbors: int = 8,
     max_radius: Optional[float] = None,
+    mask_extrapolation: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Inverse Distance Weighting (IDW) interpolation using a k-d tree.
 
@@ -456,6 +493,8 @@ def inverse_distance_weighting(
         Number of nearest neighbors to query (k=1 gives Nearest Neighbor).
     max_radius : float, optional
         Maximum search radius. Points with no samples within this radius are NaN.
+    mask_extrapolation : bool, default False
+        If True, blocks outside the drillhole convex hull are set to NaN.
 
     Returns
     -------
@@ -519,6 +558,11 @@ def inverse_distance_weighting(
         exact_sample_idxs = indices[has_any_exact, first_exact_idx]
         estimated_grades[has_any_exact] = sample_grades[exact_sample_idxs]
 
+    # Step 8: Optionally mask out extrapolation blocks outside convex hull
+    if mask_extrapolation:
+        inside_hull = is_within_convex_hull(samples_xy, grid_points)
+        estimated_grades[~inside_hull] = np.nan
+
     # Return distances as (M,) if k=1 for convenience, else (M, k)
     dist_out = distances.ravel() if k_neighbors == 1 else distances
     return estimated_grades, dist_out
@@ -529,8 +573,14 @@ def nearest_neighbor_grid_estimation(
     sample_grades: np.ndarray,
     grid_points: np.ndarray,
     max_radius: Optional[float] = None,
+    mask_extrapolation: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Nearest neighbor estimation (IDW with k=1)."""
     return inverse_distance_weighting(
-        samples_xy, sample_grades, grid_points, k_neighbors=1, max_radius=max_radius
+        samples_xy,
+        sample_grades,
+        grid_points,
+        k_neighbors=1,
+        max_radius=max_radius,
+        mask_extrapolation=mask_extrapolation,
     )

@@ -22,9 +22,11 @@ from matplotlib.path import Path as MplPath
 import numpy as np
 import pandas as pd
 
+from scipy.spatial import ConvexHull
 from drs_mining.components.estimation import (
     inverse_distance_weighting,
     nearest_neighbor_grid_estimation,
+    is_within_convex_hull,
     grade_tonnage_table,
 )
 
@@ -138,32 +140,48 @@ def main():
     print(f"Generated {len(grid_points):,} grid blocks ({args.grid_res:.0f}m x {args.grid_res:.0f}m).")
     print(f"Total Block Model Tonnage: {len(grid_points) * block_tonnes:,.0f} tonnes.")
 
-    # 2. Run Estimator 1: Nearest Neighbor (NN)
-    print(f"\n[1/3] Running Nearest Neighbor (NN)...")
+    # 2. Spatial Classification: Interpolation vs Extrapolation Audit
+    is_interpolated = is_within_convex_hull(samples_xy, grid_points)
+    n_interpolated = int(is_interpolated.sum())
+    n_extrapolated = len(grid_points) - n_interpolated
+
+    print("\n--- Spatial Audit: Interpolation vs. Extrapolation (Convex Hull) ---")
+    print(f"Interpolated Blocks (Inside Convex Hull)  : {n_interpolated:,d} ({n_interpolated / len(grid_points) * 100:.1f}%) -> {n_interpolated * block_tonnes:,.0f} tonnes [High Confidence]")
+    print(f"Extrapolated Blocks (Outside Convex Hull) : {n_extrapolated:,d} ({n_extrapolated / len(grid_points) * 100:.1f}%) -> {n_extrapolated * block_tonnes:,.0f} tonnes [Exploration Risk]")
+
+    # 3. Run Estimator 1: Nearest Neighbor (NN)
+    print(f"\n[1/4] Running Nearest Neighbor (NN)...")
     nn_grades, _ = nearest_neighbor_grid_estimation(
         samples_xy, sample_grades, grid_points, max_radius=args.max_radius
     )
 
-    # 3. Run Estimator 2: IDW² (Standard Mining Default)
-    print(f"[2/3] Running IDW² (power=2.0, k=8)...")
+    # 4. Run Estimator 2: IDW² (Standard Mining Default)
+    print(f"[2/4] Running IDW² (power=2.0, k=8)...")
     idw2_grades, _ = inverse_distance_weighting(
         samples_xy, sample_grades, grid_points, power=2.0, k_neighbors=8, max_radius=args.max_radius
     )
 
-    # 4. Run Estimator 3: IDW¹ (Smooth Moving Average)
-    print(f"[3/3] Running IDW¹ (power=1.0, k=12)...")
+    # 5. Run Estimator 3: IDW¹ (Smooth Moving Average)
+    print(f"[3/4] Running IDW¹ (power=1.0, k=12)...")
     idw1_grades, _ = inverse_distance_weighting(
         samples_xy, sample_grades, grid_points, power=1.0, k_neighbors=12, max_radius=args.max_radius
     )
 
-    # 5. Comparative Summary Statistics
+    # 6. Run Estimator 4: IDW² (Strict Interpolation Only, Mask Extrapolation)
+    print(f"[4/4] Running IDW² with Extrapolation Masked (Strict Interpolation)...")
+    idw2_strict, _ = inverse_distance_weighting(
+        samples_xy, sample_grades, grid_points, power=2.0, k_neighbors=8, max_radius=args.max_radius, mask_extrapolation=True
+    )
+
+    # 7. Comparative Summary Statistics
     models = {
         "Nearest Neighbor (NN)": nn_grades,
-        "Inverse Distance Squared (IDW²)": idw2_grades,
-        "Smooth Inverse Distance (IDW¹)": idw1_grades,
+        "IDW² (Full Extrapolation)": idw2_grades,
+        "IDW¹ (Smooth Moving Avg)": idw1_grades,
+        "IDW² (Strict Interpolation)": idw2_strict,
     }
 
-    print("\n--- Model Comparative Statistics (Smoothing Effect) ---")
+    print("\n--- Model Comparative Statistics (Smoothing & Extrapolation Audit) ---")
     stats_rows = []
     for name, g in models.items():
         valid = g[~np.isnan(g)]
@@ -173,11 +191,11 @@ def main():
             "Std Dev": f"{valid.std():.3f}",
             "Min (%)": f"{valid.min():.3f}",
             "Max (%)": f"{valid.max():.3f}",
-            "Estimated %": f"{len(valid) / len(g) * 100.0:.1f}%",
+            "Estimated Blocks": f"{len(valid):,d} ({len(valid) / len(g) * 100.0:.1f}%)",
         })
     print(pd.DataFrame(stats_rows).to_string(index=False))
 
-    # 6. Cutoff Grade-Tonnage Sensitivity for IDW²
+    # 8. Cutoff Grade-Tonnage Sensitivity for IDW² (Standard)
     block_df = pd.DataFrame({
         "grade": idw2_grades[~np.isnan(idw2_grades)],
         "tonnes": block_tonnes,
@@ -195,15 +213,19 @@ def main():
     gt_disp["metal_recovery_pct"] = gt_disp["metal_recovery_pct"].map(lambda x: f"{x:.1f}%")
     print(gt_disp[["ore_tonnes", "ore_grade", "waste_tonnes", "strip_ratio", "ore_recovery_pct", "metal_recovery_pct"]].to_string())
 
-    # 7. Spatial Visualization
+    # 9. Spatial Visualization
     if not args.no_plot:
         Path(args.save_plot).parent.mkdir(parents=True, exist_ok=True)
         xx, yy, inside_mask = grid_info
 
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
+        fig, axes = plt.subplots(1, 4, figsize=(24, 6), sharey=True)
         v_min, v_max = float(sample_grades.min()), float(sample_grades.max())
 
         b_poly = np.array(list(boundary) + [boundary[0]])
+
+        # Compute convex hull vertices of drillholes for drawing
+        hull = ConvexHull(samples_xy)
+        hull_pts = np.vstack([samples_xy[hull.vertices], samples_xy[hull.vertices[0]]])
 
         for ax, (name, g_vals) in zip(axes, models.items()):
             # Reconstruct 2D grid image
@@ -222,7 +244,17 @@ def main():
             )
 
             # Overlay concession boundary
-            ax.plot(b_poly[:, 0], b_poly[:, 1], "r--", linewidth=1.5, label="Boundary")
+            ax.plot(b_poly[:, 0], b_poly[:, 1], "r--", linewidth=1.5, label="Concession Perimeter")
+
+            # Overlay drillhole convex hull
+            ax.plot(
+                hull_pts[:, 0],
+                hull_pts[:, 1],
+                color="cyan",
+                linestyle="-.",
+                linewidth=2.0,
+                label="Drillhole Convex Hull",
+            )
 
             # Overlay drillholes
             sc = ax.scatter(
