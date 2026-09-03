@@ -19,6 +19,7 @@ import pandas as pd
 from shapely.geometry import MultiPoint, Point, Polygon, box
 from shapely.ops import voronoi_diagram
 from scipy.spatial import KDTree, Delaunay
+from scipy import stats
 
 
 def polygonal_estimation(
@@ -2751,4 +2752,1461 @@ def plot_in_situ_vs_diluted_curves(
     ax1.set_title(title, fontsize=12, fontweight="bold", pad=12)
     fig.tight_layout()
     return fig, ax1
+
+
+# =============================================================================
+# DATA PREPARATION (DOWN-HOLE COMPOSITING & HIGH-GRADE CAPPING / TOP-CUTTING)
+# =============================================================================
+
+
+def composite_drillhole_intervals(
+    assay_df: pd.DataFrame,
+    composite_length: float,
+    hole_id_col: str = "hole_id",
+    from_col: str = "from_m",
+    to_col: str = "to_m",
+    grade_col: str = "grade",
+    domain_col: Optional[str] = None,
+    density_col: Optional[str] = None,
+    min_length_ratio: float = 0.50,
+    remnant_strategy: str = "discard",
+) -> pd.DataFrame:
+    """Down-hole regular compositing with domain-boundary constraints.
+
+    Solves the Support Effect in mining geostatistics: raw drill core assays have
+    variable sample lengths cut along geological and alteration contacts. Equal
+    volume/length support is required prior to spatial statistical evaluation and
+    variography.
+
+    Parameters
+    ----------
+    assay_df : pd.DataFrame
+        Raw drillhole assay intervals with collar/survey coordinates.
+    composite_length : float
+        Target composite interval length (e.g., 2.0m or 12.0m mining bench height).
+        Required without default.
+    hole_id_col : str, default "hole_id"
+        Drillhole identifier column name.
+    from_col, to_col : str, default "from_m", "to_m"
+        Down-hole interval start and end depth column names (meters).
+    grade_col : str, default "grade"
+        Assay grade column name.
+    domain_col : str, optional
+        Geological / lithological / structural domain column.
+        CRITICAL: If provided, compositing strictly resets at domain contacts.
+        Composites never cross domain boundaries.
+    density_col : str, optional
+        Bulk density column for mass-weighted compositing (length * density).
+    min_length_ratio : float, default 0.50
+        Minimum length ratio (relative to composite_length) required to retain a
+        terminal remnant interval. (e.g., 0.50 retains remnants >= 50% of target).
+    remnant_strategy : {"discard", "distribute"}, default "discard"
+        Strategy for terminal leftovers:
+        - "discard": Discards remnants shorter than min_length_ratio * composite_length.
+        - "distribute": Evenly adjusts composite lengths across the interval so all
+          composites have equal support without tiny remnants.
+
+    Returns
+    -------
+    pd.DataFrame
+        Composited drillhole intervals with length-weighted grades and midpoint coordinates.
+    """
+    if composite_length <= 0:
+        raise ValueError(
+            f"composite_length must be strictly positive, got {composite_length}"
+        )
+    if remnant_strategy not in ("discard", "distribute"):
+        raise ValueError(
+            f"remnant_strategy must be 'discard' or 'distribute', got '{remnant_strategy}'"
+        )
+
+    for col in (hole_id_col, from_col, to_col, grade_col):
+        if col not in assay_df.columns:
+            raise ValueError(f"Required column '{col}' not found in assay DataFrame.")
+
+    if domain_col is not None and domain_col not in assay_df.columns:
+        raise ValueError(f"Specified domain column '{domain_col}' not found.")
+
+    # Spatial coordinate columns to preserve and interpolate
+    coord_cols = [c for c in ("x", "y", "z", "elevation") if c in assay_df.columns]
+
+    # Grouping keys: strictly constrain by hole_id and domain (if provided)
+    group_cols = [hole_id_col]
+    if domain_col is not None:
+        group_cols.append(domain_col)
+
+    composite_records = []
+    discarded_count = 0
+
+    for keys, grp in assay_df.groupby(group_cols, sort=False):
+        hole_id = keys[0] if isinstance(keys, tuple) else keys
+        dom_val = keys[1] if (isinstance(keys, tuple) and len(keys) > 1) else None
+
+        sub = grp.sort_values(from_col).copy()
+        if len(sub) == 0:
+            continue
+
+        run_start = float(sub[from_col].min())
+        run_end = float(sub[to_col].max())
+        run_len = run_end - run_start
+
+        if run_len <= 0:
+            continue
+
+        # Establish composite interval boundaries
+        comp_intervals = []
+        if remnant_strategy == "distribute":
+            n_comp = max(1, int(round(run_len / composite_length)))
+            actual_len = run_len / n_comp
+            # If total run is shorter than min_length_ratio * composite_length, check discard
+            if run_len < (min_length_ratio * composite_length):
+                discarded_count += 1
+                continue
+            for i in range(n_comp):
+                c_start = run_start + i * actual_len
+                c_end = run_start + (i + 1) * actual_len
+                comp_intervals.append((c_start, c_end))
+        else:  # "discard"
+            curr = run_start
+            while curr + composite_length <= run_end:
+                comp_intervals.append((curr, curr + composite_length))
+                curr += composite_length
+            remnant_len = run_end - curr
+            if remnant_len >= (min_length_ratio * composite_length):
+                comp_intervals.append((curr, run_end))
+            elif remnant_len > 0:
+                discarded_count += 1
+
+        # Calculate length-weighted (and density-weighted) grades for each composite
+        raw_from = sub[from_col].to_numpy(dtype=float)
+        raw_to = sub[to_col].to_numpy(dtype=float)
+        raw_grade = sub[grade_col].to_numpy(dtype=float)
+        raw_dens = (
+            sub[density_col].to_numpy(dtype=float)
+            if density_col
+            else np.ones(len(sub), dtype=float)
+        )
+
+        for c_from, c_to in comp_intervals:
+            c_len = c_to - c_from
+            if c_len <= 0:
+                continue
+
+            # Overlap calculation
+            overlap_starts = np.maximum(c_from, raw_from)
+            overlap_ends = np.minimum(c_to, raw_to)
+            overlaps = np.maximum(0.0, overlap_ends - overlap_starts)
+
+            valid_mask = overlaps > 1e-9
+            if not np.any(valid_mask):
+                continue
+
+            active_lens = overlaps[valid_mask]
+            active_grades = raw_grade[valid_mask]
+            active_weights = active_lens * raw_dens[valid_mask]
+
+            total_weight = float(active_weights.sum())
+            if total_weight <= 0:
+                continue
+
+            weighted_grade = float((active_weights * active_grades).sum() / total_weight)
+
+            rec: dict = {
+                hole_id_col: hole_id,
+                from_col: c_from,
+                to_col: c_to,
+                "length": c_len,
+                grade_col: weighted_grade,
+            }
+            if domain_col is not None:
+                rec[domain_col] = dom_val
+
+            # Interpolate spatial coordinates to composite midpoint
+            c_mid = (c_from + c_to) / 2.0
+            for c_name in coord_cols:
+                raw_coords = sub[c_name].to_numpy(dtype=float)
+                # Weighted average coordinate for midpoint
+                comp_coord = float((active_lens * raw_coords[valid_mask]).sum() / active_lens.sum())
+                rec[c_name] = comp_coord
+
+            composite_records.append(rec)
+
+    out_df = pd.DataFrame(composite_records)
+    out_df.attrs["composite_length"] = composite_length
+    out_df.attrs["remnant_strategy"] = remnant_strategy
+    out_df.attrs["discarded_remnants_count"] = discarded_count
+    return out_df
+
+
+def apply_grade_capping(
+    composite_df: pd.DataFrame,
+    cap_grade: Optional[float] = None,
+    percentile: Optional[float] = None,
+    grade_col: str = "grade",
+    length_col: Optional[str] = "length",
+    output_col: str = "capped_grade",
+) -> pd.DataFrame:
+    """Applies statistical top-cutting (capping) to composited drillhole intervals.
+
+    Mitigates the Proportional Effect and prevents erratic high-grade outliers from
+    smearing artificial grade balloons across neighboring mining blocks during
+    spatial estimation.
+
+    Parameters
+    ----------
+    composite_df : pd.DataFrame
+        Composited drillhole intervals. Capping must always follow compositing.
+    cap_grade : float, optional
+        Explicit maximum grade threshold. Samples above this grade are clamped to cap_grade.
+    percentile : float, optional
+        Percentile threshold (e.g., 99.0 or 99.5) to compute cap_grade if cap_grade is not provided.
+    grade_col : str, default "grade"
+        Grade column name in composite_df.
+    length_col : str, optional, default "length"
+        Interval length column used for calculating length-weighted metal reduction.
+    output_col : str, default "capped_grade"
+        Column name to store the capped grades in the returned DataFrame.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of composite_df with output_col containing capped grades and
+        comprehensive audit metadata attached in .attrs["capping_summary"].
+    """
+    if cap_grade is None and percentile is None:
+        raise ValueError("Must specify either an explicit cap_grade or a percentile (e.g. 99.0).")
+
+    if grade_col not in composite_df.columns:
+        raise ValueError(f"Grade column '{grade_col}' not found in DataFrame.")
+
+    grades = composite_df[grade_col].to_numpy(dtype=float)
+    if len(grades) == 0:
+        res = composite_df.copy()
+        res[output_col] = grades
+        return res
+
+    # Determine capping threshold
+    if cap_grade is None:
+        if not (0.0 < percentile <= 100.0):
+            raise ValueError(f"Percentile must be in (0, 100], got {percentile}")
+        cap_val = float(np.percentile(grades, percentile))
+    else:
+        if cap_grade <= 0:
+            raise ValueError(f"cap_grade must be strictly positive, got {cap_grade}")
+        cap_val = float(cap_grade)
+
+    capped_grades = np.minimum(grades, cap_val)
+
+    # Weights for metal calculation
+    if length_col is not None and length_col in composite_df.columns:
+        weights = composite_df[length_col].to_numpy(dtype=float)
+    else:
+        weights = np.ones(len(grades), dtype=float)
+
+    uncapped_metal = float((weights * grades).sum())
+    capped_metal = float((weights * capped_grades).sum())
+    metal_reduction_pct = (
+        ((uncapped_metal - capped_metal) / uncapped_metal) * 100.0
+        if uncapped_metal > 0
+        else 0.0
+    )
+
+    n_capped = int((grades > cap_val).sum())
+    n_total = len(grades)
+
+    uncapped_mean = float(grades.mean())
+    capped_mean = float(capped_grades.mean())
+    uncapped_std = float(grades.std())
+    capped_std = float(capped_grades.std())
+
+    uncapped_cv = float(uncapped_std / uncapped_mean) if uncapped_mean > 0 else 0.0
+    capped_cv = float(capped_std / capped_mean) if capped_mean > 0 else 0.0
+
+    result_df = composite_df.copy()
+    result_df[output_col] = capped_grades
+
+    summary = {
+        "cap_grade": cap_val,
+        "total_samples": n_total,
+        "samples_capped": n_capped,
+        "samples_capped_pct": float(n_capped / n_total * 100.0),
+        "metal_reduction_pct": float(metal_reduction_pct),
+        "uncapped_mean": uncapped_mean,
+        "capped_mean": capped_mean,
+        "uncapped_std": uncapped_std,
+        "capped_std": capped_std,
+        "uncapped_cv": uncapped_cv,
+        "capped_cv": capped_cv,
+    }
+    result_df.attrs["capping_summary"] = summary
+    return result_df
+
+
+# =============================================================================
+# EXPLORATORY DATA ANALYSIS (EDA) & DISTRIBUTION DIAGNOSTICS
+# =============================================================================
+
+
+def exploratory_data_analysis(
+    df: pd.DataFrame,
+    grade_col: str = "grade",
+    weights_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """Computes comprehensive summary statistics for mineral resource evaluation.
+
+    Complies with NI 43-101 and JORC reporting standards for exploratory data
+    analysis (EDA). Evaluates distributional symmetry, mean vs. median divergence,
+    the Coefficient of Variation (CV = sigma / mu), and preferential drilling
+    clustering bias if weights are provided.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Assay or composite data table.
+    grade_col : str, default "grade"
+        Grade column name.
+    weights_col : str, optional
+        Declustering or spatial weights column. If provided, computes both Naive
+        and Declustered statistics alongside clustering bias %.
+
+    Returns
+    -------
+    pd.DataFrame
+        Summary table comparing Naive (and Declustered) metrics:
+        - Count, Min, Max, Mean, Median (P50), Mean/Median Ratio
+        - Variance, Standard Deviation, Coefficient of Variation (CV)
+        - Skewness, Kurtosis
+        - Percentiles: P10, P25, P50, P75, P90, P95, P99
+        Attributes (.attrs) include 'cv_status' and 'clustering_bias_pct'.
+    """
+    if grade_col not in df.columns:
+        raise ValueError(f"Grade column '{grade_col}' not found in DataFrame.")
+
+    grades = df[grade_col].to_numpy(dtype=float)
+    valid_mask = ~np.isnan(grades)
+    grades = grades[valid_mask]
+    n = len(grades)
+
+    if n == 0:
+        raise ValueError(f"No valid non-null values found in column '{grade_col}'.")
+
+    # Naive statistics
+    min_val = float(grades.min())
+    max_val = float(grades.max())
+    mean_val = float(grades.mean())
+    median_val = float(np.median(grades))
+    var_val = float(grades.var(ddof=1)) if n > 1 else 0.0
+    std_val = float(np.sqrt(var_val))
+    cv_val = float(std_val / mean_val) if mean_val > 0 else 0.0
+    skew_val = float(stats.skew(grades)) if n > 2 else 0.0
+    kurt_val = float(stats.kurtosis(grades)) if n > 3 else 0.0
+
+    p10 = float(np.percentile(grades, 10.0))
+    p25 = float(np.percentile(grades, 25.0))
+    p50 = median_val
+    p75 = float(np.percentile(grades, 75.0))
+    p90 = float(np.percentile(grades, 90.0))
+    p95 = float(np.percentile(grades, 95.0))
+    p99 = float(np.percentile(grades, 99.0))
+
+    mean_median_ratio = float(mean_val / median_val) if median_val > 0 else 1.0
+
+    metrics = [
+        "Sample Count",
+        "Minimum",
+        "Maximum",
+        "Mean",
+        "Median (P50)",
+        "Mean / Median Ratio",
+        "Variance",
+        "Standard Deviation",
+        "Coeff. of Variation (CV)",
+        "Skewness",
+        "Kurtosis",
+        "P10",
+        "P25",
+        "P75",
+        "P90",
+        "P95",
+        "P99",
+    ]
+
+    naive_vals = [
+        float(n),
+        min_val,
+        max_val,
+        mean_val,
+        median_val,
+        mean_median_ratio,
+        var_val,
+        std_val,
+        cv_val,
+        skew_val,
+        kurt_val,
+        p10,
+        p25,
+        p75,
+        p90,
+        p95,
+        p99,
+    ]
+
+    data = {"Metric": metrics, "Naive": naive_vals}
+
+    # Optional declustered statistics
+    clustering_bias_pct = None
+    if weights_col is not None:
+        if weights_col not in df.columns:
+            raise ValueError(f"Weights column '{weights_col}' not found in DataFrame.")
+        w = df[weights_col].to_numpy(dtype=float)[valid_mask]
+        w_sum = w.sum()
+        if w_sum > 0:
+            w_norm = w / w_sum
+            dec_mean = float(np.sum(w_norm * grades))
+            dec_var = float(np.sum(w_norm * (grades - dec_mean) ** 2))
+            dec_std = float(np.sqrt(dec_var))
+            dec_cv = float(dec_std / dec_mean) if dec_mean > 0 else 0.0
+
+            # Weighted percentiles
+            sort_idx = np.argsort(grades)
+            sorted_g = grades[sort_idx]
+            cum_w = np.cumsum(w_norm[sort_idx])
+
+            def w_perc(pct: float) -> float:
+                return float(np.interp(pct / 100.0, cum_w, sorted_g))
+
+            dec_med = w_perc(50.0)
+            dec_p10 = w_perc(10.0)
+            dec_p25 = w_perc(25.0)
+            dec_p75 = w_perc(75.0)
+            dec_p90 = w_perc(90.0)
+            dec_p95 = w_perc(95.0)
+            dec_p99 = w_perc(99.0)
+
+            clustering_bias_pct = float(
+                ((mean_val - dec_mean) / dec_mean) * 100.0 if dec_mean > 0 else 0.0
+            )
+
+            dec_vals = [
+                float(n),
+                min_val,
+                max_val,
+                dec_mean,
+                dec_med,
+                float(dec_mean / dec_med) if dec_med > 0 else 1.0,
+                dec_var,
+                dec_std,
+                dec_cv,
+                skew_val,
+                kurt_val,
+                dec_p10,
+                dec_p25,
+                dec_p75,
+                dec_p90,
+                dec_p95,
+                dec_p99,
+            ]
+            data["Declustered"] = dec_vals
+
+    out_df = pd.DataFrame(data).set_index("Metric")
+
+    # Geostatistical rule of thumb on CV:
+    if cv_val <= 1.0:
+        cv_status = "Well-behaved / Low skewness (linear geostatistics suitable)"
+    elif cv_val <= 1.5:
+        cv_status = "Moderately skewed (monitor variogram stability and kriging weights)"
+    else:
+        cv_status = "Highly skewed / Outlier risk (CV > 1.5: top-cutting or domain review recommended)"
+
+    out_df.attrs["cv_status"] = cv_status
+    out_df.attrs["cv"] = cv_val
+    if clustering_bias_pct is not None:
+        out_df.attrs["clustering_bias_pct"] = clustering_bias_pct
+
+    return out_df
+
+
+def plot_eda_distributions(
+    df: pd.DataFrame,
+    grade_col: str = "grade",
+    capped_grade_col: Optional[str] = None,
+    cap_grade: Optional[float] = None,
+    bins: int = 30,
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (16.0, 5.0),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Generates the standard 3-panel Exploratory Data Analysis (EDA) distribution figure.
+
+    Visualizes:
+    1. Linear Histogram & Density with Cumulative Frequency (showing mean, median, CV).
+    2. Log-Transformed Distribution (diagnosing unimodal vs. bimodal/multimodal mixing).
+    3. Log-Probability Plot (normal probability plot of log grades for capping threshold validation).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Assay or composite table.
+    grade_col : str, default "grade"
+        Grade column name.
+    capped_grade_col : str, optional
+        Capped grade column name to compare before vs. after distributions.
+    cap_grade : float, optional
+        Explicit capping threshold value to display as horizontal cutoff on the
+        probability plot and vertical line on the histogram.
+    bins : int, default 30
+        Number of histogram bins.
+    grade_unit : str, default "% Cu"
+        Grade unit label.
+    title : str, optional
+        Overall figure title.
+    figsize : tuple of float, default (16.0, 5.0)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Matplotlib figure and the three axes objects.
+    """
+    if grade_col not in df.columns:
+        raise ValueError(f"Grade column '{grade_col}' not found in DataFrame.")
+
+    raw_grades = df[grade_col].to_numpy(dtype=float)
+    valid_mask = ~np.isnan(raw_grades) & (raw_grades > 0)
+    grades = raw_grades[valid_mask]
+    n = len(grades)
+
+    if n == 0:
+        raise ValueError("No positive non-null grade values available for plotting.")
+
+    mean_g = float(grades.mean())
+    med_g = float(np.median(grades))
+    std_g = float(grades.std())
+    cv_g = float(std_g / mean_g) if mean_g > 0 else 0.0
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    # -------------------------------------------------------------------------
+    # Panel 1: Linear Histogram + Cumulative Frequency
+    # -------------------------------------------------------------------------
+    ax1 = axes[0]
+    ax1_cum = ax1.twinx()
+
+    counts, bin_edges, _ = ax1.hist(
+        grades,
+        bins=bins,
+        color="#1f77b4",
+        edgecolor="black",
+        alpha=0.65,
+        density=False,
+        label="Raw Composites",
+    )
+
+    # Overlay capped distribution if available
+    if capped_grade_col is not None and capped_grade_col in df.columns:
+        capped_g = df[capped_grade_col].to_numpy(dtype=float)[valid_mask]
+        ax1.hist(
+            capped_g,
+            bins=bins,
+            color="#d62728",
+            edgecolor="#d62728",
+            histtype="step",
+            linewidth=2.0,
+            label="After Capping",
+        )
+
+    # Cumulative % curve
+    sorted_g = np.sort(grades)
+    cum_pct = np.linspace(0.0, 100.0, len(sorted_g))
+    ax1_cum.plot(
+        sorted_g,
+        cum_pct,
+        color="#2ca02c",
+        linewidth=2.0,
+        linestyle="-",
+        label="Cum. Freq. (%)",
+    )
+    ax1_cum.set_ylabel("Cumulative Frequency (%)", color="#2ca02c", fontsize=9.5)
+    ax1_cum.tick_params(axis="y", labelcolor="#2ca02c")
+    ax1_cum.set_ylim(0, 105)
+
+    # Reference lines
+    ax1.axvline(mean_g, color="#d62728", linestyle="--", linewidth=1.5, label=f"Mean: {mean_g:.2f}")
+    ax1.axvline(med_g, color="#ff7f0e", linestyle=":", linewidth=1.5, label=f"Median: {med_g:.2f}")
+    if cap_grade is not None:
+        ax1.axvline(
+            cap_grade, color="black", linestyle="-.", linewidth=1.5, label=f"Cap: {cap_grade:.2f}"
+        )
+
+    ax1.set_xlabel(f"Grade ({grade_unit})", fontsize=10, fontweight="bold")
+    ax1.set_ylabel("Sample Frequency", fontsize=10, fontweight="bold")
+    ax1.set_title(f"Histogram & Cumulative Frequency\n(N={n}, CV={cv_g:.2f})", fontsize=11, fontweight="bold")
+    ax1.grid(True, linestyle=":", alpha=0.5)
+
+    # Combine legends from both axes
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1_cum.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=8, framealpha=0.9)
+
+    # -------------------------------------------------------------------------
+    # Panel 2: Log-Transformed Distribution (Unimodal vs. Multimodal)
+    # -------------------------------------------------------------------------
+    ax2 = axes[1]
+    log_grades = np.log(grades)
+
+    ax2.hist(
+        log_grades,
+        bins=bins,
+        color="#9467bd",
+        edgecolor="black",
+        alpha=0.65,
+        density=True,
+        label="ln(Grade) Density",
+    )
+
+    # Fitted normal PDF for visual log-normality reference
+    mu_log = float(log_grades.mean())
+    std_log = float(log_grades.std())
+    x_eval = np.linspace(log_grades.min(), log_grades.max(), 200)
+    pdf_eval = stats.norm.pdf(x_eval, mu_log, std_log)
+    ax2.plot(x_eval, pdf_eval, color="#d62728", linewidth=2.0, label="Fitted Log-Normal")
+
+    ax2.set_xlabel(f"ln(Grade {grade_unit})", fontsize=10, fontweight="bold")
+    ax2.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
+    ax2.set_title("Log-Transformed Distribution\n(Population Modality)", fontsize=11, fontweight="bold")
+    ax2.grid(True, linestyle=":", alpha=0.5)
+    ax2.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+
+    # -------------------------------------------------------------------------
+    # Panel 3: Log-Probability Plot (Normal Probability Plot of Log Grades)
+    # -------------------------------------------------------------------------
+    ax3 = axes[2]
+
+    # Blom plotting position: (i - 0.375) / (N + 0.25)
+    i_rank = np.arange(1, n + 1)
+    p_blom = (i_rank - 0.375) / (n + 0.25)
+    z_scores = stats.norm.ppf(p_blom)
+
+    ax3.scatter(
+        z_scores,
+        sorted_g,
+        s=16,
+        color="#1f77b4",
+        alpha=0.75,
+        edgecolors="none",
+        label="Raw Composites",
+    )
+
+    if capped_grade_col is not None and capped_grade_col in df.columns:
+        sorted_cap = np.sort(df[capped_grade_col].to_numpy(dtype=float)[valid_mask])
+        ax3.scatter(
+            z_scores,
+            sorted_cap,
+            s=12,
+            color="#d62728",
+            alpha=0.75,
+            marker="x",
+            label="Capped Composites",
+        )
+
+    if cap_grade is not None:
+        ax3.axhline(
+            cap_grade,
+            color="#d62728",
+            linestyle="--",
+            linewidth=1.8,
+            label=f"Cap Threshold: {cap_grade:.2f} {grade_unit}",
+        )
+
+    ax3.set_yscale("log")
+
+    # Set probability-spaced ticks on x-axis
+    prob_ticks = np.array([0.001, 0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 0.999])
+    z_ticks = stats.norm.ppf(prob_ticks)
+    prob_labels = ["0.1%", "1%", "5%", "10%", "25%", "50%", "75%", "90%", "95%", "99%", "99.9%"]
+
+    # Filter ticks within actual z range
+    in_range = (z_ticks >= z_scores.min() - 0.2) & (z_ticks <= z_scores.max() + 0.2)
+    ax3.set_xticks(z_ticks[in_range])
+    ax3.set_xticklabels([prob_labels[k] for k in range(len(prob_labels)) if in_range[k]], fontsize=8)
+
+    ax3.set_xlabel("Cumulative Probability (%)", fontsize=10, fontweight="bold")
+    ax3.set_ylabel(f"Grade ({grade_unit}, Log Scale)", fontsize=10, fontweight="bold")
+    ax3.set_title("Log-Probability Plot\n(Capping & Outlier Diagnostic)", fontsize=11, fontweight="bold")
+    ax3.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax3.legend(loc="upper left", fontsize=8.5, framealpha=0.9)
+
+    if title:
+        fig.suptitle(title, fontsize=12, fontweight="bold", y=1.03)
+
+    fig.tight_layout()
+    return fig, axes
+
+
+# =============================================================================
+# SPATIAL DOMAIN DELINEATION (CONTACT PROFILE ANALYSIS: HARD VS. SOFT BOUNDARY)
+# =============================================================================
+
+
+def contact_profile_analysis(
+    df: pd.DataFrame,
+    domain_col: str,
+    grade_col: str,
+    distance_col: Optional[str] = None,
+    contact_surface: Optional[Sequence[Tuple[float, float]]] = None,
+    bin_width: float = 2.0,
+    max_distance: float = 30.0,
+    domain_a: Optional[Any] = None,
+    domain_b: Optional[Any] = None,
+) -> pd.DataFrame:
+    """Evaluates grade continuity across a geological contact (Boundary Analysis).
+
+    Determines quantitatively whether a geological, lithological, or structural
+    contact is:
+    - HARD BOUNDARY: A sharp step-change discontinuity at distance 0.
+      Requires strict segregation during kriging/interpolation (no sample sharing).
+    - SOFT BOUNDARY: A continuous gradient with no discontinuity.
+      Samples from both sides can be freely shared across the contact.
+    - SEMI-SOFT / TRANSITIONAL BOUNDARY: A moderate transition zone.
+      Samples are shared only within a restricted buffer or with distance decay.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Composite or assay data table.
+    domain_col : str
+        Domain classification column (e.g. "lithology", "oxidation", "zone").
+    grade_col : str
+        Grade column name.
+    distance_col : str, optional
+        Signed perpendicular distance to the contact surface (negative for domain_a,
+        positive for domain_b). If omitted, auto-detected from 'distance' or computed
+        from contact_surface.
+    contact_surface : sequence of tuple of float, optional
+        2D contact line segment [(x1, y1), (x2, y2)] used to compute perpendicular
+        signed distance if distance_col is not pre-calculated.
+    bin_width : float, default 2.0
+        Distance bin width (meters).
+    max_distance : float, default 30.0
+        Maximum distance from contact to evaluate in each direction (meters).
+    domain_a, domain_b : Any, optional
+        Identifiers for the two domains bordering the contact.
+        If omitted, selected as the two most frequent categories in domain_col.
+
+    Returns
+    -------
+    pd.DataFrame
+        Contact profile binned table with columns:
+        ['bin_center', 'bin_min', 'bin_max', 'domain', 'sample_count', 'mean_grade', 'std_grade', 'sem_grade']
+        Audit attributes (.attrs) include 'boundary_type', 'step_change', 'step_ratio', and 'recommendation'.
+    """
+    if domain_col not in df.columns:
+        raise ValueError(f"Domain column '{domain_col}' not found in DataFrame.")
+    if grade_col not in df.columns:
+        raise ValueError(f"Grade column '{grade_col}' not found in DataFrame.")
+    if bin_width <= 0:
+        raise ValueError(f"bin_width must be strictly positive, got {bin_width}")
+    if max_distance <= 0:
+        raise ValueError(f"max_distance must be strictly positive, got {max_distance}")
+
+    # Determine domain pair
+    if domain_a is None or domain_b is None:
+        top_domains = df[domain_col].value_counts().index.tolist()
+        if len(top_domains) < 2:
+            raise ValueError(f"Need at least 2 unique domains in '{domain_col}' for contact analysis.")
+        dom_a = top_domains[0] if domain_a is None else domain_a
+        dom_b = top_domains[1] if domain_b is None else domain_b
+    else:
+        dom_a, dom_b = domain_a, domain_b
+
+    # Filter to samples belonging to domain_a or domain_b
+    sub_df = df[df[domain_col].isin([dom_a, dom_b])].copy()
+    if len(sub_df) == 0:
+        raise ValueError(f"No samples found for domains '{dom_a}' and '{dom_b}'.")
+
+    # Compute or extract signed distance
+    if distance_col is not None:
+        if distance_col not in sub_df.columns:
+            raise ValueError(f"Specified distance_col '{distance_col}' not found.")
+        dists = sub_df[distance_col].to_numpy(dtype=float)
+    elif "distance" in sub_df.columns:
+        dists = sub_df["distance"].to_numpy(dtype=float)
+    elif "dist_to_contact" in sub_df.columns:
+        dists = sub_df["dist_to_contact"].to_numpy(dtype=float)
+    elif contact_surface is not None:
+        # Calculate 2D signed perpendicular distance to line segment
+        pts = sub_df[["x", "y"]].to_numpy(dtype=float)
+        p1 = np.array(contact_surface[0], dtype=float)
+        p2 = np.array(contact_surface[1], dtype=float)
+        line_vec = p2 - p1
+        line_len = np.linalg.norm(line_vec)
+        if line_len <= 1e-9:
+            raise ValueError("Contact surface line segment has zero length.")
+        normal = np.array([-line_vec[1], line_vec[0]]) / line_len
+
+        # Signed distance from p1 along normal
+        dists = np.dot(pts - p1, normal)
+    else:
+        raise ValueError(
+            "Must provide either 'distance_col' or a 2D 'contact_surface' segment."
+        )
+
+    dom_vals = sub_df[domain_col].to_numpy()
+    if (dists >= 0).all():
+        signed_dists = np.where(dom_vals == dom_a, -dists, dists)
+    else:
+        # Orient signed distances so that domain_a is on the negative distance side
+        mask_a = dom_vals == dom_a
+        mask_b = dom_vals == dom_b
+        if mask_a.any() and mask_b.any():
+            if np.mean(dists[mask_a]) > np.mean(dists[mask_b]):
+                dists = -dists
+        signed_dists = dists.copy()
+
+    grades = sub_df[grade_col].to_numpy(dtype=float)
+
+    # Construct discrete distance bins with 0.0 as an exact boundary
+    left_edges = np.arange(-max_distance, 0.0, bin_width)
+    right_edges = np.arange(0.0, max_distance + 1e-6, bin_width)
+    bin_edges = np.unique(np.concatenate([left_edges, [0.0], right_edges]))
+
+    records = []
+    for i in range(len(bin_edges) - 1):
+        b_min = float(bin_edges[i])
+        b_max = float(bin_edges[i + 1])
+        b_center = (b_min + b_max) / 2.0
+        is_domain_a = b_center < 0
+
+        # Mask: include upper edge for last bin
+        if i == len(bin_edges) - 2:
+            mask = (signed_dists >= b_min) & (signed_dists <= b_max)
+        else:
+            mask = (signed_dists >= b_min) & (signed_dists < b_max)
+
+        bin_grades = grades[mask]
+        valid_grades = bin_grades[~np.isnan(bin_grades)]
+        cnt = len(valid_grades)
+
+        if cnt > 0:
+            mean_g = float(valid_grades.mean())
+            std_g = float(valid_grades.std()) if cnt > 1 else 0.0
+            sem_g = float(std_g / np.sqrt(cnt))
+        else:
+            mean_g = np.nan
+            std_g = np.nan
+            sem_g = np.nan
+
+        records.append({
+            "bin_center": b_center,
+            "bin_min": b_min,
+            "bin_max": b_max,
+            "domain": dom_a if is_domain_a else dom_b,
+            "sample_count": cnt,
+            "mean_grade": mean_g,
+            "std_grade": std_g,
+            "sem_grade": sem_g,
+        })
+
+    profile_df = pd.DataFrame(records)
+
+    # -------------------------------------------------------------------------
+    # Decision Rule: Hard vs. Soft vs. Semi-Soft
+    # -------------------------------------------------------------------------
+    # Find innermost valid bins adjacent to contact (left and right of 0)
+    left_sub = profile_df[profile_df["bin_center"] < 0].dropna(subset=["mean_grade"])
+    right_sub = profile_df[profile_df["bin_center"] > 0].dropna(subset=["mean_grade"])
+
+    if len(left_sub) > 0 and len(right_sub) > 0:
+        # Closest bin on domain A side (max bin_center < 0)
+        g_a_contact = float(left_sub.iloc[-1]["mean_grade"])
+        sem_a = float(left_sub.iloc[-1]["sem_grade"])
+        # Closest bin on domain B side (min bin_center > 0)
+        g_b_contact = float(right_sub.iloc[0]["mean_grade"])
+        sem_b = float(right_sub.iloc[0]["sem_grade"])
+
+        step_change = abs(g_b_contact - g_a_contact)
+        base_g = min(g_a_contact, g_b_contact)
+        step_ratio = step_change / base_g if base_g > 0 else 1.0
+
+        # Uncertainty threshold: step must exceed combined standard error
+        combined_sem = np.sqrt(sem_a**2 + sem_b**2) if (sem_a > 0 or sem_b > 0) else 0.01
+
+        if step_ratio >= 0.40 and step_change > 1.5 * combined_sem:
+            boundary_type = "Hard"
+            recommendation = (
+                "HARD BOUNDARY: Discontinuous step change at contact. "
+                "Composites must be strictly segregated during kriging (no sample sharing)."
+            )
+        elif step_ratio <= 0.15:
+            boundary_type = "Soft"
+            recommendation = (
+                "SOFT BOUNDARY: Continuous transitional gradient across contact. "
+                "Mineralization cross-cuts contact; samples can be freely shared across domains."
+            )
+        else:
+            boundary_type = "Semi-Soft"
+            recommendation = (
+                "SEMI-SOFT / TRANSITIONAL BOUNDARY: Moderate transition zone across contact. "
+                "Share samples only within a restricted buffer envelope or apply distance decay."
+            )
+    else:
+        step_change = np.nan
+        step_ratio = np.nan
+        boundary_type = "Indeterminate"
+        recommendation = "Insufficient data near contact to determine boundary type."
+
+    profile_df.attrs["boundary_type"] = boundary_type
+    profile_df.attrs["step_change"] = step_change
+    profile_df.attrs["step_ratio"] = step_ratio
+    profile_df.attrs["recommendation"] = recommendation
+    profile_df.attrs["domain_a"] = dom_a
+    profile_df.attrs["domain_b"] = dom_b
+    profile_df.attrs["bin_width"] = bin_width
+    return profile_df
+
+
+def plot_contact_profile(
+    contact_df: pd.DataFrame,
+    domain_a_name: Optional[str] = None,
+    domain_b_name: Optional[str] = None,
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (11.0, 6.5),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Generates the industry-standard Contact Profile Plot (Grade vs. Distance from Contact).
+
+    Mandatory deliverable for NI 43-101 / JORC Section 14 to document whether
+    geological contacts are treated as Hard, Soft, or Semi-Soft boundaries.
+
+    Parameters
+    ----------
+    contact_df : pd.DataFrame
+        Output of contact_profile_analysis.
+    domain_a_name, domain_b_name : str, optional
+        Custom display names for domains. Defaults to values in contact_df.attrs.
+    grade_unit : str, default "% Cu"
+        Grade unit label.
+    title : str, optional
+        Figure title.
+    figsize : tuple of float, default (11.0, 6.5)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Figure and (ax_profile, ax_counts) axes.
+    """
+    dom_a = domain_a_name or str(contact_df.attrs.get("domain_a", "Domain A (Host Rock)"))
+    dom_b = domain_b_name or str(contact_df.attrs.get("domain_b", "Domain B (Deposit)"))
+    b_type = str(contact_df.attrs.get("boundary_type", "Indeterminate"))
+    step_val = contact_df.attrs.get("step_change", np.nan)
+    step_ratio = contact_df.attrs.get("step_ratio", np.nan)
+
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=figsize,
+        sharex=True,
+        gridspec_kw={"height_ratios": [3, 1]},
+    )
+
+    # Split into Domain A (d < 0) and Domain B (d > 0)
+    df_a = contact_df[contact_df["bin_center"] < 0].dropna(subset=["mean_grade"])
+    df_b = contact_df[contact_df["bin_center"] > 0].dropna(subset=["mean_grade"])
+
+    # -------------------------------------------------------------------------
+    # Panel 1: Grade Profile with Error Bars
+    # -------------------------------------------------------------------------
+    col_a = "#2ca02c"  # Forest Green
+    col_b = "#d62728"  # Crimson Red
+
+    if len(df_a) > 0:
+        ax1.errorbar(
+            df_a["bin_center"],
+            df_a["mean_grade"],
+            yerr=df_a["sem_grade"],
+            fmt="-o",
+            color=col_a,
+            linewidth=2.0,
+            markersize=6,
+            capsize=3,
+            label=f"{dom_a} (Host)",
+        )
+
+    if len(df_b) > 0:
+        ax1.errorbar(
+            df_b["bin_center"],
+            df_b["mean_grade"],
+            yerr=df_b["sem_grade"],
+            fmt="-s",
+            color=col_b,
+            linewidth=2.0,
+            markersize=6,
+            capsize=3,
+            label=f"{dom_b} (Mineralized)",
+        )
+
+    # Vertical Contact Line at x = 0
+    ax1.axvline(
+        0.0,
+        color="black",
+        linestyle="--",
+        linewidth=2.0,
+        label="Geological Contact (d=0m)",
+    )
+
+    # Step-change callout annotation at contact
+    if len(df_a) > 0 and len(df_b) > 0 and not np.isnan(step_val):
+        g_a_end = float(df_a.iloc[-1]["mean_grade"])
+        g_b_start = float(df_b.iloc[0]["mean_grade"])
+        mid_y = (g_a_end + g_b_start) / 2.0
+
+        ax1.annotate(
+            f"Step Jump Δ: {step_val:.2f} {grade_unit}\n({step_ratio*100:.1f}% relative)",
+            xy=(0.0, mid_y),
+            xytext=(10.0, mid_y),
+            arrowprops=dict(facecolor="black", shrink=0.08, width=1.5, headwidth=6),
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="#ffffcc", edgecolor="gray", alpha=0.9),
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    # Ensure generous headroom on Y-axis so neither the decision badge nor the legend
+    # collides with the contact profile lines or error bars.
+    y_min, y_max = ax1.get_ylim()
+    y_span = max(y_max - y_min, 1e-4)
+    ax1.set_ylim(max(0.0, y_min - 0.05 * y_span), y_max + 0.35 * y_span)
+
+    # Boundary Type Decision Badge
+    if b_type == "Hard":
+        badge_color = "#ffcccc"
+        badge_edge = "#d62728"
+        badge_text = "DECISION: HARD BOUNDARY\n(Strict Segregation: No Cross-Boundary Samples)"
+    elif b_type == "Soft":
+        badge_color = "#ccffcc"
+        badge_edge = "#2ca02c"
+        badge_text = "DECISION: SOFT BOUNDARY\n(Free Sample Sharing Permitted Across Contact)"
+    elif b_type == "Semi-Soft":
+        badge_color = "#fff2cc"
+        badge_edge = "#ff7f0e"
+        badge_text = "DECISION: SEMI-SOFT BOUNDARY\n(Restricted Buffer Sharing Recommended)"
+    else:
+        badge_color = "#f0f0f0"
+        badge_edge = "gray"
+        badge_text = "DECISION: INDETERMINATE"
+
+    ax1.text(
+        0.03,
+        0.95,
+        badge_text,
+        transform=ax1.transAxes,
+        fontsize=9.0,
+        fontweight="bold",
+        verticalalignment="top",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor=badge_color, edgecolor=badge_edge, linewidth=1.5),
+    )
+
+    ax1.set_ylabel(f"Average Grade ({grade_unit})", fontsize=11, fontweight="bold")
+    ax1.grid(True, linestyle=":", alpha=0.5)
+    ax1.legend(loc="upper right", framealpha=0.9, fontsize=9.0)
+
+    plot_title = title or f"Geological Contact Profile Analysis: {dom_a} vs. {dom_b}"
+    ax1.set_title(plot_title, fontsize=12, fontweight="bold", pad=10)
+
+    # -------------------------------------------------------------------------
+    # Panel 2: Sample Count Data Support per Distance Bin
+    # -------------------------------------------------------------------------
+    bin_w = float(contact_df.attrs.get("bin_width", 2.0))
+    bar_colors = [col_a if c < 0 else col_b for c in contact_df["bin_center"]]
+
+    ax2.bar(
+        contact_df["bin_center"],
+        contact_df["sample_count"],
+        width=bin_w * 0.85,
+        color=bar_colors,
+        edgecolor="black",
+        alpha=0.7,
+    )
+    ax2.axvline(0.0, color="black", linestyle="--", linewidth=1.5)
+    ax2.set_ylabel("Composites", fontsize=10, fontweight="bold")
+    ax2.set_xlabel("Signed Distance from Contact Surface (m)", fontsize=11, fontweight="bold")
+    ax2.grid(True, linestyle=":", alpha=0.5)
+
+    fig.tight_layout()
+    return fig, (ax1, ax2)
+
+
+# =============================================================================
+# STAGE 5: PRODUCTION RECONCILIATION (PARKER F1, F2, F3 MINE-TO-MILL FACTORS)
+# =============================================================================
+
+
+def reconcile_production_to_reserve(
+    reserve_data: Union[pd.DataFrame, Dict[str, float]],
+    plant_data: Union[pd.DataFrame, Dict[str, float]],
+    grade_control_data: Optional[Union[pd.DataFrame, Dict[str, float]]] = None,
+    tonnes_col: str = "tonnes",
+    grade_col: str = "grade",
+    period_col: Optional[str] = None,
+    grade_unit: str = "% Cu",
+) -> pd.DataFrame:
+    """Reconciles mine production against the long-term mineral reserve model.
+
+    Implements the Harry Parker (2012) F1, F2, F3 reconciliation framework:
+    - F1 Factor (Model to Mine / Ore Selection):
+      F1 = Metal(Grade Control) / Metal(Reserve)
+      Measures reserve model accuracy and local estimation bias.
+    - F2 Factor (Mine to Mill / Delivery Efficiency):
+      F2 = Metal(Plant Received) / Metal(Grade Control)
+      Measures mining execution: unplanned dilution, ore loss, and misrouting.
+    - F3 Factor (Total System Reconciliation):
+      F3 = F1 * F2 = Metal(Plant Received) / Metal(Reserve)
+      Measures total value chain health and cash-flow delivery.
+
+    Also calculates component ratios for every stage:
+    - Tonnage Ratio (R_T): T_actual / T_pred (high R_T flags excess dilution)
+    - Grade Ratio (R_G): g_actual / g_pred (low R_G confirms dilution)
+    - Metal Ratio (R_M): M_actual / M_pred = R_T * R_G
+
+    Parameters
+    ----------
+    reserve_data : pd.DataFrame or dict
+        Predicted reserve model feed (tonnes, grade).
+    plant_data : pd.DataFrame or dict
+        Actual received plant/mill feed (weightometer tonnes, assayed head grade).
+    grade_control_data : pd.DataFrame or dict, optional
+        Short-term grade control / blasthole model (delineated/trucked ore).
+    tonnes_col : str, default "tonnes"
+        Tonnage column name.
+    grade_col : str, default "grade"
+        Grade column name.
+    period_col : str, optional
+        Production period column (e.g. "month", "quarter", "year").
+        If omitted or single record, treats data as a single global reconciliation.
+    grade_unit : str, default "% Cu"
+        Grade unit label.
+
+    Returns
+    -------
+    pd.DataFrame
+        Reconciliation summary table per period (plus Total row) with F1, F2, F3
+        factors and component ratios. Attributes (.attrs) contain cumulative metrics
+        and the value chain health diagnosis.
+    """
+    def _to_df(data: Union[pd.DataFrame, Dict[str, float]]) -> pd.DataFrame:
+        if isinstance(data, dict):
+            return pd.DataFrame([data])
+        return data.copy()
+
+    df_res = _to_df(reserve_data)
+    df_plant = _to_df(plant_data)
+    has_gc = grade_control_data is not None
+    df_gc = _to_df(grade_control_data) if has_gc else None
+
+    # Handle period identifier
+    if period_col is None or period_col not in df_res.columns:
+        p_col = "period"
+        df_res[p_col] = [f"P{i+1}" if len(df_res) > 1 else "Total" for i in range(len(df_res))]
+        df_plant[p_col] = df_res[p_col].values
+        if has_gc:
+            df_gc[p_col] = df_res[p_col].values
+    else:
+        p_col = period_col
+
+    for df_chk, name in [(df_res, "reserve"), (df_plant, "plant")]:
+        for col in (tonnes_col, grade_col):
+            if col not in df_chk.columns:
+                raise ValueError(f"Column '{col}' not found in {name} data.")
+    if has_gc:
+        for col in (tonnes_col, grade_col):
+            if col not in df_gc.columns:
+                raise ValueError(f"Column '{col}' not found in grade_control data.")
+
+    grade_scale = 100.0 if "%" in grade_unit else 1.0
+
+    # Ensure period ordering matches
+    periods = df_res[p_col].tolist()
+    records = []
+
+    for p in periods:
+        r_row = df_res[df_res[p_col] == p].iloc[0]
+        p_row = df_plant[df_plant[p_col] == p].iloc[0]
+
+        t_res = float(r_row[tonnes_col])
+        g_res = float(r_row[grade_col])
+        m_res = t_res * (g_res / grade_scale)
+
+        t_plant = float(p_row[tonnes_col])
+        g_plant = float(p_row[grade_col])
+        m_plant = t_plant * (g_plant / grade_scale)
+
+        rec = {
+            "period": p,
+            "reserve_tonnes": t_res,
+            "reserve_grade": g_res,
+            "reserve_metal": m_res,
+            "plant_tonnes": t_plant,
+            "plant_grade": g_plant,
+            "plant_metal": m_plant,
+        }
+
+        if has_gc:
+            gc_row = df_gc[df_gc[p_col] == p].iloc[0]
+            t_gc = float(gc_row[tonnes_col])
+            g_gc = float(gc_row[grade_col])
+            m_gc = t_gc * (g_gc / grade_scale)
+
+            rec["gc_tonnes"] = t_gc
+            rec["gc_grade"] = g_gc
+            rec["gc_metal"] = m_gc
+
+            # F1: Reserve to Grade Control
+            rec["f1_tonnes_ratio"] = t_gc / t_res if t_res > 0 else 1.0
+            rec["f1_grade_ratio"] = g_gc / g_res if g_res > 0 else 1.0
+            rec["f1_metal_factor"] = m_gc / m_res if m_res > 0 else 1.0
+
+            # F2: Grade Control to Plant
+            rec["f2_tonnes_ratio"] = t_plant / t_gc if t_gc > 0 else 1.0
+            rec["f2_grade_ratio"] = g_plant / g_gc if g_gc > 0 else 1.0
+            rec["f2_metal_factor"] = m_plant / m_gc if m_gc > 0 else 1.0
+
+        # F3: Reserve to Plant (Total)
+        rec["f3_tonnes_ratio"] = t_plant / t_res if t_res > 0 else 1.0
+        rec["f3_grade_ratio"] = g_plant / g_res if g_res > 0 else 1.0
+        rec["f3_metal_factor"] = m_plant / m_res if m_res > 0 else 1.0
+
+        records.append(rec)
+
+    res_df = pd.DataFrame(records)
+
+    # Compute Overall Total Row if multi-period
+    if len(res_df) > 1:
+        tot_t_res = float(res_df["reserve_tonnes"].sum())
+        tot_m_res = float(res_df["reserve_metal"].sum())
+        tot_g_res = (tot_m_res / tot_t_res) * grade_scale if tot_t_res > 0 else 0.0
+
+        tot_t_plant = float(res_df["plant_tonnes"].sum())
+        tot_m_plant = float(res_df["plant_metal"].sum())
+        tot_g_plant = (tot_m_plant / tot_t_plant) * grade_scale if tot_t_plant > 0 else 0.0
+
+        tot_rec = {
+            "period": "Total",
+            "reserve_tonnes": tot_t_res,
+            "reserve_grade": tot_g_res,
+            "reserve_metal": tot_m_res,
+            "plant_tonnes": tot_t_plant,
+            "plant_grade": tot_g_plant,
+            "plant_metal": tot_m_plant,
+        }
+
+        if has_gc:
+            tot_t_gc = float(res_df["gc_tonnes"].sum())
+            tot_m_gc = float(res_df["gc_metal"].sum())
+            tot_g_gc = (tot_m_gc / tot_t_gc) * grade_scale if tot_t_gc > 0 else 0.0
+
+            tot_rec["gc_tonnes"] = tot_t_gc
+            tot_rec["gc_grade"] = tot_g_gc
+            tot_rec["gc_metal"] = tot_m_gc
+
+            tot_rec["f1_tonnes_ratio"] = tot_t_gc / tot_t_res if tot_t_res > 0 else 1.0
+            tot_rec["f1_grade_ratio"] = tot_g_gc / tot_g_res if tot_g_res > 0 else 1.0
+            tot_rec["f1_metal_factor"] = tot_m_gc / tot_m_res if tot_m_res > 0 else 1.0
+
+            tot_rec["f2_tonnes_ratio"] = tot_t_plant / tot_t_gc if tot_t_gc > 0 else 1.0
+            tot_rec["f2_grade_ratio"] = tot_g_plant / tot_g_gc if tot_g_gc > 0 else 1.0
+            tot_rec["f2_metal_factor"] = tot_m_plant / tot_m_gc if tot_m_gc > 0 else 1.0
+
+        tot_rec["f3_tonnes_ratio"] = tot_t_plant / tot_t_res if tot_t_res > 0 else 1.0
+        tot_rec["f3_grade_ratio"] = tot_g_plant / tot_g_res if tot_g_res > 0 else 1.0
+        tot_rec["f3_metal_factor"] = tot_m_plant / tot_m_res if tot_m_res > 0 else 1.0
+
+        res_df = pd.concat([res_df, pd.DataFrame([tot_rec])], ignore_index=True)
+
+    # Attach summary attributes
+    final_row = res_df.iloc[-1]
+    f3_tot = float(final_row["f3_metal_factor"])
+    f1_tot = float(final_row["f1_metal_factor"]) if has_gc else None
+    f2_tot = float(final_row["f2_metal_factor"]) if has_gc else None
+
+    if 0.95 <= f3_tot <= 1.05:
+        health_status = "EXCELLENT: Production is within +/-5% of reserve model (Bankable benchmark)."
+    elif 0.90 <= f3_tot <= 1.10:
+        health_status = "GOOD: Production is within +/-10% of reserve model."
+    elif f3_tot < 0.90:
+        health_status = "WARNING: Metal under-performance (>10% deficit vs. reserve model). Check dilution or over-smoothing."
+    else:
+        health_status = "WARNING: Metal over-performance (>10% surplus vs. reserve model). Check conservative bias or unmodeled ore."
+
+    res_df.attrs["f3_factor"] = f3_tot
+    if has_gc:
+        res_df.attrs["f1_factor"] = f1_tot
+        res_df.attrs["f2_factor"] = f2_tot
+    res_df.attrs["health_status"] = health_status
+    res_df.attrs["grade_unit"] = grade_unit
+    return res_df
+
+
+def plot_production_reconciliation(
+    reconciliation_df: pd.DataFrame,
+    grade_unit: str = "% Cu",
+    tonnage_unit: str = "Mt",
+    metal_unit: str = "kt",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (14.0, 9.0),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Generates the industry-standard 4-panel Production Reconciliation Dashboard.
+
+    Visualizes:
+    1. Ore Tonnage Comparison (Reserve vs. Grade Control vs. Plant Feed)
+    2. Head Grade Comparison
+    3. Contained Metal Comparison
+    4. Harry Parker F1, F2, F3 Factors tracking over time against the [0.95, 1.05] benchmark band.
+
+    Parameters
+    ----------
+    reconciliation_df : pd.DataFrame
+        Output of reconcile_production_to_reserve.
+    grade_unit : str, default "% Cu"
+        Grade unit label.
+    tonnage_unit : str, default "Mt"
+        Tonnage unit label.
+    metal_unit : str, default "kt"
+        Contained metal unit label.
+    title : str, optional
+        Overall dashboard title.
+    figsize : tuple of float, default (14.0, 9.0)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Figure and flattened axes array (ax_t, ax_g, ax_m, ax_f).
+    """
+    # Exclude "Total" row if multi-period for time plots
+    has_total = "Total" in reconciliation_df["period"].values
+    if has_total and len(reconciliation_df) > 1:
+        plot_df = reconciliation_df[reconciliation_df["period"] != "Total"].copy()
+    else:
+        plot_df = reconciliation_df.copy()
+
+    has_gc = "gc_tonnes" in plot_df.columns
+    periods = plot_df["period"].astype(str).tolist()
+    n_p = len(periods)
+    x = np.arange(n_p)
+
+    width = 0.26 if has_gc else 0.38
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    ax_t, ax_g = axes[0, 0], axes[0, 1]
+    ax_m, ax_f = axes[1, 0], axes[1, 1]
+
+    col_res = "#1f77b4"   # Blue (Reserve Model)
+    col_gc = "#ff7f0e"    # Orange (Grade Control)
+    col_plant = "#2ca02c" # Green (Plant Feed)
+
+    # -------------------------------------------------------------------------
+    # Panel 1: Ore Tonnage
+    # -------------------------------------------------------------------------
+    if has_gc:
+        ax_t.bar(x - width, plot_df["reserve_tonnes"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
+        ax_t.bar(x, plot_df["gc_tonnes"], width, label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85)
+        ax_t.bar(x + width, plot_df["plant_tonnes"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+    else:
+        ax_t.bar(x - width / 2, plot_df["reserve_tonnes"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
+        ax_t.bar(x + width / 2, plot_df["plant_tonnes"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+
+    ax_t.set_ylabel(f"Ore Tonnage ({tonnage_unit})", fontsize=10, fontweight="bold")
+    ax_t.set_title("Ore Tonnage Reconciliation", fontsize=11, fontweight="bold")
+    ax_t.set_xticks(x)
+    ax_t.set_xticklabels(periods, fontsize=9)
+    ax_t.grid(True, linestyle=":", alpha=0.5)
+    ax_t.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+
+    # -------------------------------------------------------------------------
+    # Panel 2: Head Grade
+    # -------------------------------------------------------------------------
+    if has_gc:
+        ax_g.bar(x - width, plot_df["reserve_grade"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
+        ax_g.bar(x, plot_df["gc_grade"], width, label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85)
+        ax_g.bar(x + width, plot_df["plant_grade"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+    else:
+        ax_g.bar(x - width / 2, plot_df["reserve_grade"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
+        ax_g.bar(x + width / 2, plot_df["plant_grade"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+
+    ax_g.set_ylabel(f"Head Grade ({grade_unit})", fontsize=10, fontweight="bold")
+    ax_g.set_title("Head Grade Reconciliation", fontsize=11, fontweight="bold")
+    ax_g.set_xticks(x)
+    ax_g.set_xticklabels(periods, fontsize=9)
+    ax_g.grid(True, linestyle=":", alpha=0.5)
+    ax_g.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+
+    # -------------------------------------------------------------------------
+    # Panel 3: Contained Metal
+    # -------------------------------------------------------------------------
+    if has_gc:
+        ax_m.bar(x - width, plot_df["reserve_metal"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
+        ax_m.bar(x, plot_df["gc_metal"], width, label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85)
+        ax_m.bar(x + width, plot_df["plant_metal"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+    else:
+        ax_m.bar(x - width / 2, plot_df["reserve_metal"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
+        ax_m.bar(x + width / 2, plot_df["plant_metal"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+
+    ax_m.set_ylabel(f"Contained Metal ({metal_unit})", fontsize=10, fontweight="bold")
+    ax_m.set_title("Contained Metal Reconciliation", fontsize=11, fontweight="bold")
+    ax_m.set_xticks(x)
+    ax_m.set_xticklabels(periods, fontsize=9)
+    ax_m.grid(True, linestyle=":", alpha=0.5)
+    ax_m.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+
+    # -------------------------------------------------------------------------
+    # Panel 4: Harry Parker F1, F2, F3 Factors Tracking
+    # -------------------------------------------------------------------------
+    # Benchmark target band: [0.95, 1.05] shaded green
+    ax_f.axhspan(0.95, 1.05, color="#2ca02c", alpha=0.15, label="Target Band (±5%)")
+    ax_f.axhline(1.00, color="black", linestyle="--", linewidth=1.2, alpha=0.7)
+
+    if n_p > 1:
+        if has_gc:
+            ax_f.plot(x, plot_df["f1_metal_factor"], "-o", color=col_res, linewidth=2.0, markersize=6, label="F1 (Model → Mine)")
+            ax_f.plot(x, plot_df["f2_metal_factor"], "-s", color=col_gc, linewidth=2.0, markersize=6, label="F2 (Mine → Mill)")
+        ax_f.plot(x, plot_df["f3_metal_factor"], "-^", color=col_plant, linewidth=2.5, markersize=7, label="F3 (Total Value Chain)")
+        ax_f.set_xticks(x)
+        ax_f.set_xticklabels(periods, fontsize=9)
+    else:
+        # Single period bar representation
+        cats = ["F1 (Model→Mine)", "F2 (Mine→Mill)", "F3 (Total)"] if has_gc else ["F3 (Total)"]
+        vals = [float(plot_df["f1_metal_factor"].iloc[0]), float(plot_df["f2_metal_factor"].iloc[0]), float(plot_df["f3_metal_factor"].iloc[0])] if has_gc else [float(plot_df["f3_metal_factor"].iloc[0])]
+        bar_c = [col_res, col_gc, col_plant] if has_gc else [col_plant]
+        ax_f.bar(range(len(cats)), vals, width=0.45, color=bar_c, edgecolor="black", alpha=0.85)
+        ax_f.set_xticks(range(len(cats)))
+        ax_f.set_xticklabels(cats, fontsize=9, fontweight="bold")
+        for idx, v in enumerate(vals):
+            ax_f.text(idx, v + 0.02, f"{v:.3f}", ha="center", fontsize=9, fontweight="bold")
+
+    ax_f.set_ylabel("Reconciliation Factor (Ratio)", fontsize=10, fontweight="bold")
+    ax_f.set_title("Harry Parker F1, F2, F3 Performance Factors", fontsize=11, fontweight="bold")
+    ax_f.grid(True, linestyle=":", alpha=0.5)
+    ax_f.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+
+    # Health diagnosis annotation
+    health_txt = str(reconciliation_df.attrs.get("health_status", ""))
+    if health_txt:
+        ax_f.text(
+            0.03,
+            0.06,
+            health_txt,
+            transform=ax_f.transAxes,
+            fontsize=8.5,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="#ffffcc", edgecolor="gray", alpha=0.9),
+        )
+
+    dashboard_title = title or "Mine-to-Mill Production Reconciliation Dashboard (Parker F-Factors)"
+    fig.suptitle(dashboard_title, fontsize=12, fontweight="bold", y=0.995)
+    fig.tight_layout()
+    return fig, axes.flatten()
+
+
+
+
 

@@ -26,6 +26,14 @@ from .estimation import (
     plot_resource_to_reserve_waterfall,
     plot_reserve_classification_map,
     plot_in_situ_vs_diluted_curves,
+    composite_drillhole_intervals,
+    apply_grade_capping,
+    exploratory_data_analysis,
+    plot_eda_distributions,
+    contact_profile_analysis,
+    plot_contact_profile,
+    reconcile_production_to_reserve,
+    plot_production_reconciliation,
 )
 
 __all__ = [
@@ -63,4 +71,12 @@ __all__ = [
     "plot_resource_to_reserve_waterfall",
     "plot_reserve_classification_map",
     "plot_in_situ_vs_diluted_curves",
+    "composite_drillhole_intervals",
+    "apply_grade_capping",
+    "exploratory_data_analysis",
+    "plot_eda_distributions",
+    "contact_profile_analysis",
+    "plot_contact_profile",
+    "reconcile_production_to_reserve",
+    "plot_production_reconciliation",
 ]

@@ -29,6 +29,14 @@ from drs_mining.components.estimation import (
     plot_resource_to_reserve_waterfall,
     plot_reserve_classification_map,
     plot_in_situ_vs_diluted_curves,
+    composite_drillhole_intervals,
+    apply_grade_capping,
+    exploratory_data_analysis,
+    plot_eda_distributions,
+    contact_profile_analysis,
+    plot_contact_profile,
+    reconcile_production_to_reserve,
+    plot_production_reconciliation,
     _theoretical_covariance,
 )
 
@@ -848,6 +856,322 @@ def test_plot_in_situ_vs_diluted_curves():
     assert fig is not None
     assert ax.get_title() == "Test Grade-Tonnage Shift"
     plt.close(fig)
+
+
+def test_composite_drillhole_intervals_length_weighting_and_domains():
+    # Hole 1: 3 raw intervals
+    # 0.0 - 1.0m: grade 2.0%
+    # 1.0 - 2.5m: grade 4.0%
+    # 2.5 - 3.0m: grade 1.0%
+    assays_df = pd.DataFrame({
+        "hole_id": ["DH01", "DH01", "DH01"],
+        "from_m": [0.0, 1.0, 2.5],
+        "to_m": [1.0, 2.5, 3.0],
+        "grade": [2.0, 4.0, 1.0],
+        "x": [100.0, 100.0, 100.0],
+        "y": [200.0, 200.0, 200.0],
+    })
+
+    # Composite to 2.0m with remnant_strategy="discard" and min_length_ratio=0.5
+    # Comp 1: [0.0, 2.0] -> 1.0m @ 2.0 + 1.0m @ 4.0 -> grade = (2 + 4)/2 = 3.0%
+    # Comp 2: [2.0, 3.0] -> 0.5m @ 4.0 + 0.5m @ 1.0 -> grade = (2.0 + 0.5)/1 = 2.5% (length=1.0m = 50% of 2m)
+    comp_df = composite_drillhole_intervals(
+        assays_df,
+        composite_length=2.0,
+        min_length_ratio=0.50,
+        remnant_strategy="discard",
+    )
+    assert len(comp_df) == 2
+    assert np.isclose(comp_df.iloc[0]["grade"], 3.0)
+    assert np.isclose(comp_df.iloc[0]["length"], 2.0)
+    assert np.isclose(comp_df.iloc[1]["grade"], 2.5)
+    assert np.isclose(comp_df.iloc[1]["length"], 1.0)
+
+    # Discard remnant when min_length_ratio is strict (e.g. 0.75 > 1.0/2.0)
+    comp_discard = composite_drillhole_intervals(
+        assays_df,
+        composite_length=2.0,
+        min_length_ratio=0.75,
+        remnant_strategy="discard",
+    )
+    assert len(comp_discard) == 1
+    assert comp_discard.attrs["discarded_remnants_count"] == 1
+
+    # Distribute strategy: 3.0m total length / 2.0m target -> 2 equal composites of 1.5m
+    comp_dist = composite_drillhole_intervals(
+        assays_df,
+        composite_length=2.0,
+        remnant_strategy="distribute",
+    )
+    assert len(comp_dist) == 2
+    assert np.isclose(comp_dist.iloc[0]["length"], 1.5)
+    assert np.isclose(comp_dist.iloc[1]["length"], 1.5)
+
+    # Domain constraint test: Never cross domain boundaries!
+    domain_df = pd.DataFrame({
+        "hole_id": ["DH01", "DH01", "DH01"],
+        "from_m": [0.0, 1.5, 3.5],
+        "to_m": [1.5, 3.5, 5.0],
+        "grade": [0.5, 3.0, 4.0],
+        "domain": ["Waste", "Ore", "Ore"],
+    })
+    # Target 2.0m composites:
+    # Waste domain (0 to 1.5m): 1.5m run. With min_length_ratio=0.5 (1.0m), kept as [0, 1.5] (or discarded if > 1.5).
+    # Ore domain (1.5 to 5.0m): 3.5m run -> [1.5, 3.5] (2.0m) and [3.5, 5.0] (1.5m).
+    # A composite must NEVER span across the Waste/Ore contact at 1.5m!
+    comp_dom = composite_drillhole_intervals(
+        domain_df,
+        composite_length=2.0,
+        domain_col="domain",
+        min_length_ratio=0.50,
+    )
+    assert len(comp_dom) == 3
+    # First composite is purely Waste
+    assert comp_dom.iloc[0]["domain"] == "Waste"
+    assert comp_dom.iloc[0]["to_m"] == 1.5
+    # Second and third composites are purely Ore
+    assert comp_dom.iloc[1]["domain"] == "Ore"
+    assert comp_dom.iloc[1]["from_m"] == 1.5
+    assert comp_dom.iloc[1]["to_m"] == 3.5
+
+
+def test_apply_grade_capping_and_metal_reduction():
+    # Sample composites with a severe high-grade outlier (50.0 g/t)
+    df = pd.DataFrame({
+        "grade": [1.0, 1.5, 2.0, 1.2, 0.8, 1.4, 50.0],
+        "length": [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+    })
+
+    # Capping at explicit threshold 5.0 g/t
+    capped_df = apply_grade_capping(df, cap_grade=5.0, grade_col="grade", length_col="length")
+    assert "capped_grade" in capped_df.columns
+    assert capped_df["capped_grade"].max() == 5.0
+    assert capped_df.loc[6, "capped_grade"] == 5.0
+
+    summary = capped_df.attrs["capping_summary"]
+    assert summary["samples_capped"] == 1
+    assert summary["cap_grade"] == 5.0
+    assert summary["metal_reduction_pct"] > 0.0
+    assert summary["capped_cv"] < summary["uncapped_cv"]
+
+    # Capping by percentile (e.g. P90)
+    capped_pct = apply_grade_capping(df, percentile=90.0, grade_col="grade")
+    assert capped_pct["capped_grade"].max() < 50.0
+    assert capped_pct.attrs["capping_summary"]["samples_capped"] >= 1
+
+    # Missing cap_grade and percentile raises ValueError
+    with pytest.raises(ValueError, match="Must specify"):
+        apply_grade_capping(df, grade_col="grade")
+
+
+def test_exploratory_data_analysis_metrics_and_clustering_bias():
+    grades = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 25.0]
+    weights = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.1]
+    df = pd.DataFrame({"grade": grades, "declust_weight": weights})
+
+    # Run EDA without weights
+    eda_naive = exploratory_data_analysis(df, grade_col="grade")
+    assert "Naive" in eda_naive.columns
+    assert "Declustered" not in eda_naive.columns
+    assert eda_naive.loc["Sample Count", "Naive"] == 11
+    assert np.isclose(eda_naive.loc["Minimum", "Naive"], 0.2)
+    assert np.isclose(eda_naive.loc["Maximum", "Naive"], 25.0)
+    assert eda_naive.loc["Coeff. of Variation (CV)", "Naive"] > 1.5
+    assert eda_naive.attrs["cv_status"].startswith("Highly skewed")
+
+    # Run EDA with declustering weights
+    eda_dec = exploratory_data_analysis(df, grade_col="grade", weights_col="declust_weight")
+    assert "Declustered" in eda_dec.columns
+    # With low weight (0.1) on the high-grade outlier (10.0), declustered mean should be lower than naive
+    assert eda_dec.loc["Mean", "Declustered"] < eda_dec.loc["Mean", "Naive"]
+    assert "clustering_bias_pct" in eda_dec.attrs
+    assert eda_dec.attrs["clustering_bias_pct"] > 0.0
+
+
+def test_plot_eda_distributions():
+    np.random.seed(42)
+    grades = np.random.lognormal(mean=0.0, sigma=0.6, size=150)
+    capped_grades = np.minimum(grades, 2.5)
+    df = pd.DataFrame({"grade": grades, "capped_grade": capped_grades})
+
+    fig, axes = plot_eda_distributions(
+        df,
+        grade_col="grade",
+        capped_grade_col="capped_grade",
+        cap_grade=2.5,
+        bins=20,
+        grade_unit="% Cu",
+        title="Deposit EDA Summary & Capping Diagnostic",
+    )
+    assert fig is not None
+    assert len(axes) == 3
+    assert "Histogram" in axes[0].get_title()
+    assert "Log-Transformed" in axes[1].get_title()
+    assert "Log-Probability" in axes[2].get_title()
+    plt.close(fig)
+
+
+def test_contact_profile_analysis_hard_vs_soft_and_plot():
+    # Synthetic dataset with a sharp Hard Boundary at distance = 0
+    # Domain A (Host rock): distances -20 to 0, grades around 0.25%
+    # Domain B (Ore zone): distances 0 to +20, grades around 1.80%
+    dists_a = np.linspace(-18.0, -1.0, 30)
+    grades_a = 0.25 + 0.05 * np.random.randn(30)
+    dom_a = ["HostRock"] * 30
+
+    dists_b = np.linspace(1.0, 18.0, 30)
+    grades_b = 1.80 + 0.10 * np.random.randn(30)
+    dom_b = ["OreZone"] * 30
+
+    hard_df = pd.DataFrame({
+        "distance": np.concatenate([dists_a, dists_b]),
+        "grade": np.concatenate([grades_a, grades_b]),
+        "lithology": dom_a + dom_b,
+    })
+
+    profile_hard = contact_profile_analysis(
+        hard_df,
+        domain_col="lithology",
+        grade_col="grade",
+        distance_col="distance",
+        bin_width=2.0,
+        max_distance=20.0,
+        domain_a="HostRock",
+        domain_b="OreZone",
+    )
+
+    assert profile_hard.attrs["boundary_type"] == "Hard"
+    assert profile_hard.attrs["step_change"] > 1.0
+    assert "strictly segregated" in profile_hard.attrs["recommendation"].lower()
+
+    # Test plot rendering
+    fig, (ax1, ax2) = plot_contact_profile(
+        profile_hard,
+        domain_a_name="Country Rock",
+        domain_b_name="High-Grade Ore",
+        grade_unit="% Cu",
+    )
+    assert fig is not None
+    assert ax1.get_ylabel().startswith("Average Grade")
+    assert ax2.get_ylabel().startswith("Composites")
+    plt.close(fig)
+
+    # Synthetic dataset with a Soft Boundary (continuous gradient, no step change)
+    all_dists = np.linspace(-15.0, 15.0, 60)
+    smooth_grades = 1.00 + 0.01 * all_dists  # ~1.00 on both sides of 0
+    soft_df = pd.DataFrame({
+        "distance": all_dists,
+        "grade": smooth_grades,
+        "zone": ["ZoneA" if d < 0 else "ZoneB" for d in all_dists],
+    })
+
+    profile_soft = contact_profile_analysis(
+        soft_df,
+        domain_col="zone",
+        grade_col="grade",
+        distance_col="distance",
+        bin_width=2.0,
+        max_distance=16.0,
+        domain_a="ZoneA",
+        domain_b="ZoneB",
+    )
+    assert profile_soft.attrs["boundary_type"] == "Soft"
+    assert "freely shared" in profile_soft.attrs["recommendation"].lower()
+
+
+def test_reconcile_production_to_reserve_f_factors_and_ratios():
+    # Multi-period reconciliation (3 months)
+    reserve_df = pd.DataFrame({
+        "period": ["Jan", "Feb", "Mar"],
+        "tonnes": [100_000.0, 110_000.0, 105_000.0],
+        "grade": [1.00, 1.10, 0.95],
+    })
+    gc_df = pd.DataFrame({
+        "period": ["Jan", "Feb", "Mar"],
+        "tonnes": [105_000.0, 108_000.0, 104_000.0],
+        "grade": [0.98, 1.12, 0.96],
+    })
+    plant_df = pd.DataFrame({
+        "period": ["Jan", "Feb", "Mar"],
+        "tonnes": [103_000.0, 107_000.0, 103_500.0],
+        "grade": [0.97, 1.11, 0.95],
+    })
+
+    rec_df = reconcile_production_to_reserve(
+        reserve_df,
+        plant_df,
+        grade_control_data=gc_df,
+        period_col="period",
+        grade_unit="% Cu",
+    )
+
+    # Output rows: 3 periods + 1 "Total" row = 4 rows
+    assert len(rec_df) == 4
+    assert rec_df.iloc[-1]["period"] == "Total"
+
+    # Verify F1 * F2 == F3 identity within numerical precision
+    for i in range(len(rec_df)):
+        f1 = rec_df.iloc[i]["f1_metal_factor"]
+        f2 = rec_df.iloc[i]["f2_metal_factor"]
+        f3 = rec_df.iloc[i]["f3_metal_factor"]
+        assert np.isclose(f1 * f2, f3, atol=1e-5)
+
+    # Check component ratios: R_T * R_G == F_factor
+    for i in range(len(rec_df)):
+        rt = rec_df.iloc[i]["f3_tonnes_ratio"]
+        rg = rec_df.iloc[i]["f3_grade_ratio"]
+        f3 = rec_df.iloc[i]["f3_metal_factor"]
+        assert np.isclose(rt * rg, f3, atol=1e-5)
+
+    # Verify health status attribute
+    assert "health_status" in rec_df.attrs
+    assert "EXCELLENT" in rec_df.attrs["health_status"] or "GOOD" in rec_df.attrs["health_status"]
+
+    # Test single-period dictionary input
+    res_dict = {"tonnes": 50_000.0, "grade": 1.20}
+    plant_dict = {"tonnes": 51_000.0, "grade": 1.15}
+    rec_single = reconcile_production_to_reserve(res_dict, plant_dict, grade_unit="% Cu")
+    assert len(rec_single) == 1
+    assert "f3_metal_factor" in rec_single.columns
+    assert np.isclose(rec_single.iloc[0]["f3_tonnes_ratio"], 51000.0 / 50000.0)
+
+
+def test_plot_production_reconciliation():
+    rec_df = pd.DataFrame({
+        "period": ["Q1", "Q2", "Q3", "Total"],
+        "reserve_tonnes": [1.0, 1.1, 1.2, 3.3],
+        "reserve_grade": [1.0, 1.0, 1.0, 1.0],
+        "reserve_metal": [0.01, 0.011, 0.012, 0.033],
+        "gc_tonnes": [1.02, 1.08, 1.18, 3.28],
+        "gc_grade": [0.99, 1.01, 0.99, 1.0],
+        "gc_metal": [0.0101, 0.0109, 0.0117, 0.0327],
+        "plant_tonnes": [1.01, 1.09, 1.19, 3.29],
+        "plant_grade": [0.98, 1.00, 0.98, 0.99],
+        "plant_metal": [0.0099, 0.0109, 0.0117, 0.0325],
+        "f1_metal_factor": [1.01, 0.99, 0.975, 0.99],
+        "f2_metal_factor": [0.98, 1.00, 1.00, 0.994],
+        "f3_metal_factor": [0.99, 0.99, 0.975, 0.985],
+    })
+    rec_df.attrs["health_status"] = "EXCELLENT: Production is within +/-5% of reserve model."
+
+    fig, axes = plot_production_reconciliation(
+        rec_df,
+        grade_unit="% Cu",
+        tonnage_unit="Mt",
+        metal_unit="kt",
+        title="Mine-to-Mill Production Reconciliation",
+    )
+    assert fig is not None
+    assert len(axes) == 4
+    assert "Tonnage" in axes[0].get_title()
+    assert "Grade" in axes[1].get_title()
+    assert "Metal" in axes[2].get_title()
+    assert "Parker" in axes[3].get_title()
+    plt.close(fig)
+
+
+
+
 
 
 
