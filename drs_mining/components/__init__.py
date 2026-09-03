@@ -8,6 +8,8 @@ from .estimation import (
     format_reserve_summary,
     grade_tonnage_table,
     plot_polygonal_map,
+    inverse_distance_weighting,
+    nearest_neighbor_grid_estimation,
 )
 
 __all__ = [
@@ -27,4 +29,6 @@ __all__ = [
     "format_reserve_summary",
     "grade_tonnage_table",
     "plot_polygonal_map",
+    "inverse_distance_weighting",
+    "nearest_neighbor_grid_estimation",
 ]

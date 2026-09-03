@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import MultiPoint, Point, Polygon, box
 from shapely.ops import voronoi_diagram
+from scipy.spatial import KDTree
 
 
 def polygonal_estimation(
@@ -429,3 +430,107 @@ def plot_polygonal_map(
     ax.set_aspect("equal", adjustable="datalim")
 
     return ax
+
+
+def inverse_distance_weighting(
+    samples_xy: np.ndarray,
+    sample_grades: np.ndarray,
+    grid_points: np.ndarray,
+    power: float = 2.0,
+    k_neighbors: int = 8,
+    max_radius: Optional[float] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Inverse Distance Weighting (IDW) interpolation using a k-d tree.
+
+    Parameters
+    ----------
+    samples_xy : np.ndarray
+        Sample collar/assay coordinates of shape (N, 2) or (N, 3).
+    sample_grades : np.ndarray
+        Sample assay values of shape (N,).
+    grid_points : np.ndarray
+        Target estimation coordinates of shape (M, 2) or (M, 3).
+    power : float, default 2.0
+        Distance weighting exponent alpha (2.0 = standard IDW^2).
+    k_neighbors : int, default 8
+        Number of nearest neighbors to query (k=1 gives Nearest Neighbor).
+    max_radius : float, optional
+        Maximum search radius. Points with no samples within this radius are NaN.
+
+    Returns
+    -------
+    estimated_grades : np.ndarray
+        Interpolated grades of shape (M,).
+    distances : np.ndarray
+        Distances to informing samples. Shape (M,) if k=1, else (M, k).
+    """
+    # Step 1: Build spatial index
+    tree = KDTree(samples_xy)
+
+    # Step 2: Query k-nearest neighbors within search radius
+    upper_bound = max_radius if max_radius is not None else float("inf")
+    distances, indices = tree.query(
+        grid_points, k=k_neighbors, distance_upper_bound=upper_bound
+    )
+
+    # Ensure uniform 2D shape (M, k) even when k_neighbors == 1
+    if k_neighbors == 1:
+        distances = distances[:, None]
+        indices = indices[:, None]
+
+    # Safe indexing: pad sample grades with NaN at index N for out-of-bound neighbors
+    padded_grades = np.append(sample_grades, np.nan)
+    neighbor_grades = padded_grades[indices]  # Shape (M, k)
+
+    # Step 3: Identify valid neighbors and exact collocations (distance < 1e-6)
+    valid_neighbors = distances <= upper_bound
+    is_exact_match = distances < 1e-6
+    has_any_exact = np.any(is_exact_match, axis=1)
+
+    # Step 4: Calculate inverse distance weights (raw_weights)
+    # Use 0.0 for exact matches and out-of-bounds to prevent divide-by-zero
+    safe_distances = np.maximum(distances, 1e-12)
+    raw_weights = np.where(
+        valid_neighbors & ~is_exact_match,
+        1.0 / np.power(safe_distances, power),
+        0.0,
+    )
+
+    # Step 5: Normalize weights across neighbors
+    total_weights = np.sum(raw_weights, axis=1, keepdims=True)  # Shape (M, 1)
+    has_valid_weights = (total_weights > 0.0).ravel()
+
+    normalized_weights = np.divide(
+        raw_weights,
+        total_weights,
+        out=np.zeros_like(raw_weights),
+        where=(total_weights > 0.0),
+    )
+
+    # Step 6: Compute weighted grade estimates
+    estimated_grades = np.full(len(grid_points), np.nan)
+    estimated_grades[has_valid_weights] = np.nansum(
+        (normalized_weights * neighbor_grades)[has_valid_weights], axis=1
+    )
+
+    # Step 7: Overwrite exact collocations with exact drillhole grade
+    if np.any(has_any_exact):
+        first_exact_idx = np.argmax(is_exact_match[has_any_exact], axis=1)
+        exact_sample_idxs = indices[has_any_exact, first_exact_idx]
+        estimated_grades[has_any_exact] = sample_grades[exact_sample_idxs]
+
+    # Return distances as (M,) if k=1 for convenience, else (M, k)
+    dist_out = distances.ravel() if k_neighbors == 1 else distances
+    return estimated_grades, dist_out
+
+
+def nearest_neighbor_grid_estimation(
+    samples_xy: np.ndarray,
+    sample_grades: np.ndarray,
+    grid_points: np.ndarray,
+    max_radius: Optional[float] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Nearest neighbor estimation (IDW with k=1)."""
+    return inverse_distance_weighting(
+        samples_xy, sample_grades, grid_points, k_neighbors=1, max_radius=max_radius
+    )

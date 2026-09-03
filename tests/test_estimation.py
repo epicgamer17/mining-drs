@@ -11,6 +11,8 @@ from drs_mining.components.estimation import (
     format_reserve_summary,
     grade_tonnage_table,
     plot_polygonal_map,
+    inverse_distance_weighting,
+    nearest_neighbor_grid_estimation,
 )
 
 
@@ -125,3 +127,40 @@ def test_plot_polygonal_map(sample_polygons_df):
     ret_ax = plot_polygonal_map(sample_polygons_df, boundary=boundary, ax=ax)
     assert ret_ax is ax
     plt.close(fig)
+
+
+def test_inverse_distance_weighting_symmetric():
+    samples_xy = np.array([[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]])
+    sample_grades = np.array([1.0, 2.0, 3.0, 4.0])
+    grid_points = np.array([[5.0, 5.0], [0.0, 0.0], [100.0, 100.0]])
+
+    grades, dists = inverse_distance_weighting(
+        samples_xy, sample_grades, grid_points, power=2.0, k_neighbors=4, max_radius=20.0
+    )
+
+    # Center point is symmetrically equidistant -> exact arithmetic mean = 2.5
+    assert grades[0] == pytest.approx(2.5)
+    # Exact collocation -> exact sample grade = 1.0
+    assert grades[1] == pytest.approx(1.0)
+    # Beyond max_radius=20.0 -> NaN
+    assert np.isnan(grades[2])
+
+
+def test_nearest_neighbor_grid_estimation():
+    samples_xy = np.array([[0.0, 0.0], [10.0, 0.0]])
+    sample_grades = np.array([1.5, 3.5])
+    grid_points = np.array([[1.0, 0.0], [9.0, 0.0], [50.0, 50.0]])
+
+    grades, dists = nearest_neighbor_grid_estimation(
+        samples_xy, sample_grades, grid_points, max_radius=20.0
+    )
+
+    # Point (1, 0) is closest to (0, 0)
+    assert grades[0] == pytest.approx(1.5)
+    # Point (9, 0) is closest to (10, 0)
+    assert grades[1] == pytest.approx(3.5)
+    # Point (50, 50) is beyond max_radius=20
+    assert np.isnan(grades[2])
+    # dists should have 1D shape (M,) for k=1
+    assert dists.shape == (3,)
+
