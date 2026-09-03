@@ -40,6 +40,11 @@ from .estimation import (
     create_block_model,
     ordinary_kriging_block_estimation,
     simple_kriging_block_estimation,
+    plot_block_model_orthogonal_slices,
+    plot_block_model_bench_gallery,
+    plot_block_model_3d_isometric,
+    plot_block_model_3d_interactive,
+    plot_block_model_grade_uncertainty,
 )
 
 __all__ = [
@@ -91,4 +96,9 @@ __all__ = [
     "create_block_model",
     "ordinary_kriging_block_estimation",
     "simple_kriging_block_estimation",
+    "plot_block_model_orthogonal_slices",
+    "plot_block_model_bench_gallery",
+    "plot_block_model_3d_isometric",
+    "plot_block_model_3d_interactive",
+    "plot_block_model_grade_uncertainty",
 ]

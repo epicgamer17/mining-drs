@@ -11,7 +11,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon as MplPolygon
+from matplotlib.patches import Polygon as MplPolygon, Rectangle as MplRectangle
+from matplotlib.widgets import Slider, Button
+from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.collections import PatchCollection
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
@@ -5466,3 +5468,847 @@ def plot_simulation_realizations_dashboard(
         "Simulation realizations dashboard plotting stub. "
         "Will visualize realizations vs. smoothed E-type map."
     )
+
+
+# =============================================================================
+# 3D BLOCK MODEL VISUALIZATION SUITE (SLICES, GALLERIES, ISOMETRIC, UNCERTAINTY)
+# =============================================================================
+
+
+def _get_block_grade_norm_and_cmap(
+    block_grades: np.ndarray,
+    sample_grades: Optional[np.ndarray] = None,
+    grade_bins: Optional[Sequence[float]] = None,
+    cmap_name: str = "viridis",
+) -> Tuple[mcolors.Normalize, Any]:
+    """Ensures identical colormap and normalization between blocks and drillholes."""
+    all_vals = []
+    valid_blk = block_grades[np.isfinite(block_grades)]
+    if len(valid_blk) > 0:
+        all_vals.append(valid_blk)
+    if sample_grades is not None:
+        valid_smp = sample_grades[np.isfinite(sample_grades)]
+        if len(valid_smp) > 0:
+            all_vals.append(valid_smp)
+
+    combined = np.concatenate(all_vals) if all_vals else np.array([0.0, 1.0])
+    vmin = float(np.min(combined))
+    vmax = float(np.max(combined))
+    if np.isclose(vmin, vmax):
+        vmax = vmin + 1.0
+
+    cmap = plt.get_cmap(cmap_name).copy()
+    cmap.set_bad(color="#e0e0e0")
+
+    if grade_bins is not None:
+        bins = np.sort(np.asarray(grade_bins, dtype=float))
+        norm = mcolors.BoundaryNorm(bins, ncolors=cmap.N, extend="both")
+    else:
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+    return norm, cmap
+
+
+def _render_2d_block_patches(
+    ax: plt.Axes,
+    df_slice: pd.DataFrame,
+    u_col: str,
+    v_col: str,
+    du_col: str,
+    dv_col: str,
+    val_col: str,
+    norm: mcolors.Normalize,
+    cmap: Any,
+    edgecolor: str = "none",
+    linewidth: float = 0.2,
+) -> PatchCollection:
+    """Renders 2D block model slices using vector PatchCollection at true support coordinates."""
+    patches = []
+    vals = df_slice[val_col].to_numpy()
+    u = df_slice[u_col].to_numpy()
+    v = df_slice[v_col].to_numpy()
+    du = df_slice[du_col].to_numpy()
+    dv = df_slice[dv_col].to_numpy()
+
+    for i in range(len(df_slice)):
+        rect = MplRectangle(
+            (u[i] - 0.5 * du[i], v[i] - 0.5 * dv[i]),
+            du[i],
+            dv[i],
+        )
+        patches.append(rect)
+
+    pc = PatchCollection(
+        patches,
+        cmap=cmap,
+        norm=norm,
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+        zorder=2,
+    )
+    pc.set_array(vals)
+    ax.add_collection(pc)
+    ax.autoscale_view()
+    return pc
+
+
+def plot_block_model_orthogonal_slices(
+    block_model: pd.DataFrame,
+    grade_col: str = "estimated_grade",
+    bench_z: Optional[float] = None,
+    section_y: Optional[float] = None,
+    section_x: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    sample_grades: Optional[np.ndarray] = None,
+    grade_bins: Optional[Sequence[float]] = None,
+    cross_section_view: str = "north",
+    long_section_view: str = "west",
+    cmap: str = "viridis",
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (19.0, 5.8),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Plots 3-panel orthogonal slices (Bench Plan, Cross-Section, Longitudinal Section).
+
+    Standard reporting practice in NI 43-101 and JORC technical reports:
+    1. Bench Plan (X-Y at elevation Z = bench_z): Shows horizontal grade continuity looking down.
+    2. Cross-Section (X-Z at northing Y = section_y): Shows vertical depth continuity across strike.
+       - Looking North (default): West is left, East is right.
+       - Looking South: East is left, West is right (X inverted).
+    3. Longitudinal Section (Y-Z at easting X = section_x): Shows plunge along strike.
+       - Looking West (default): South is left, North is right.
+       - Looking East: North is left, South is right (Y inverted).
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z), dimensions (dx, dy, dz),
+        and the estimated grade column.
+    grade_col : str, default "estimated_grade"
+        Grade column to plot.
+    bench_z : float, optional
+        Target elevation for horizontal bench slice. If None, uses median block elevation.
+    section_y : float, optional
+        Target northing for cross-section slice. If None, uses median block northing.
+    section_x : float, optional
+        Target easting for longitudinal slice. If None, uses median block easting.
+    samples_xyz : np.ndarray, optional
+        Exploration composite coordinates of shape (N, 3) for overlay.
+    sample_grades : np.ndarray, optional
+        Composite grades of shape (N,) for overlay.
+    grade_bins : Sequence[float], optional
+        Discrete cutoff thresholds for discrete grade intervals.
+    cross_section_view : str, default "north"
+        Viewing direction for cross-section ("north" or "south").
+    long_section_view : str, default "west"
+        Viewing direction for longitudinal section ("west" or "east").
+    cmap : str, default "viridis"
+        Colormap name.
+    grade_unit : str, default "% Cu"
+        Unit label for grade colorbar.
+    title : str, optional
+        Figure title.
+    figsize : tuple of float, default (19.0, 5.8)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Matplotlib figure and sequence of 3 axes.
+    """
+    cross_section_view = cross_section_view.lower()
+    if cross_section_view not in ["north", "south"]:
+        raise ValueError("cross_section_view must be 'north' or 'south'.")
+    long_section_view = long_section_view.lower()
+    if long_section_view not in ["west", "east"]:
+        raise ValueError("long_section_view must be 'west' or 'east'.")
+
+    for req in ["x", "y", "z", "dx", "dy", "dz"]:
+        if req not in block_model.columns:
+            raise ValueError(f"block_model is missing required column '{req}'.")
+    if grade_col not in block_model.columns:
+        raise ValueError(f"block_model is missing grade column '{grade_col}'.")
+
+    # Pick exact centroid coordinate slices
+    unique_z = np.sort(block_model["z"].unique())
+    unique_y = np.sort(block_model["y"].unique())
+    unique_x = np.sort(block_model["x"].unique())
+
+    target_z = unique_z[np.argmin(np.abs(unique_z - bench_z))] if bench_z is not None else unique_z[len(unique_z) // 2]
+    target_y = unique_y[np.argmin(np.abs(unique_y - section_y))] if section_y is not None else unique_y[len(unique_y) // 2]
+    target_x = unique_x[np.argmin(np.abs(unique_x - section_x))] if section_x is not None else unique_x[len(unique_x) // 2]
+
+    # Shared normalization and colormap ensuring IDENTICAL scaling between blocks and drillholes
+    norm, color_map = _get_block_grade_norm_and_cmap(
+        block_grades=block_model[grade_col].to_numpy(),
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+        cmap_name=cmap,
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
+
+    # 1. Bench Plan (X-Y at target_z)
+    slice_bench = block_model[np.isclose(block_model["z"], target_z)]
+    dz_val = float(slice_bench["dz"].iloc[0]) if len(slice_bench) > 0 else 5.0
+    pc1 = _render_2d_block_patches(axes[0], slice_bench, "x", "y", "dx", "dy", grade_col, norm, color_map)
+    axes[0].set_title(f"Bench Plan (Z = {target_z:.1f} m) [Looking Down]", fontsize=11, fontweight="bold")
+    axes[0].set_xlabel("Easting (X) [m]")
+    axes[0].set_ylabel("Northing (Y) [m]")
+    axes[0].set_aspect("equal")
+
+    # 2. Cross-Section (X-Z at target_y)
+    slice_sec = block_model[np.isclose(block_model["y"], target_y)]
+    dy_val = float(slice_sec["dy"].iloc[0]) if len(slice_sec) > 0 else 10.0
+    _render_2d_block_patches(axes[1], slice_sec, "x", "z", "dx", "dz", grade_col, norm, color_map)
+    view_cs_label = "Looking North" if cross_section_view == "north" else "Looking South"
+    x_dir_label = "Easting (X) [m] (← West | East →)" if cross_section_view == "north" else "Easting (X) [m] (← East | West →)"
+    axes[1].set_title(f"Cross-Section (Y = {target_y:.1f} m) [{view_cs_label}]", fontsize=11, fontweight="bold")
+    axes[1].set_xlabel(x_dir_label)
+    axes[1].set_ylabel("Elevation (Z) [m]")
+    axes[1].set_aspect("equal")
+    if cross_section_view == "south":
+        axes[1].invert_xaxis()
+
+    # 3. Longitudinal Section (Y-Z at target_x)
+    slice_long = block_model[np.isclose(block_model["x"], target_x)]
+    dx_val = float(slice_long["dx"].iloc[0]) if len(slice_long) > 0 else 10.0
+    _render_2d_block_patches(axes[2], slice_long, "y", "z", "dy", "dz", grade_col, norm, color_map)
+    view_ls_label = "Looking West" if long_section_view == "west" else "Looking East"
+    y_dir_label = "Northing (Y) [m] (← South | North →)" if long_section_view == "west" else "Northing (Y) [m] (← North | South →)"
+    axes[2].set_title(f"Longitudinal Section (X = {target_x:.1f} m) [{view_ls_label}]", fontsize=11, fontweight="bold")
+    axes[2].set_xlabel(y_dir_label)
+    axes[2].set_ylabel("Elevation (Z) [m]")
+    axes[2].set_aspect("equal")
+    if long_section_view == "east":
+        axes[2].invert_xaxis()
+
+    # Drillhole composite overlay within corridor with EXACT MATCHING colormap and norm
+    if samples_xyz is not None and sample_grades is not None:
+        # Bench corridor
+        mask_bench = np.abs(samples_xyz[:, 2] - target_z) <= 0.5 * dz_val
+        if np.any(mask_bench):
+            axes[0].scatter(
+                samples_xyz[mask_bench, 0],
+                samples_xyz[mask_bench, 1],
+                c=sample_grades[mask_bench],
+                cmap=color_map,
+                norm=norm,
+                edgecolor="black",
+                linewidth=0.8,
+                s=35,
+                zorder=4,
+                label=f"Composites (±{0.5 * dz_val:.1f}m)",
+            )
+            axes[0].legend(loc="upper right", framealpha=0.8, fontsize=8)
+
+        # Cross-section corridor
+        mask_sec = np.abs(samples_xyz[:, 1] - target_y) <= 0.5 * dy_val
+        if np.any(mask_sec):
+            axes[1].scatter(
+                samples_xyz[mask_sec, 0],
+                samples_xyz[mask_sec, 2],
+                c=sample_grades[mask_sec],
+                cmap=color_map,
+                norm=norm,
+                edgecolor="black",
+                linewidth=0.8,
+                s=35,
+                zorder=4,
+                label=f"Composites (±{0.5 * dy_val:.1f}m)",
+            )
+            axes[1].legend(loc="upper right", framealpha=0.8, fontsize=8)
+
+        # Longitudinal section corridor
+        mask_long = np.abs(samples_xyz[:, 0] - target_x) <= 0.5 * dx_val
+        if np.any(mask_long):
+            axes[2].scatter(
+                samples_xyz[mask_long, 1],
+                samples_xyz[mask_long, 2],
+                c=sample_grades[mask_long],
+                cmap=color_map,
+                norm=norm,
+                edgecolor="black",
+                linewidth=0.8,
+                s=35,
+                zorder=4,
+                label=f"Composites (±{0.5 * dx_val:.1f}m)",
+            )
+            axes[2].legend(loc="upper right", framealpha=0.8, fontsize=8)
+
+    for ax in axes:
+        ax.grid(True, linestyle=":", alpha=0.5, zorder=1)
+
+    cbar = fig.colorbar(pc1, ax=axes, orientation="vertical", shrink=0.85, pad=0.015)
+    cbar.set_label(f"Block Grade ({grade_unit})", fontsize=10, fontweight="bold")
+
+    fig_title = title or "3D Block Model Orthogonal Slices & Drillhole Reconciliation"
+    fig.suptitle(fig_title, fontsize=13, fontweight="bold")
+    return fig, axes
+
+
+def plot_block_model_bench_gallery(
+    block_model: pd.DataFrame,
+    grade_col: str = "estimated_grade",
+    bench_elevations: Optional[Sequence[float]] = None,
+    n_cols: int = 3,
+    samples_xyz: Optional[np.ndarray] = None,
+    sample_grades: Optional[np.ndarray] = None,
+    grade_bins: Optional[Sequence[float]] = None,
+    cmap: str = "viridis",
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Plots a multi-bench elevation gallery showing deposit morphology from surface to depth."""
+    for req in ["x", "y", "z", "dx", "dy", "dz", grade_col]:
+        if req not in block_model.columns:
+            raise ValueError(f"block_model is missing required column '{req}'.")
+
+    unique_z = np.sort(block_model["z"].unique())
+    if bench_elevations is None:
+        if len(unique_z) <= 6:
+            chosen_z = unique_z
+        else:
+            indices = np.linspace(0, len(unique_z) - 1, 6, dtype=int)
+            chosen_z = unique_z[indices]
+    else:
+        chosen_z = [unique_z[np.argmin(np.abs(unique_z - bz))] for bz in bench_elevations]
+
+    n_plots = len(chosen_z)
+    n_cols = max(1, min(n_cols, n_plots))
+    n_rows = int(np.ceil(n_plots / n_cols))
+
+    fig_size = figsize or (5.5 * n_cols + 1.5, 4.8 * n_rows)
+    fig, axes_flat = plt.subplots(n_rows, n_cols, figsize=fig_size, constrained_layout=True, squeeze=False)
+    axes = axes_flat.ravel()
+
+    norm, color_map = _get_block_grade_norm_and_cmap(
+        block_grades=block_model[grade_col].to_numpy(),
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+        cmap_name=cmap,
+    )
+
+    last_pc = None
+    for i, bz in enumerate(chosen_z):
+        ax = axes[i]
+        df_bench = block_model[np.isclose(block_model["z"], bz)]
+        dz_val = float(df_bench["dz"].iloc[0]) if len(df_bench) > 0 else 5.0
+        last_pc = _render_2d_block_patches(ax, df_bench, "x", "y", "dx", "dy", grade_col, norm, color_map)
+        ax.set_title(f"Level Z = {bz:.1f} m", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Easting (X) [m]")
+        ax.set_ylabel("Northing (Y) [m]")
+        ax.set_aspect("equal")
+        ax.grid(True, linestyle=":", alpha=0.5, zorder=1)
+
+        if samples_xyz is not None and sample_grades is not None:
+            mask_b = np.abs(samples_xyz[:, 2] - bz) <= 0.5 * dz_val
+            if np.any(mask_b):
+                ax.scatter(
+                    samples_xyz[mask_b, 0],
+                    samples_xyz[mask_b, 1],
+                    c=sample_grades[mask_b],
+                    cmap=color_map,
+                    norm=norm,
+                    edgecolor="black",
+                    linewidth=0.8,
+                    s=30,
+                    zorder=4,
+                )
+
+    # Hide unused subplots
+    for j in range(n_plots, len(axes)):
+        axes[j].set_visible(False)
+
+    if last_pc is not None:
+        cbar = fig.colorbar(last_pc, ax=axes[:n_plots], orientation="vertical", shrink=0.85, pad=0.015)
+        cbar.set_label(f"Block Grade ({grade_unit})", fontsize=10, fontweight="bold")
+
+    fig_title = title or "3D Block Model Bench Depth Gallery (Elevation Slices)"
+    fig.suptitle(fig_title, fontsize=13, fontweight="bold")
+    return fig, axes[:n_plots]
+
+
+def plot_block_model_3d_isometric(
+    block_model: pd.DataFrame,
+    grade_col: str = "estimated_grade",
+    cutoff_grade: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    sample_grades: Optional[np.ndarray] = None,
+    grade_bins: Optional[Sequence[float]] = None,
+    cmap: str = "viridis",
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    elev: float = 28.0,
+    azim: float = -55.0,
+    figsize: Tuple[float, float] = (10.0, 8.5),
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Plots 3D Isometric View with cut-off filtering to reveal internal ore shoots."""
+    for req in ["x", "y", "z", grade_col]:
+        if req not in block_model.columns:
+            raise ValueError(f"block_model is missing required column '{req}'.")
+
+    # Filter by cutoff grade to avoid waste block occlusion
+    valid_mask = np.isfinite(block_model[grade_col])
+    if cutoff_grade is not None:
+        valid_mask &= (block_model[grade_col] >= cutoff_grade)
+    df_plot = block_model[valid_mask]
+
+    fig = plt.figure(figsize=figsize, constrained_layout=True)
+    ax = fig.add_subplot(111, projection="3d")
+
+    norm, color_map = _get_block_grade_norm_and_cmap(
+        block_grades=block_model[grade_col].to_numpy(),
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+        cmap_name=cmap,
+    )
+
+    if len(df_plot) > 0:
+        p = ax.scatter(
+            df_plot["x"],
+            df_plot["y"],
+            df_plot["z"],
+            c=df_plot[grade_col],
+            cmap=color_map,
+            norm=norm,
+            marker="s",
+            s=45,
+            alpha=0.75,
+            edgecolors="none",
+            label=f"Ore Blocks (≥ {cutoff_grade:.2f} {grade_unit})" if cutoff_grade else "Blocks",
+        )
+        cbar = fig.colorbar(p, ax=ax, shrink=0.7, pad=0.08)
+        cbar.set_label(f"Grade ({grade_unit})", fontsize=10, fontweight="bold")
+
+    if samples_xyz is not None:
+        c_samples = sample_grades if sample_grades is not None else "red"
+        ax.scatter(
+            samples_xyz[:, 0],
+            samples_xyz[:, 1],
+            samples_xyz[:, 2],
+            c=c_samples,
+            cmap=color_map if sample_grades is not None else None,
+            norm=norm if sample_grades is not None else None,
+            s=20,
+            edgecolor="black",
+            linewidth=0.6,
+            label="Drillholes",
+            zorder=5,
+        )
+
+    ax.set_xlabel("Easting (X) [m]", labelpad=8)
+    ax.set_ylabel("Northing (Y) [m]", labelpad=8)
+    ax.set_zlabel("Elevation (Z) [m]", labelpad=8)
+    ax.view_init(elev=elev, azim=azim)
+
+    # Set physical aspect ratio scaling (1:1:1 physical dimensions)
+    x_min, x_max = float(block_model["x"].min()), float(block_model["x"].max())
+    y_min, y_max = float(block_model["y"].min()), float(block_model["y"].max())
+    z_min, z_max = float(block_model["z"].min()), float(block_model["z"].max())
+    span_x = max(1.0, x_max - x_min)
+    span_y = max(1.0, y_max - y_min)
+    span_z = max(1.0, z_max - z_min)
+    ax.set_box_aspect((span_x, span_y, span_z))
+
+    cutoff_str = f" [Cut-off ≥ {cutoff_grade:.2f} {grade_unit}]" if cutoff_grade is not None else ""
+    fig_title = title or f"3D Block Model Isometric View{cutoff_str}"
+    ax.set_title(fig_title, fontsize=12, fontweight="bold", pad=12)
+    ax.legend(loc="upper left", framealpha=0.8)
+
+    return fig, ax
+
+
+def plot_block_model_3d_interactive(
+    block_model: pd.DataFrame,
+    grade_col: str = "estimated_grade",
+    initial_cutoff: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    sample_grades: Optional[np.ndarray] = None,
+    grade_bins: Optional[Sequence[float]] = None,
+    tonnes_col: Optional[str] = "tonnes",
+    cmap: str = "viridis",
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    elev: float = 28.0,
+    azim: float = -55.0,
+    figsize: Tuple[float, float] = (11.0, 9.0),
+) -> Tuple[plt.Figure, Axes3D, Dict[str, Any]]:
+    """Interactive 3D Block Model explorer with real-time sliders and metrics.
+
+    Provides a live desktop exploration interface with:
+    - 3D physical 1:1:1 aspect scaling, click-and-drag 360° rotation, and scroll zoom.
+    - Interactive Cut-off Grade Slider to dynamically peel away waste blocks.
+    - Interactive Max Elevation Slider to slice downward through benches / strip overburden.
+    - Dynamic mining reconciliation HUD showing visible ore count, mean grade, and tonnage.
+    - Reset View button to restore initial parameters.
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z) and estimated grade.
+    grade_col : str, default "estimated_grade"
+        Grade column to visualize.
+    initial_cutoff : float, optional
+        Starting cut-off grade for the slider. Defaults to 25th percentile of ore grades.
+    samples_xyz : np.ndarray, optional
+        Exploration drillhole coordinates of shape (N, 3).
+    sample_grades : np.ndarray, optional
+        Drillhole composite grades for overlay.
+    grade_bins : Sequence[float], optional
+        Discrete cutoff thresholds for discrete color intervals.
+    tonnes_col : str, optional, default "tonnes"
+        Tonnage column for real-time mass calculations.
+    cmap : str, default "viridis"
+        Colormap name.
+    grade_unit : str, default "% Cu"
+        Unit label for grades and colorbars.
+    title : str, optional
+        Window and plot title.
+    elev : float, default 28.0
+        Initial camera elevation angle in degrees.
+    azim : float, default -55.0
+        Initial camera azimuth angle in degrees.
+    figsize : tuple of float, default (11.0, 9.0)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Axes3D, Dict[str, Any]]
+        Matplotlib Figure, 3D Axes, and dictionary containing references to interactive
+        controls ('slider_cutoff', 'slider_elev', 'button_reset', 'update_func') to prevent
+        garbage collection of widget callbacks.
+    """
+    for req in ["x", "y", "z", grade_col]:
+        if req not in block_model.columns:
+            raise ValueError(f"block_model is missing required column '{req}'.")
+
+    x_all = block_model["x"].to_numpy()
+    y_all = block_model["y"].to_numpy()
+    z_all = block_model["z"].to_numpy()
+    grades_all = block_model[grade_col].to_numpy()
+    tonnes_all = (
+        block_model[tonnes_col].to_numpy()
+        if (tonnes_col and tonnes_col in block_model.columns)
+        else None
+    )
+    valid_finite = np.isfinite(grades_all)
+
+    valid_grades = grades_all[valid_finite]
+    min_g = float(np.min(valid_grades)) if len(valid_grades) > 0 else 0.0
+    max_g = float(np.max(valid_grades)) if len(valid_grades) > 0 else 1.0
+    if initial_cutoff is None:
+        init_c = float(np.percentile(valid_grades, 25)) if len(valid_grades) > 0 else min_g
+    else:
+        init_c = float(initial_cutoff)
+
+    min_z = float(np.min(z_all))
+    max_z = float(np.max(z_all))
+
+    norm, color_map = _get_block_grade_norm_and_cmap(
+        block_grades=valid_grades,
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+        cmap_name=cmap,
+    )
+
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(111, projection="3d")
+    fig.subplots_adjust(bottom=0.20, top=0.93, left=0.05, right=0.88)
+
+    init_mask = valid_finite & (grades_all >= init_c) & (z_all <= max_z)
+    p = ax.scatter(
+        x_all[init_mask],
+        y_all[init_mask],
+        z_all[init_mask],
+        c=grades_all[init_mask],
+        cmap=color_map,
+        norm=norm,
+        marker="s",
+        s=45,
+        alpha=0.75,
+        edgecolors="none",
+        label="Ore Blocks",
+    )
+
+    if samples_xyz is not None:
+        c_dh = sample_grades if sample_grades is not None else "red"
+        ax.scatter(
+            samples_xyz[:, 0],
+            samples_xyz[:, 1],
+            samples_xyz[:, 2],
+            c=c_dh,
+            cmap=color_map if sample_grades is not None else None,
+            norm=norm if sample_grades is not None else None,
+            s=20,
+            edgecolor="black",
+            linewidth=0.6,
+            zorder=5,
+            label="Drillholes",
+        )
+
+    # Physical aspect ratio scaling
+    span_x = max(1.0, float(np.ptp(x_all)))
+    span_y = max(1.0, float(np.ptp(y_all)))
+    span_z = max(1.0, float(np.ptp(z_all)))
+    ax.set_box_aspect((span_x, span_y, span_z))
+    ax.set_xlabel("Easting (X) [m]", labelpad=8)
+    ax.set_ylabel("Northing (Y) [m]", labelpad=8)
+    ax.set_zlabel("Elevation (Z) [m]", labelpad=8)
+    ax.view_init(elev=elev, azim=azim)
+
+    fig_title = title or "Interactive 3D Block Model Exploration"
+    ax.set_title(fig_title, fontsize=12, fontweight="bold", pad=12)
+    ax.legend(loc="upper left", framealpha=0.8)
+
+    cbar_ax = fig.add_axes([0.90, 0.28, 0.025, 0.58])
+    cbar = fig.colorbar(p, cax=cbar_ax)
+    cbar.set_label(f"Block Grade ({grade_unit})", fontsize=10, fontweight="bold")
+
+    info_box = ax.text2D(
+        0.02,
+        0.95,
+        "",
+        transform=ax.transAxes,
+        fontsize=9,
+        fontfamily="monospace",
+        verticalalignment="top",
+        bbox=dict(
+            boxstyle="round,pad=0.5",
+            facecolor="white",
+            edgecolor="#cccccc",
+            alpha=0.9,
+        ),
+    )
+
+    escaped_unit = grade_unit.replace("%", "%%")
+    ax_slider_c = fig.add_axes([0.18, 0.09, 0.52, 0.035])
+    slider_cutoff = Slider(
+        ax=ax_slider_c,
+        label="Cut-off Grade",
+        valmin=min_g,
+        valmax=max_g,
+        valinit=init_c,
+        valfmt=f"%.2f {escaped_unit}",
+        color="#2b5c8f",
+    )
+
+    ax_slider_z = fig.add_axes([0.18, 0.03, 0.52, 0.035])
+    slider_elev = Slider(
+        ax=ax_slider_z,
+        label="Max Elevation",
+        valmin=min_z,
+        valmax=max_z,
+        valinit=max_z,
+        valfmt="%.1f m",
+        color="#4a7c59",
+    )
+
+    ax_btn = fig.add_axes([0.76, 0.03, 0.12, 0.095])
+    btn_reset = Button(ax_btn, "Reset\nControls", hovercolor="#e0e0e0")
+
+    def update_plot(val=None):
+        c_val = slider_cutoff.val
+        z_val = slider_elev.val
+        mask = valid_finite & (grades_all >= c_val) & (z_all <= z_val)
+        n_vis = int(np.sum(mask))
+        n_tot = int(np.sum(valid_finite))
+        pct = (n_vis / n_tot * 100.0) if n_tot > 0 else 0.0
+
+        if n_vis > 0:
+            p._offsets3d = (x_all[mask], y_all[mask], z_all[mask])
+            p.set_array(grades_all[mask])
+            mean_g = float(np.mean(grades_all[mask]))
+            tonnes_str = ""
+            if tonnes_all is not None:
+                t_vis = float(np.sum(tonnes_all[mask])) / 1e6
+                tonnes_str = f"\nTonnage:    {t_vis:.2f} Mt"
+            info_box.set_text(
+                f"Visible:    {n_vis:,} / {n_tot:,} ({pct:.1f}%)\n"
+                f"Mean Grade: {mean_g:.2f} {grade_unit}"
+                f"{tonnes_str}"
+            )
+        else:
+            p._offsets3d = (np.array([]), np.array([]), np.array([]))
+            p.set_array(np.array([]))
+            info_box.set_text(f"Visible: 0 / {n_tot:,} (0.0%)\n[No blocks above cut-off]")
+
+        fig.canvas.draw_idle()
+
+    slider_cutoff.on_changed(update_plot)
+    slider_elev.on_changed(update_plot)
+
+    def reset_controls(event):
+        slider_cutoff.reset()
+        slider_elev.reset()
+        ax.view_init(elev=elev, azim=azim)
+
+    btn_reset.on_clicked(reset_controls)
+    update_plot()
+
+    controls = {
+        "slider_cutoff": slider_cutoff,
+        "slider_elev": slider_elev,
+        "button_reset": btn_reset,
+        "update_func": update_plot,
+        "reset_func": reset_controls,
+    }
+    # Attach to figure to prevent Python garbage collection of callback references
+    fig._interactive_controls = controls  # type: ignore[attr-defined]
+
+    return fig, ax, controls
+
+
+def plot_block_model_grade_uncertainty(
+    block_model: pd.DataFrame,
+    grade_col: str = "estimated_grade",
+    var_col: str = "kriging_variance",
+    slice_axis: str = "z",
+    slice_coord: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    sample_grades: Optional[np.ndarray] = None,
+    grade_bins: Optional[Sequence[float]] = None,
+    vmax_var: Optional[float] = None,
+    vmin_var: float = 0.0,
+    grade_cmap: str = "viridis",
+    var_cmap: str = "magma_r",
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (15.0, 6.0),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Plots side-by-side audit comparing Estimated Grade vs. Kriging Estimation Variance.
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates, block dimensions, grade, and variance.
+    grade_col : str, default "estimated_grade"
+        Column name for estimated block grade.
+    var_col : str, default "kriging_variance"
+        Column name for block kriging estimation variance.
+    slice_axis : str, default "z"
+        Axis orthogonal to slice plane ('x', 'y', or 'z').
+    slice_coord : float, optional
+        Target coordinate along slice_axis. Defaults to median coordinate.
+    samples_xyz : np.ndarray, optional
+        Sample composite coordinates for pierce-point overlay.
+    sample_grades : np.ndarray, optional
+        Sample composite grades for pierce-point overlay.
+    grade_bins : Sequence[float], optional
+        Discrete cutoff bins for grade coloring.
+    vmax_var : float, optional
+        Upper bound for kriging variance normalization. Setting vmax_var = total_sill (or C(0))
+        anchors the variance scale to theoretical maximum uncertainty, preventing misleading
+        color stretches across well-informed slices.
+    vmin_var : float, default 0.0
+        Lower bound for kriging variance normalization (collocated samples have theoretical variance 0).
+    grade_cmap : str, default "viridis"
+        Colormap name for estimated grade panel.
+    var_cmap : str, default "magma_r"
+        Colormap name for kriging variance panel.
+    grade_unit : str, default "% Cu"
+        Unit label for grade colorbar.
+    title : str, optional
+        Overall figure title.
+    figsize : tuple of float, default (15.0, 6.0)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Matplotlib figure and sequence of 2 axes (grade and variance).
+    """
+    slice_axis = slice_axis.lower()
+    if slice_axis not in ["x", "y", "z"]:
+        raise ValueError("slice_axis must be 'x', 'y', or 'z'.")
+    for req in ["x", "y", "z", "dx", "dy", "dz", grade_col, var_col]:
+        if req not in block_model.columns:
+            raise ValueError(f"block_model is missing required column '{req}'.")
+
+    u_col, v_col = [c for c in ["x", "y", "z"] if c != slice_axis]
+    du_col, dv_col = f"d{u_col}", f"d{v_col}"
+
+    unique_s = np.sort(block_model[slice_axis].unique())
+    target_coord = unique_s[np.argmin(np.abs(unique_s - slice_coord))] if slice_coord is not None else unique_s[len(unique_s) // 2]
+    df_slice = block_model[np.isclose(block_model[slice_axis], target_coord)]
+    d_slice = float(df_slice[f"d{slice_axis}"].iloc[0]) if len(df_slice) > 0 else 5.0
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
+
+    # 1. Grade Panel
+    norm_grade, cmap_grade = _get_block_grade_norm_and_cmap(
+        block_grades=block_model[grade_col].to_numpy(),
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+        cmap_name=grade_cmap,
+    )
+    pc_grade = _render_2d_block_patches(axes[0], df_slice, u_col, v_col, du_col, dv_col, grade_col, norm_grade, cmap_grade)
+    axes[0].set_title(f"Estimated Grade Z*(V) [{slice_axis.upper()} = {target_coord:.1f} m]", fontsize=11, fontweight="bold")
+    axes[0].set_xlabel(f"{u_col.upper()} Coordinate [m]")
+    axes[0].set_ylabel(f"{v_col.upper()} Coordinate [m]")
+    axes[0].set_aspect("equal")
+    axes[0].grid(True, linestyle=":", alpha=0.5, zorder=1)
+    cb_g = fig.colorbar(pc_grade, ax=axes[0], orientation="vertical", shrink=0.85, pad=0.02)
+    cb_g.set_label(f"Grade ({grade_unit})", fontsize=10, fontweight="bold")
+
+    # 2. Variance Panel with theoretical scale anchoring
+    valid_var = df_slice[var_col][np.isfinite(df_slice[var_col])]
+    v_min_eff = float(vmin_var)
+    if vmax_var is not None:
+        v_max_eff = float(vmax_var)
+    else:
+        v_max_eff = float(np.max(valid_var)) if len(valid_var) > 0 else 1.0
+    norm_var = mcolors.Normalize(vmin=v_min_eff, vmax=max(v_min_eff + 1e-6, v_max_eff))
+    cmap_v = plt.get_cmap(var_cmap).copy()
+    cmap_v.set_bad(color="#e0e0e0")
+
+    pc_var = _render_2d_block_patches(axes[1], df_slice, u_col, v_col, du_col, dv_col, var_col, norm_var, cmap_v)
+    axes[1].set_title(f"Kriging Estimation Variance σ_OK^2 [{slice_axis.upper()} = {target_coord:.1f} m]", fontsize=11, fontweight="bold")
+    axes[1].set_xlabel(f"{u_col.upper()} Coordinate [m]")
+    axes[1].set_ylabel(f"{v_col.upper()} Coordinate [m]")
+    axes[1].set_aspect("equal")
+    axes[1].grid(True, linestyle=":", alpha=0.5, zorder=1)
+    cb_v = fig.colorbar(pc_var, ax=axes[1], orientation="vertical", shrink=0.85, pad=0.02)
+    cb_v.set_label("Estimation Variance (σ²)", fontsize=10, fontweight="bold")
+
+    # Drillhole pierce point overlay
+    if samples_xyz is not None:
+        axis_idx = {"x": 0, "y": 1, "z": 2}[slice_axis]
+        u_idx = {"x": 0, "y": 1, "z": 2}[u_col]
+        v_idx = {"x": 0, "y": 1, "z": 2}[v_col]
+        mask_s = np.abs(samples_xyz[:, axis_idx] - target_coord) <= 0.5 * d_slice
+        if np.any(mask_s):
+            # Left: grade colormap
+            c_g = sample_grades[mask_s] if sample_grades is not None else "black"
+            axes[0].scatter(
+                samples_xyz[mask_s, u_idx],
+                samples_xyz[mask_s, v_idx],
+                c=c_g,
+                cmap=cmap_grade if sample_grades is not None else None,
+                norm=norm_grade if sample_grades is not None else None,
+                edgecolor="black",
+                linewidth=0.8,
+                s=35,
+                zorder=4,
+                label=f"Composites (±{0.5 * d_slice:.1f}m)",
+            )
+            axes[0].legend(loc="upper right", framealpha=0.8, fontsize=8)
+
+            # Right: black markers indicating sampling locations
+            axes[1].scatter(
+                samples_xyz[mask_s, u_idx],
+                samples_xyz[mask_s, v_idx],
+                color="cyan",
+                edgecolor="black",
+                linewidth=0.8,
+                s=35,
+                zorder=4,
+                label=f"Drillholes (±{0.5 * d_slice:.1f}m)",
+            )
+            axes[1].legend(loc="upper right", framealpha=0.8, fontsize=8)
+
+    fig_title = title or f"Block Model Grade vs. Geostatistical Estimation Uncertainty [{slice_axis.upper()} Slice]"
+    fig.suptitle(fig_title, fontsize=13, fontweight="bold")
+    return fig, axes
+

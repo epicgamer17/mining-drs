@@ -43,6 +43,11 @@ from drs_mining.components.estimation import (
     create_block_model,
     ordinary_kriging_block_estimation,
     simple_kriging_block_estimation,
+    plot_block_model_orthogonal_slices,
+    plot_block_model_bench_gallery,
+    plot_block_model_3d_isometric,
+    plot_block_model_3d_interactive,
+    plot_block_model_grade_uncertainty,
     _theoretical_covariance,
 )
 
@@ -1465,4 +1470,132 @@ def test_simple_kriging_block_estimation():
     )
     assert np.isclose(est_d[0], 10.0)
     assert np.isclose(est_d[1], 1.0)
+
+
+def test_block_model_visualization_suite():
+    # Setup test block model and samples
+    bm = create_block_model(
+        origin=(0.0, 0.0, 0.0),
+        block_size=(10.0, 10.0, 5.0),
+        n_blocks=(4, 4, 3),  # 48 blocks
+    )
+    bm["estimated_grade"] = np.linspace(0.2, 2.5, len(bm))
+    bm["kriging_variance"] = np.linspace(0.1, 0.9, len(bm))
+
+    samples_xyz = np.array([
+        [15.0, 15.0, 7.5],
+        [25.0, 25.0, 7.5],
+    ])
+    sample_grades = np.array([1.5, 2.0])
+    grade_bins = [0.0, 0.5, 1.0, 2.0, 3.0]
+
+    # 1. Test Orthogonal Slices (Default: Looking North, Looking West)
+    fig1, axes1 = plot_block_model_orthogonal_slices(
+        block_model=bm,
+        grade_col="estimated_grade",
+        bench_z=7.5,
+        section_y=15.0,
+        section_x=15.0,
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+        cross_section_view="north",
+        long_section_view="west",
+    )
+    assert isinstance(fig1, plt.Figure)
+    assert len(axes1) == 3
+    assert "Looking North" in axes1[1].get_title()
+    assert "Looking West" in axes1[2].get_title()
+    plt.close(fig1)
+
+    # 1b. Test Orthogonal Slices (Looking South, Looking East)
+    fig1b, axes1b = plot_block_model_orthogonal_slices(
+        block_model=bm,
+        cross_section_view="south",
+        long_section_view="east",
+    )
+    assert "Looking South" in axes1b[1].get_title()
+    assert "Looking East" in axes1b[2].get_title()
+    plt.close(fig1b)
+
+    with pytest.raises(ValueError, match="cross_section_view"):
+        plot_block_model_orthogonal_slices(bm, cross_section_view="invalid")
+    with pytest.raises(ValueError, match="long_section_view"):
+        plot_block_model_orthogonal_slices(bm, long_section_view="invalid")
+
+
+    # 2. Test Bench Gallery
+    fig2, axes2 = plot_block_model_bench_gallery(
+        block_model=bm,
+        grade_col="estimated_grade",
+        bench_elevations=[2.5, 7.5, 12.5],
+        n_cols=3,
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+    )
+    assert isinstance(fig2, plt.Figure)
+    assert len(axes2) == 3
+    plt.close(fig2)
+
+    # 3. Test 3D Isometric View
+    fig3, ax3 = plot_block_model_3d_isometric(
+        block_model=bm,
+        grade_col="estimated_grade",
+        cutoff_grade=1.0,
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+    )
+    assert isinstance(fig3, plt.Figure)
+    assert ax3 is not None
+    plt.close(fig3)
+
+    # 4. Test Grade vs Uncertainty Audit
+    fig4, axes4 = plot_block_model_grade_uncertainty(
+        block_model=bm,
+        grade_col="estimated_grade",
+        var_col="kriging_variance",
+        slice_axis="z",
+        slice_coord=7.5,
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+        vmax_var=1.0,
+        vmin_var=0.0,
+    )
+    assert isinstance(fig4, plt.Figure)
+    assert len(axes4) == 2
+    plt.close(fig4)
+
+    # 5. Test Interactive 3D Explorer
+    fig5, ax5, controls = plot_block_model_3d_interactive(
+        block_model=bm,
+        grade_col="estimated_grade",
+        initial_cutoff=0.8,
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        grade_bins=grade_bins,
+    )
+    assert isinstance(fig5, plt.Figure)
+    assert ax5 is not None
+    assert "slider_cutoff" in controls
+    assert "slider_elev" in controls
+    assert "button_reset" in controls
+
+    # Test slider update and reset events
+    controls["slider_cutoff"].set_val(1.5)
+    controls["slider_elev"].set_val(5.0)
+    controls["reset_func"](None)  # trigger reset
+
+    # Test cutoff filter resulting in 0 visible blocks
+    controls["slider_cutoff"].set_val(10.0)
+
+    plt.close(fig5)
+
+    with pytest.raises(ValueError, match="missing required column"):
+        plot_block_model_3d_interactive(pd.DataFrame({"x": [1.0]}))
+
+
+
 
