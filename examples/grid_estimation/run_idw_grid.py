@@ -22,13 +22,17 @@ from matplotlib.path import Path as MplPath
 import numpy as np
 import pandas as pd
 
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, KDTree
 from drs_mining.components.estimation import (
     inverse_distance_weighting,
     nearest_neighbor_grid_estimation,
     is_within_convex_hull,
     grade_tonnage_table,
     plot_grade_tonnage_curve,
+    cell_declustering,
+    plot_cell_declustering_curve,
+    plot_swath_analysis,
+    format_resource_statement,
 )
 
 
@@ -141,7 +145,23 @@ def main():
     print(f"Generated {len(grid_points):,} grid blocks ({args.grid_res:.0f}m x {args.grid_res:.0f}m).")
     print(f"Total Block Model Tonnage: {len(grid_points) * block_tonnes:,.0f} tonnes.")
 
-    # 2. Spatial Classification: Interpolation vs Extrapolation Audit
+    # 2. Cell Declustering Analysis (SME Handbook Section 4.3)
+    declust_cell_sizes = np.linspace(20.0, 350.0, 21)
+    declust_weights, declust_df, opt_cell_size = cell_declustering(
+        drillholes, cell_sizes=declust_cell_sizes, grade_col="grade", x_col="x", y_col="y", min_mean=True
+    )
+    opt_declust_mean = float(
+        declust_df.loc[declust_df["cell_size"] == opt_cell_size, "declustered_mean"].iloc[0]
+    )
+    naive_mean = float(sample_grades.mean())
+    bias_removed_pct = ((naive_mean - opt_declust_mean) / naive_mean) * 100.0
+
+    print("\n--- Cell Declustering Analysis (SME Handbook Section 4.3) ---")
+    print(f"Optimal Declustering Cell Size : {opt_cell_size:.1f} m (Minimum Declustered Mean)")
+    print(f"Naive (Unweighted) Mean Assay  : {naive_mean:.3f}% Cu")
+    print(f"Representative Declustered Mean: {opt_declust_mean:.3f}% Cu (Bias Removed: {bias_removed_pct:+.1f}%)")
+
+    # 3. Spatial Classification: Interpolation vs Extrapolation Audit
     is_interpolated = is_within_convex_hull(samples_xy, grid_points)
     n_interpolated = int(is_interpolated.sum())
     n_extrapolated = len(grid_points) - n_interpolated
@@ -150,13 +170,13 @@ def main():
     print(f"Interpolated Blocks (Inside Convex Hull)  : {n_interpolated:,d} ({n_interpolated / len(grid_points) * 100:.1f}%) -> {n_interpolated * block_tonnes:,.0f} tonnes [High Confidence]")
     print(f"Extrapolated Blocks (Outside Convex Hull) : {n_extrapolated:,d} ({n_extrapolated / len(grid_points) * 100:.1f}%) -> {n_extrapolated * block_tonnes:,.0f} tonnes [Exploration Risk]")
 
-    # 3. Run Estimator 1: Nearest Neighbor (NN)
+    # 4. Run Estimator 1: Nearest Neighbor (NN)
     print(f"\n[1/4] Running Nearest Neighbor (NN)...")
     nn_grades, _ = nearest_neighbor_grid_estimation(
         samples_xy, sample_grades, grid_points, max_radius=args.max_radius
     )
 
-    # 4. Run Estimator 2: IDW² (Standard Mining Default)
+    # 5. Run Estimator 2: IDW² (Standard Mining Default)
     print(f"[2/4] Running IDW² (power=2.0, k=8)...")
     idw2_grades, _ = inverse_distance_weighting(
         samples_xy, sample_grades, grid_points, power=2.0, k_neighbors=8, max_radius=args.max_radius
@@ -216,9 +236,52 @@ def main():
     gt_disp["metal_recovery_pct"] = gt_disp["metal_recovery_pct"].map(lambda x: f"{x:.1f}%")
     print(gt_disp[["ore_tonnes", "ore_grade", "waste_tonnes", "strip_ratio", "ore_recovery_pct", "metal_recovery_pct"]].to_string())
 
-    # 9. Spatial Visualization & Comparative Grade-Tonnage Chart
+    # 9. Official Mineral Resource Statement (NI 43-101 / JORC Code Compliant)
+    tree_samples = KDTree(samples_xy)
+    d_to_samples, _ = tree_samples.query(grid_points)
+
+    categories = np.empty(len(grid_points), dtype=object)
+    for i in range(len(grid_points)):
+        if is_interpolated[i]:
+            if d_to_samples[i] <= 60.0:
+                categories[i] = "Measured"
+            else:
+                categories[i] = "Indicated"
+        else:
+            categories[i] = "Inferred"
+
+    block_class_df = pd.DataFrame(
+        {
+            "category": categories,
+            "grade": idw2_grades,
+            "tonnes": block_tonnes,
+        }
+    )
+
+    base_cutoff = 0.50
+    resource_stmt = format_resource_statement(
+        block_class_df,
+        cutoff_grade=base_cutoff,
+        grade_unit="% Cu",
+        tonnage_unit="Mt",
+        metal_unit="kt",
+        commodity_price="$3.80/lb Cu",
+        metallurgical_recovery=88.0,
+        rpeee_constraint="Constrained within Lerchs-Grossmann optimized pit shell",
+    )
+
+    print(
+        f"\n--- Official Mineral Resource Statement (IDW² Model, Cutoff: {base_cutoff:.2f}% Cu) ---"
+    )
+    print(resource_stmt.to_string(index=False))
+    print("\nCompliance Footnotes:")
+    for fn in resource_stmt.attrs.get("footnotes", []):
+        print(f"  {fn}")
+
+    # 10. Spatial Visualization & Comparative Grade-Tonnage Chart
     if not args.no_plot:
-        Path(args.save_plot).parent.mkdir(parents=True, exist_ok=True)
+        plots_dir = Path(args.save_plot).parent
+        plots_dir.mkdir(parents=True, exist_ok=True)
         xx, yy, inside_mask = grid_info
 
         fig, axes = plt.subplots(1, 4, figsize=(24, 6), sharey=True)
@@ -246,36 +309,35 @@ def main():
                 alpha=0.9,
             )
 
-            # Overlay concession boundary
-            ax.plot(b_poly[:, 0], b_poly[:, 1], "r--", linewidth=1.5, label="Concession Perimeter")
+            # Draw concession boundary
+            ax.plot(b_poly[:, 0], b_poly[:, 1], "r--", linewidth=1.5, label="Boundary")
 
-            # Overlay drillhole convex hull
+            # Draw drillhole convex hull
             ax.plot(
                 hull_pts[:, 0],
                 hull_pts[:, 1],
-                color="cyan",
+                color="orange",
+                linewidth=1.8,
                 linestyle="-.",
-                linewidth=2.0,
-                label="Drillhole Convex Hull",
+                label="Drillhole Hull",
             )
 
-            # Overlay drillholes
-            sc = ax.scatter(
+            # Draw drillhole collars
+            ax.scatter(
                 samples_xy[:, 0],
                 samples_xy[:, 1],
                 c=sample_grades,
                 cmap="viridis",
+                edgecolor="black",
+                s=70,
                 vmin=v_min,
                 vmax=v_max,
-                edgecolor="black",
-                s=50,
-                linewidth=1.2,
                 zorder=5,
             )
 
             for _, row in drillholes.iterrows():
                 ax.annotate(
-                    f"{row['grade']:.2f}",
+                    f"{row['grade']:.2f}%",
                     (row["x"], row["y"]),
                     textcoords="offset points",
                     xytext=(0, 6),
@@ -298,17 +360,90 @@ def main():
         plt.close(fig)
         print(f"\nSpatial comparison figure saved to: {args.save_plot}")
 
-        # Comparative Grade-Tonnage Audit Plot (NI 43-101 Model Smoothing Test)
-        gt_plot_path = str(Path(args.save_plot).parent / "idw_grade_tonnage_curves.png")
-        fig_gt, ax_gt = plot_grade_tonnage_curve(
-            gt_models,
+        # Individual Grade-Tonnage Curves (One Dedicated Dual-Axis Plot per Model)
+        gt_file_map = {
+            "Nearest Neighbor (NN)": "nn_grade_tonnage.png",
+            "IDW² (Full Extrapolation)": "idw2_grade_tonnage.png",
+            "IDW¹ (Smooth Moving Avg)": "idw1_grade_tonnage.png",
+        }
+
+        print("\nGenerating individual Grade–Tonnage plots for each estimator...")
+        for model_name, filename in gt_file_map.items():
+            fig_gt, ax_gt = plot_grade_tonnage_curve(
+                gt_models[model_name],
+                grade_unit="% Cu",
+                tonnage_unit="Mt",
+                title=f"Grade–Tonnage Sensitivity Curve - {model_name}",
+                show_metal=True,
+            )
+            out_file = str(plots_dir / filename)
+            fig_gt.savefig(out_file, dpi=180, bbox_inches="tight")
+            plt.close(fig_gt)
+            print(f"  • {model_name}: saved to {out_file}")
+
+        # Cell Declustering Sensitivity Curve
+        declust_plot_file = str(plots_dir / "idw_cell_declustering_curve.png")
+        fig_dec, ax_dec = plot_cell_declustering_curve(
+            declust_df,
+            naive_mean=naive_mean,
+            optimal_cell_size=opt_cell_size,
+            grade_unit="% Cu",
+            title=f"Cell Declustering Sensitivity Curve (Optimal: {opt_cell_size:.1f}m)",
+        )
+        fig_dec.savefig(declust_plot_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_dec)
+        print(f"  • Cell Declustering curve: saved to {declust_plot_file}")
+
+        # Directional Swath Plots: IDW² vs. Nearest Neighbor (Declustered Check)
+        swath_df = pd.DataFrame(
+            {
+                "x": grid_points[:, 0],
+                "y": grid_points[:, 1],
+                "idw2_grade": idw2_grades,
+                "nn_grade": nn_grades,
+                "tonnes": block_tonnes,
+            }
+        )
+
+        swath_x_file = str(plots_dir / "idw_swath_easting.png")
+        fig_swath_x, _ = plot_swath_analysis(
+            swath_df,
+            drillholes=drillholes,
+            axis="x",
+            bin_width=40.0,
+            grade_col="idw2_grade",
+            validation_grade_col="nn_grade",
+            drillhole_grade_col="grade",
+            model_name="IDW² (Estimate)",
+            validation_model_name="Nearest Neighbor (Declustered Check)",
+            tonnes_col="tonnes",
             grade_unit="% Cu",
             tonnage_unit="Mt",
-            title="Model Smoothing Audit: Nearest Neighbor vs. IDW Variants",
+            title="Swath Plot (Local Drift Analysis) Along Easting (X)",
         )
-        fig_gt.savefig(gt_plot_path, dpi=180, bbox_inches="tight")
-        plt.close(fig_gt)
-        print(f"Comparative Grade-Tonnage curve saved to: {gt_plot_path}")
+        fig_swath_x.savefig(swath_x_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_swath_x)
+        print(f"  • Swath Plot (Easting): saved to {swath_x_file}")
+
+        swath_y_file = str(plots_dir / "idw_swath_northing.png")
+        fig_swath_y, _ = plot_swath_analysis(
+            swath_df,
+            drillholes=drillholes,
+            axis="y",
+            bin_width=40.0,
+            grade_col="idw2_grade",
+            validation_grade_col="nn_grade",
+            drillhole_grade_col="grade",
+            model_name="IDW² (Estimate)",
+            validation_model_name="Nearest Neighbor (Declustered Check)",
+            tonnes_col="tonnes",
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            title="Swath Plot (Local Drift Analysis) Along Northing (Y)",
+        )
+        fig_swath_y.savefig(swath_y_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_swath_y)
+        print(f"  • Swath Plot (Northing): saved to {swath_y_file}")
 
 
 if __name__ == "__main__":

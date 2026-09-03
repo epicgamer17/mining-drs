@@ -24,6 +24,7 @@ from drs_mining.components.estimation import (
     grade_tonnage_table,
     plot_polygonal_map,
     plot_grade_tonnage_curve,
+    format_resource_statement,
 )
 
 
@@ -147,7 +148,39 @@ def main():
     gt_display["metal_recovery_pct"] = gt_display["metal_recovery_pct"].map(lambda x: f"{x:.1f}%")
     print(gt_display.to_string())
 
-    # 6. Spatial visualization & Grade-Tonnage Curve
+    # 6. Official Mineral Resource Statement (NI 43-101 / JORC Significant Figures)
+    poly_class = polygons_df.copy()
+    poly_cats = []
+    for a in poly_class["area_m2"]:
+        if a <= 25000.0:
+            poly_cats.append("Measured")
+        elif a <= 45000.0:
+            poly_cats.append("Indicated")
+        else:
+            poly_cats.append("Inferred")
+    poly_class["category"] = poly_cats
+
+    base_cutoff = 0.50
+    resource_stmt = format_resource_statement(
+        poly_class,
+        cutoff_grade=base_cutoff,
+        grade_unit="% Cu",
+        tonnage_unit="Mt",
+        metal_unit="kt",
+        commodity_price="$3.80/lb Cu",
+        metallurgical_recovery=88.0,
+        rpeee_constraint="Constrained within pit concession boundary",
+    )
+
+    print(
+        f"\n--- Official Mineral Resource Statement (Polygonal Model, Cutoff: {base_cutoff:.2f}% Cu) ---"
+    )
+    print(resource_stmt.to_string(index=False))
+    print("\nCompliance Footnotes:")
+    for fn in resource_stmt.attrs.get("footnotes", []):
+        print(f"  {fn}")
+
+    # 7. Spatial visualization & Grade-Tonnage Curve
     if not args.no_plot:
         Path(args.save_plot).parent.mkdir(parents=True, exist_ok=True)
         fig, (ax_map, ax_gt) = plt.subplots(1, 2, figsize=(18, 7))

@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib.path import Path as MplPath
 import numpy as np
 import pandas as pd
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, KDTree
 
 from drs_mining.components.estimation import (
     simple_kriging_grid_estimation,
@@ -31,37 +31,91 @@ from drs_mining.components.estimation import (
     is_within_convex_hull,
     grade_tonnage_table,
     plot_grade_tonnage_curve,
+    cell_declustering,
+    plot_cell_declustering_curve,
+    plot_swath_analysis,
+    format_resource_statement,
 )
 
 
 def create_sample_deposit() -> tuple[pd.DataFrame, list[tuple[float, float]]]:
     """Sample copper porphyry exploration drillholes and concession perimeter."""
-    drillholes = pd.DataFrame({
-        "hole_id": [
-            "DH01", "DH02", "DH03", "DH04",
-            "DH05", "DH06", "DH07", "DH08",
-            "DH09", "DH10", "DH11", "DH12",
-            "DH13", "DH14", "DH15", "DH16",
-        ],
-        "x": [
-            120.0, 240.0, 380.0, 520.0,
-            150.0, 280.0, 420.0, 560.0,
-            130.0, 260.0, 400.0, 540.0,
-            170.0, 300.0, 450.0, 580.0,
-        ],
-        "y": [
-            120.0, 110.0, 130.0, 140.0,
-            230.0, 240.0, 220.0, 250.0,
-            350.0, 360.0, 340.0, 370.0,
-            460.0, 470.0, 450.0, 480.0,
-        ],
-        "grade": [
-            0.35, 0.65, 1.10, 0.45,
-            0.52, 1.55, 1.95, 0.85,
-            0.40, 1.30, 1.70, 0.72,
-            0.28, 0.60, 0.95, 0.40,
-        ],  # % Cu
-    })
+    drillholes = pd.DataFrame(
+        {
+            "hole_id": [
+                "DH01",
+                "DH02",
+                "DH03",
+                "DH04",
+                "DH05",
+                "DH06",
+                "DH07",
+                "DH08",
+                "DH09",
+                "DH10",
+                "DH11",
+                "DH12",
+                "DH13",
+                "DH14",
+                "DH15",
+                "DH16",
+            ],
+            "x": [
+                120.0,
+                240.0,
+                380.0,
+                520.0,
+                150.0,
+                280.0,
+                420.0,
+                560.0,
+                130.0,
+                260.0,
+                400.0,
+                540.0,
+                170.0,
+                300.0,
+                450.0,
+                580.0,
+            ],
+            "y": [
+                120.0,
+                110.0,
+                130.0,
+                140.0,
+                230.0,
+                240.0,
+                220.0,
+                250.0,
+                350.0,
+                360.0,
+                340.0,
+                370.0,
+                460.0,
+                470.0,
+                450.0,
+                480.0,
+            ],
+            "grade": [
+                0.35,
+                0.65,
+                1.10,
+                0.45,
+                0.52,
+                1.55,
+                1.95,
+                0.85,
+                0.40,
+                1.30,
+                1.70,
+                0.72,
+                0.28,
+                0.60,
+                0.95,
+                0.40,
+            ],  # % Cu
+        }
+    )
 
     boundary = [
         (80.0, 70.0),
@@ -77,7 +131,11 @@ def create_sample_deposit() -> tuple[pd.DataFrame, list[tuple[float, float]]]:
 def generate_grid_points(
     boundary: list[tuple[float, float]],
     grid_resolution: float = 10.0,
-) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray], tuple[float, float, float, float]]:
+) -> tuple[
+    np.ndarray,
+    tuple[np.ndarray, np.ndarray, np.ndarray],
+    tuple[float, float, float, float],
+]:
     """Generates regular 2D grid nodes clipped within the concession boundary."""
     b_arr = np.array(boundary)
     min_x, max_x = b_arr[:, 0].min(), b_arr[:, 0].max()
@@ -99,7 +157,9 @@ def generate_grid_points(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="2D Kriging Geostatistical Estimation Demo")
+    parser = argparse.ArgumentParser(
+        description="2D Kriging Geostatistical Estimation Demo"
+    )
     parser.add_argument(
         "--grid-res",
         type=float,
@@ -171,24 +231,68 @@ def main():
     )
 
     bench_height = 12.0  # meters
-    bulk_density = 2.7   # t/m^3
-    block_tonnes = (args.grid_res ** 2) * bench_height * bulk_density
+    bulk_density = 2.7  # t/m^3
+    block_tonnes = (args.grid_res**2) * bench_height * bulk_density
 
     print(f"\nLoaded {len(drillholes)} exploration drillholes.")
-    print(f"Assays: Min={sample_grades.min():.2f}%, Max={sample_grades.max():.2f}%, Mean={global_mean:.3f}% Cu, Variance={sample_grades.var():.3f}")
-    print(f"Variogram: Model={args.variogram.title()}, Nugget={args.nugget:.2f}, Sill={args.sill:.2f}, Range={args.range:.1f}m")
-    print(f"Block Model: {len(grid_points):,} blocks ({args.grid_res:.0f}m x {args.grid_res:.0f}m x {bench_height:.0f}m), Total Tonnage: {len(grid_points) * block_tonnes:,.0f} tonnes.")
+    print(
+        f"Assays: Min={sample_grades.min():.2f}%, Max={sample_grades.max():.2f}%, Naive Mean={global_mean:.3f}% Cu, Variance={sample_grades.var():.3f}"
+    )
+    print(
+        f"Variogram: Model={args.variogram.title()}, Nugget={args.nugget:.2f}, Sill={args.sill:.2f}, Range={args.range:.1f}m"
+    )
+    print(
+        f"Block Model: {len(grid_points):,} blocks ({args.grid_res:.0f}m x {args.grid_res:.0f}m x {bench_height:.0f}m), Total Tonnage: {len(grid_points) * block_tonnes:,.0f} tonnes."
+    )
 
-    # 2. Spatial Audit: Interpolation vs. Extrapolation
+    # 2. Cell Declustering Analysis (SME Handbook Section 4.3 & Deutsch & Journel 1998)
+    declust_cell_sizes = np.linspace(20.0, 520.0, 21)
+    declust_weights, declust_df, opt_cell_size = cell_declustering(
+        drillholes,
+        cell_sizes=declust_cell_sizes,
+        grade_col="grade",
+        x_col="x",
+        y_col="y",
+        min_mean=True,
+    )
+    opt_declust_mean = float(
+        declust_df.loc[
+            declust_df["cell_size"] == opt_cell_size, "declustered_mean"
+        ].iloc[0]
+    )
+    opt_declust_var = float(
+        declust_df.loc[
+            declust_df["cell_size"] == opt_cell_size, "declustered_variance"
+        ].iloc[0]
+    )
+    bias_removed_pct = ((global_mean - opt_declust_mean) / global_mean) * 100.0
+
+    print("\n--- Cell Declustering Analysis (SME Handbook Section 4.3) ---")
+    print(
+        f"Optimal Declustering Cell Size : {opt_cell_size:.1f} m (Minimum Declustered Mean)"
+    )
+    print(
+        f"Naive (Unweighted) Mean Assay  : {global_mean:.3f}% Cu  (Variance: {sample_grades.var():.3f})"
+    )
+    print(
+        f"Representative Declustered Mean: {opt_declust_mean:.3f}% Cu  (Variance: {opt_declust_var:.3f})"
+    )
+    print(f"High-Grade Drilling Bias Removed: {bias_removed_pct:+.1f}%")
+
+    # 3. Spatial Audit: Interpolation vs. Extrapolation
     is_interpolated = is_within_convex_hull(samples_xy, grid_points)
     n_interpolated = int(is_interpolated.sum())
     n_extrapolated = len(grid_points) - n_interpolated
 
     print("\n--- Spatial Audit: Interpolation vs. Extrapolation (Convex Hull) ---")
-    print(f"Interpolated Blocks (Inside Convex Hull)  : {n_interpolated:,d} ({n_interpolated / len(grid_points) * 100:.1f}%) -> {n_interpolated * block_tonnes:,.0f} tonnes [High Confidence / Measured]")
-    print(f"Extrapolated Blocks (Outside Convex Hull) : {n_extrapolated:,d} ({n_extrapolated / len(grid_points) * 100:.1f}%) -> {n_extrapolated * block_tonnes:,.0f} tonnes [Exploration Risk / Inferred]")
+    print(
+        f"Interpolated Blocks (Inside Convex Hull)  : {n_interpolated:,d} ({n_interpolated / len(grid_points) * 100:.1f}%) -> {n_interpolated * block_tonnes:,.0f} tonnes [High Confidence / Measured]"
+    )
+    print(
+        f"Extrapolated Blocks (Outside Convex Hull) : {n_extrapolated:,d} ({n_extrapolated / len(grid_points) * 100:.1f}%) -> {n_extrapolated * block_tonnes:,.0f} tonnes [Exploration Risk / Inferred]"
+    )
 
-    # 3. Estimator 1: Ordinary Kriging (OK) - Full Domain
+    # 4. Estimator 1: Ordinary Kriging (OK) - Full Domain
     print(f"\n[1/4] Running Ordinary Kriging (OK, k={args.k_neighbors})...")
     ok_grades, ok_variances = ordinary_kriging_grid_estimation(
         samples_xy,
@@ -203,8 +307,10 @@ def main():
         mask_extrapolation=False,
     )
 
-    # 4. Estimator 2: Ordinary Kriging (OK) - Strict Interpolation Only
-    print(f"[2/4] Running Ordinary Kriging with Extrapolation Masked (Strict Interpolation)...")
+    # 5. Estimator 2: Ordinary Kriging (OK) - Strict Interpolation Only
+    print(
+        f"[2/4] Running Ordinary Kriging with Extrapolation Masked (Strict Interpolation)..."
+    )
     ok_strict_grades, ok_strict_variances = ordinary_kriging_grid_estimation(
         samples_xy,
         sample_grades,
@@ -218,13 +324,15 @@ def main():
         mask_extrapolation=True,
     )
 
-    # 5. Estimator 3: Simple Kriging (SK) - Full Domain
-    print(f"[3/4] Running Simple Kriging (SK, prior mean={global_mean:.3f}%)...")
+    # 6. Estimator 3: Simple Kriging (SK) - Full Domain (Using Unbiased Declustered Mean)
+    print(
+        f"[3/4] Running Simple Kriging (SK, declustered prior mean={opt_declust_mean:.3f}%)..."
+    )
     sk_grades, sk_variances = simple_kriging_grid_estimation(
         samples_xy,
         sample_grades,
         grid_points,
-        mean=global_mean,
+        mean=opt_declust_mean,
         variogram_model=args.variogram,
         nugget=args.nugget,
         sill=args.sill,
@@ -234,7 +342,7 @@ def main():
         mask_extrapolation=False,
     )
 
-    # 6. Estimator 4: Inverse Distance Squared (IDW^2) - Benchmark
+    # 7. Estimator 4: Inverse Distance Squared (IDW^2) - Benchmark
     print(f"[4/4] Running Inverse Distance Squared (IDW^2, power=2.0)...")
     idw_grades, _ = inverse_distance_weighting(
         samples_xy,
@@ -259,25 +367,29 @@ def main():
     for name, (g, v) in models.items():
         valid_g = g[~np.isnan(g)]
         v_mean_str = f"{v[~np.isnan(v)].mean():.3f}" if v is not None else "N/A"
-        stats_rows.append({
-            "Model": name,
-            "Mean (% Cu)": f"{valid_g.mean():.3f}",
-            "Std Dev": f"{valid_g.std():.3f}",
-            "Min (%)": f"{valid_g.min():.3f}",
-            "Max (%)": f"{valid_g.max():.3f}",
-            "Mean Variance": v_mean_str,
-            "Estimated Blocks": f"{len(valid_g):,d} ({len(valid_g) / len(g) * 100.0:.1f}%)",
-        })
+        stats_rows.append(
+            {
+                "Model": name,
+                "Mean (% Cu)": f"{valid_g.mean():.3f}",
+                "Std Dev": f"{valid_g.std():.3f}",
+                "Min (%)": f"{valid_g.min():.3f}",
+                "Max (%)": f"{valid_g.max():.3f}",
+                "Mean Variance": v_mean_str,
+                "Estimated Blocks": f"{len(valid_g):,d} ({len(valid_g) / len(g) * 100.0:.1f}%)",
+            }
+        )
     print(pd.DataFrame(stats_rows).to_string(index=False))
 
     # 8. Grade-Tonnage Sensitivity for All Models (Model Audit)
     cutoffs = [0.0, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5]
     gt_models = {}
     for name, (g, _) in models.items():
-        block_df = pd.DataFrame({
-            "grade": g[~np.isnan(g)],
-            "tonnes": block_tonnes,
-        })
+        block_df = pd.DataFrame(
+            {
+                "grade": g[~np.isnan(g)],
+                "tonnes": block_tonnes,
+            }
+        )
         gt_models[name] = grade_tonnage_table(block_df, cutoffs=cutoffs)
 
     print("\n--- Ordinary Kriging Grade–Tonnage Sensitivity Curve ---")
@@ -287,15 +399,73 @@ def main():
     gt_disp["waste_tonnes"] = gt_disp["waste_tonnes"].map(lambda x: f"{x:,.0f}")
     gt_disp["strip_ratio"] = gt_disp["strip_ratio"].map(lambda x: f"{x:.2f}")
     gt_disp["ore_recovery_pct"] = gt_disp["ore_recovery_pct"].map(lambda x: f"{x:.1f}%")
-    gt_disp["metal_recovery_pct"] = gt_disp["metal_recovery_pct"].map(lambda x: f"{x:.1f}%")
-    print(gt_disp[["ore_tonnes", "ore_grade", "waste_tonnes", "strip_ratio", "ore_recovery_pct", "metal_recovery_pct"]].to_string())
+    gt_disp["metal_recovery_pct"] = gt_disp["metal_recovery_pct"].map(
+        lambda x: f"{x:.1f}%"
+    )
+    print(
+        gt_disp[
+            [
+                "ore_tonnes",
+                "ore_grade",
+                "waste_tonnes",
+                "strip_ratio",
+                "ore_recovery_pct",
+                "metal_recovery_pct",
+            ]
+        ].to_string()
+    )
 
-    # 9. Spatial Visualization & Grade-Tonnage Executive Dashboard (2x3 Layout)
+    # 9. Official Mineral Resource Statement (NI 43-101 / JORC Code Compliant)
+    # Assign confidence categories based on spatial audit & drill spacing
+    tree_samples = KDTree(samples_xy)
+    d_to_samples, _ = tree_samples.query(grid_points)
+
+    categories = np.empty(len(grid_points), dtype=object)
+    for i in range(len(grid_points)):
+        if is_interpolated[i]:
+            if d_to_samples[i] <= 60.0:
+                categories[i] = "Measured"
+            else:
+                categories[i] = "Indicated"
+        else:
+            categories[i] = "Inferred"
+
+    block_class_df = pd.DataFrame(
+        {
+            "category": categories,
+            "grade": ok_grades,
+            "tonnes": block_tonnes,
+        }
+    )
+
+    base_cutoff = 0.50
+    resource_stmt = format_resource_statement(
+        block_class_df,
+        cutoff_grade=base_cutoff,
+        grade_unit="% Cu",
+        tonnage_unit="Mt",
+        metal_unit="kt",
+        commodity_price="$3.80/lb Cu",
+        metallurgical_recovery=88.0,
+        rpeee_constraint="Constrained within Lerchs-Grossmann optimized pit shell",
+    )
+
+    print(
+        f"\n--- Official Mineral Resource Statement (Base Cutoff: {base_cutoff:.2f}% Cu) ---"
+    )
+    print(resource_stmt.to_string(index=False))
+    print("\nCompliance Footnotes:")
+    for fn in resource_stmt.attrs.get("footnotes", []):
+        print(f"  {fn}")
+
+    # 10. Spatial Visualization & Dedicated Grade-Tonnage Plots (One per Model)
     if not args.no_plot:
-        Path(args.save_plot).parent.mkdir(parents=True, exist_ok=True)
+        plots_dir = Path(args.save_plot).parent
+        plots_dir.mkdir(parents=True, exist_ok=True)
         xx, yy, inside_mask = grid_info
 
-        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+        # A. 5-Panel Spatial Comparison Map
+        fig, axes = plt.subplots(1, 5, figsize=(30, 6), sharey=True)
         v_min, v_max = float(sample_grades.min()), float(sample_grades.max())
 
         b_poly = np.array(list(boundary) + [boundary[0]])
@@ -304,13 +474,52 @@ def main():
         hull = ConvexHull(samples_xy)
         hull_pts = np.vstack([samples_xy[hull.vertices], samples_xy[hull.vertices[0]]])
 
-        # Grid of 5 spatial subplots + 1 Grade-Tonnage plot
         spatial_configs = [
-            (axes[0, 0], "Ordinary Kriging (OK)", ok_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
-            (axes[0, 1], "Simple Kriging (SK)", sk_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
-            (axes[0, 2], "Inverse Distance Squared (IDW²)", idw_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
-            (axes[1, 0], "OK Estimation Variance (σ²)", ok_variances, "magma", 0.0, float(args.nugget + args.sill), "Variance (σ²)"),
-            (axes[1, 1], "OK (Strict Interpolation)", ok_strict_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
+            (
+                axes[0],
+                "Ordinary Kriging (OK)",
+                ok_grades,
+                "viridis",
+                v_min,
+                v_max,
+                "Grade (% Cu)",
+            ),
+            (
+                axes[1],
+                "Simple Kriging (SK)",
+                sk_grades,
+                "viridis",
+                v_min,
+                v_max,
+                "Grade (% Cu)",
+            ),
+            (
+                axes[2],
+                "Inverse Distance Squared (IDW²)",
+                idw_grades,
+                "viridis",
+                v_min,
+                v_max,
+                "Grade (% Cu)",
+            ),
+            (
+                axes[3],
+                "OK Estimation Variance (σ²)",
+                ok_variances,
+                "magma",
+                0.0,
+                float(args.nugget + args.sill),
+                "Variance (σ²)",
+            ),
+            (
+                axes[4],
+                "OK (Strict Interpolation)",
+                ok_strict_grades,
+                "viridis",
+                v_min,
+                v_max,
+                "Grade (% Cu)",
+            ),
         ]
 
         for ax, title, values, cmap, c_min, c_max, label in spatial_configs:
@@ -329,7 +538,13 @@ def main():
             )
 
             # Overlay concession boundary
-            ax.plot(b_poly[:, 0], b_poly[:, 1], "r--", linewidth=1.5, label="Concession Boundary")
+            ax.plot(
+                b_poly[:, 0],
+                b_poly[:, 1],
+                "r--",
+                linewidth=1.5,
+                label="Concession Boundary",
+            )
 
             # Overlay drillhole convex hull
             ax.plot(
@@ -358,25 +573,18 @@ def main():
 
             ax.set_title(title, fontsize=12, fontweight="bold")
             ax.set_xlabel("Easting (m)", fontsize=10)
-            ax.set_ylabel("Northing (m)", fontsize=10)
             ax.grid(True, linestyle=":", alpha=0.5)
 
-            cbar = fig.colorbar(im, ax=ax, orientation="horizontal", pad=0.10, shrink=0.8)
+            cbar = fig.colorbar(
+                im, ax=ax, orientation="horizontal", pad=0.10, shrink=0.8
+            )
             cbar.set_label(label, fontsize=9)
 
-        axes[0, 0].legend(loc="upper left", fontsize=8)
-
-        # 6th Subplot: Comparative Grade-Tonnage Curves (Model Audit)
-        plot_grade_tonnage_curve(
-            gt_models,
-            grade_unit="% Cu",
-            tonnage_unit="Mt",
-            title="Model Smoothing Audit (Grade–Tonnage)",
-            ax=axes[1, 2],
-        )
+        axes[0].set_ylabel("Northing (m)", fontsize=10)
+        axes[0].legend(loc="upper left", fontsize=8)
 
         plt.suptitle(
-            f"Geostatistical Resource Evaluation Dashboard: Estimators vs. Spatial Uncertainty (Variance)\n"
+            f"Geostatistical Resource Evaluation: Spatial Estimates & Uncertainty (Variance)\n"
             f"Variogram: {args.variogram.title()} (c0={args.nugget:.2f}, c={args.sill:.2f}, a={args.range:.0f}m)",
             fontsize=14,
             fontweight="bold",
@@ -384,19 +592,92 @@ def main():
         plt.tight_layout()
         plt.savefig(args.save_plot, dpi=180, bbox_inches="tight")
         plt.close(fig)
-        print(f"\nExecutive comparison dashboard saved to: {args.save_plot}")
+        print(f"\nSpatial comparison map saved to: {args.save_plot}")
 
-        # Also save dedicated high-resolution Grade-Tonnage audit figure
-        gt_plot_path = str(Path(args.save_plot).parent / "kriging_grade_tonnage_curves.png")
-        fig_gt, ax_gt = plot_grade_tonnage_curve(
-            gt_models,
+        # B. Individual Grade-Tonnage Curves (One Dedicated Dual-Axis Plot per Model)
+        gt_file_map = {
+            "Ordinary Kriging (OK)": "kriging_ok_grade_tonnage.png",
+            "Simple Kriging (SK)": "kriging_sk_grade_tonnage.png",
+            "Inverse Distance Squared (IDW²)": "kriging_idw_grade_tonnage.png",
+        }
+
+        print("\nGenerating individual Grade–Tonnage plots for each estimator...")
+        for model_name, filename in gt_file_map.items():
+            fig_gt, ax_gt = plot_grade_tonnage_curve(
+                gt_models[model_name],
+                grade_unit="% Cu",
+                tonnage_unit="Mt",
+                title=f"Grade–Tonnage Sensitivity Curve - {model_name}",
+                show_metal=True,
+            )
+            out_file = str(plots_dir / filename)
+            fig_gt.savefig(out_file, dpi=180, bbox_inches="tight")
+            plt.close(fig_gt)
+            print(f"  • {model_name}: saved to {out_file}")
+
+        # C. Cell Declustering Optimization Curve (SME Handbook & NI 43-101 Standard)
+        declust_plot_file = str(plots_dir / "kriging_cell_declustering_curve.png")
+        fig_dec, ax_dec = plot_cell_declustering_curve(
+            declust_df,
+            naive_mean=global_mean,
+            optimal_cell_size=opt_cell_size,
+            grade_unit="% Cu",
+            title=f"Cell Declustering Sensitivity Curve (Optimal: {opt_cell_size:.1f}m)",
+        )
+        fig_dec.savefig(declust_plot_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_dec)
+        print(f"  • Cell Declustering curve: saved to {declust_plot_file}")
+
+        # D. Directional Swath Plots (Local Drift Analysis - NI 43-101 / JORC Standard)
+        block_model_df = pd.DataFrame(
+            {
+                "x": grid_points[:, 0],
+                "y": grid_points[:, 1],
+                "ok_grade": ok_grades,
+                "idw_grade": idw_grades,
+                "tonnes": block_tonnes,
+            }
+        )
+
+        swath_x_file = str(plots_dir / "kriging_swath_easting.png")
+        fig_swath_x, _ = plot_swath_analysis(
+            block_model_df,
+            drillholes=drillholes,
+            axis="x",
+            bin_width=40.0,
+            grade_col="ok_grade",
+            validation_grade_col="idw_grade",
+            drillhole_grade_col="grade",
+            model_name="Ordinary Kriging",
+            validation_model_name="IDW² (Validation Benchmark)",
+            tonnes_col="tonnes",
             grade_unit="% Cu",
             tonnage_unit="Mt",
-            title="Geostatistical Model Audit: OK vs. SK vs. IDW² Grade–Tonnage Curves",
+            title="Swath Plot (Local Drift Analysis) Along Easting (X)",
         )
-        fig_gt.savefig(gt_plot_path, dpi=180, bbox_inches="tight")
-        plt.close(fig_gt)
-        print(f"Comparative Grade-Tonnage curve saved to: {gt_plot_path}")
+        fig_swath_x.savefig(swath_x_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_swath_x)
+        print(f"  • Swath Plot (Easting): saved to {swath_x_file}")
+
+        swath_y_file = str(plots_dir / "kriging_swath_northing.png")
+        fig_swath_y, _ = plot_swath_analysis(
+            block_model_df,
+            drillholes=drillholes,
+            axis="y",
+            bin_width=40.0,
+            grade_col="ok_grade",
+            validation_grade_col="idw_grade",
+            drillhole_grade_col="grade",
+            model_name="Ordinary Kriging",
+            validation_model_name="IDW² (Validation Benchmark)",
+            tonnes_col="tonnes",
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            title="Swath Plot (Local Drift Analysis) Along Northing (Y)",
+        )
+        fig_swath_y.savefig(swath_y_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_swath_y)
+        print(f"  • Swath Plot (Northing): saved to {swath_y_file}")
 
     print("\n" + "=" * 70)
     print("                    ESTIMATION RUN COMPLETE")

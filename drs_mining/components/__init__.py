@@ -14,6 +14,12 @@ from .estimation import (
     simple_kriging_grid_estimation,
     ordinary_kriging_grid_estimation,
     plot_grade_tonnage_curve,
+    cell_declustering,
+    kriging_quality_metrics,
+    classify_mineral_resources,
+    format_resource_statement,
+    plot_swath_analysis,
+    plot_cell_declustering_curve,
 )
 
 __all__ = [
@@ -39,4 +45,10 @@ __all__ = [
     "simple_kriging_grid_estimation",
     "ordinary_kriging_grid_estimation",
     "plot_grade_tonnage_curve",
+    "cell_declustering",
+    "kriging_quality_metrics",
+    "classify_mineral_resources",
+    "format_resource_statement",
+    "plot_swath_analysis",
+    "plot_cell_declustering_curve",
 ]

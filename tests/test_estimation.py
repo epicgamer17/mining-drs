@@ -17,6 +17,12 @@ from drs_mining.components.estimation import (
     simple_kriging_grid_estimation,
     ordinary_kriging_grid_estimation,
     plot_grade_tonnage_curve,
+    cell_declustering,
+    kriging_quality_metrics,
+    classify_mineral_resources,
+    format_resource_statement,
+    plot_swath_analysis,
+    plot_cell_declustering_curve,
     _theoretical_covariance,
 )
 
@@ -413,12 +419,190 @@ def test_plot_grade_tonnage_curve_multi_model():
 
     model_dict = {"Model A": gt1, "Model B": gt2}
 
-    fig, ax = plot_grade_tonnage_curve(
+    results = plot_grade_tonnage_curve(
         model_dict,
         grade_unit="% Cu",
         tonnage_unit="Mt",
         title="Comparative Audit",
     )
+    assert isinstance(results, dict)
+    assert "Model A" in results and "Model B" in results
+    for fig, ax in results.values():
+        assert isinstance(fig, plt.Figure)
+        assert isinstance(ax, plt.Axes)
+        plt.close(fig)
+
+
+def test_sme_jorc_stubs():
+    pts = np.array([[15.0, 35.0]])
+    samples = np.array([[10.0, 30.0], [20.0, 40.0]])
+
+    with pytest.raises(NotImplementedError):
+        kriging_quality_metrics(np.array([0.1]), block_dispersion_variance=0.25)
+
+    with pytest.raises(NotImplementedError):
+        classify_mineral_resources(pts, samples)
+
+
+def test_plot_swath_analysis_dual_axis():
+    # Synthetic block model with X coordinates from 50 to 350
+    np.random.seed(42)
+    x_coords = np.linspace(50, 350, 60)
+    y_coords = np.linspace(100, 400, 60)
+    block_model = pd.DataFrame({
+        "x": x_coords,
+        "y": y_coords,
+        "grade": 0.8 + 0.3 * np.sin(x_coords / 50.0),
+        "nn_grade": 0.8 + 0.35 * np.sin(x_coords / 50.0) + np.random.normal(0, 0.05, len(x_coords)),
+        "tonnes": 50000.0,
+    })
+
+    drillholes = pd.DataFrame({
+        "x": [80.0, 150.0, 220.0, 290.0],
+        "y": [120.0, 200.0, 280.0, 350.0],
+        "grade": [0.95, 1.15, 0.75, 0.55],
+    })
+
+    # Test along Easting (X)
+    fig_x, ax_x = plot_swath_analysis(
+        block_model,
+        drillholes=drillholes,
+        axis="x",
+        bin_width=50.0,
+        grade_col="grade",
+        validation_grade_col="nn_grade",
+        tonnes_col="tonnes",
+        model_name="Ordinary Kriging",
+        validation_model_name="Nearest Neighbor",
+        grade_unit="% Cu",
+        tonnage_unit="Mt",
+    )
+    assert isinstance(fig_x, plt.Figure)
+    assert isinstance(ax_x, plt.Axes)
+    plt.close(fig_x)
+
+    # Test along Northing (Y)
+    fig_y, ax_y = plot_swath_analysis(
+        block_model,
+        axis="northing",
+        bin_width=60.0,
+        grade_col="grade",
+        tonnes_col="tonnes",
+    )
+    assert isinstance(fig_y, plt.Figure)
+    assert isinstance(ax_y, plt.Axes)
+    plt.close(fig_y)
+
+
+def test_format_resource_statement_sig_figs_and_footnotes():
+    # Synthetic block model with Measured, Indicated, and Inferred blocks
+    block_df = pd.DataFrame({
+        "category": [
+            "Measured", "Measured", "Indicated", "Indicated", "Inferred", "Inferred"
+        ],
+        "grade": [1.234, 1.456, 0.876, 0.954, 0.654, 0.432],
+        "tonnes": [1_000_000.0, 2_450_000.0, 3_120_000.0, 1_850_000.0, 4_560_000.0, 2_100_000.0],
+    })
+
+    statement = format_resource_statement(
+        block_df,
+        category_col="category",
+        grade_col="grade",
+        tonnes_col="tonnes",
+        cutoff_grade=0.50,
+        grade_unit="% Cu",
+        tonnage_unit="Mt",
+        metal_unit="kt",
+        commodity_price="$3.85/lb Cu",
+        metallurgical_recovery=88.5,
+        rpeee_constraint="Constrained within Lerchs-Grossmann optimized pit shell",
+    )
+
+    assert isinstance(statement, pd.DataFrame)
+    assert len(statement) == 4  # Measured, Indicated, Measured + Indicated, Inferred
+    assert list(statement["Classification"]) == [
+        "Measured", "Indicated", "Measured + Indicated", "Inferred"
+    ]
+
+    # Check footnotes metadata
+    assert "footnotes" in statement.attrs
+    footnotes = statement.attrs["footnotes"]
+    assert len(footnotes) == 5
+    # Verify mandatory footnote 2 exists
+    assert any("Totals may not sum due to rounding" in fn for fn in footnotes)
+    # Verify RPEEE footnote exists
+    assert any("Lerchs-Grossmann" in fn for fn in footnotes)
+    assert any("$3.85/lb Cu" in fn for fn in footnotes)
+    assert any("88.5%" in fn for fn in footnotes)
+
+
+def test_cell_declustering_removes_clustering_bias():
+    # 4 clustered drillholes in high-grade sweet spot (grade=2.0)
+    # 1 isolated drillhole in background (grade=0.5)
+    df = pd.DataFrame({
+        "x": [10.0, 11.0, 10.0, 12.0, 100.0],
+        "y": [10.0, 10.0, 11.0, 11.0, 100.0],
+        "grade": [2.0, 2.0, 2.0, 2.0, 0.5],
+    })
+    naive_mean = df["grade"].mean()  # (4*2.0 + 0.5) / 5 = 1.70
+
+    cell_sizes = [5.0, 15.0, 25.0, 50.0, 80.0, 150.0]
+    weights, sensitivity_df, opt_cs = cell_declustering(df, cell_sizes=cell_sizes, min_mean=True)
+
+    # Weights must sum to 1.0
+    assert np.isclose(weights.sum(), 1.0)
+    assert len(weights) == 5
+
+    # Clustered samples must have smaller individual weight than the isolated sample
+    assert weights[4] > weights[0]
+    assert weights[4] > weights[1]
+
+    # Declustered mean must be lower than naive mean (clustering bias removed)
+    min_declust_mean = sensitivity_df["declustered_mean"].min()
+    assert min_declust_mean < naive_mean
+    # At cell size ~50m, 4 clustered points are in 1 cell (share 50% weight), isolated point is in 1 cell (50% weight)
+    # So expected declustered mean is roughly 0.5 * 2.0 + 0.5 * 0.5 = 1.25
+    assert min_declust_mean < 1.45
+
+
+def test_plot_cell_declustering_curve():
+    sensitivity_df = pd.DataFrame({
+        "cell_size": [10.0, 25.0, 50.0, 100.0],
+        "declustered_mean": [1.60, 1.35, 1.25, 1.50],
+        "declustered_variance": [0.35, 0.40, 0.45, 0.38],
+    })
+
+    fig, ax = plot_cell_declustering_curve(
+        sensitivity_df,
+        naive_mean=1.70,
+        optimal_cell_size=50.0,
+        grade_unit="% Cu",
+    )
     assert isinstance(fig, plt.Figure)
     assert isinstance(ax, plt.Axes)
     plt.close(fig)
+
+
+def test_kriging_twin_holes_duplicate_handling():
+    # Twin drillholes at identical coordinates (10, 10) with grades 1.0 and 2.0 (average 1.5)
+    # Plus a third distinct drillhole at (30, 10) with grade 3.0
+    samples_xy = np.array([[10.0, 10.0], [10.0, 10.0], [30.0, 10.0]])
+    sample_grades = np.array([1.0, 2.0, 3.0])
+    target = np.array([[20.0, 10.0]])
+
+    # Simple Kriging must not raise LinAlgError
+    sk_est, sk_var = simple_kriging_grid_estimation(
+        samples_xy, sample_grades, target, mean=2.0, sill=0.5, nugget=0.1, range_param=50.0
+    )
+    assert not np.isnan(sk_est[0])
+
+    # Ordinary Kriging must not raise LinAlgError and should correctly average twin grades
+    ok_est, ok_var = ordinary_kriging_grid_estimation(
+        samples_xy, sample_grades, target, sill=0.5, nugget=0.1, range_param=50.0
+    )
+    assert not np.isnan(ok_est[0])
+    # Midpoint between twin hole (avg=1.5) and third hole (3.0): symmetric midpoint should be ~2.25
+    assert np.isclose(ok_est[0], 2.25, atol=0.05)
+
+
+
