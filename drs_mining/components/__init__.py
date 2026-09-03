@@ -11,6 +11,8 @@ from .estimation import (
     inverse_distance_weighting,
     nearest_neighbor_grid_estimation,
     is_within_convex_hull,
+    simple_kriging_grid_estimation,
+    ordinary_kriging_grid_estimation,
 )
 
 __all__ = [
@@ -33,4 +35,6 @@ __all__ = [
     "inverse_distance_weighting",
     "nearest_neighbor_grid_estimation",
     "is_within_convex_hull",
+    "simple_kriging_grid_estimation",
+    "ordinary_kriging_grid_estimation",
 ]

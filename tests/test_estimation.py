@@ -14,6 +14,9 @@ from drs_mining.components.estimation import (
     inverse_distance_weighting,
     nearest_neighbor_grid_estimation,
     is_within_convex_hull,
+    simple_kriging_grid_estimation,
+    ordinary_kriging_grid_estimation,
+    _theoretical_covariance,
 )
 
 
@@ -224,5 +227,158 @@ def test_idw_mask_extrapolation():
     )
     assert not np.isnan(grades_masked[0])
     assert np.isnan(grades_masked[1])
+
+
+def test_theoretical_covariance():
+    h = np.array([0.0, 50.0, 100.0, 150.0])
+    # Spherical model: range=100, nugget=0.2, sill=0.8 -> total sill = 1.0
+    cov = _theoretical_covariance(h, model="spherical", nugget=0.2, sill=0.8, range_param=100.0)
+
+    # At h=0: Covariance = total sill = 1.0
+    assert cov[0] == pytest.approx(1.0)
+    # At h=50 (half range): gamma = 0.2 + 0.8*(1.5*0.5 - 0.5*0.125) = 0.2 + 0.8*(0.75 - 0.0625) = 0.2 + 0.55 = 0.75
+    # Cov = 1.0 - 0.75 = 0.25
+    assert cov[1] == pytest.approx(0.25)
+    # At h >= 100 (range): Covariance = 0.0
+    assert cov[2] == pytest.approx(0.0)
+    assert cov[3] == pytest.approx(0.0)
+
+    # Exponential and Gaussian models run without error
+    cov_exp = _theoretical_covariance(h, model="exponential", nugget=0.1, sill=0.9, range_param=100.0)
+    assert cov_exp[0] == pytest.approx(1.0)
+    assert cov_exp[1] < 1.0
+
+    cov_gau = _theoretical_covariance(h, model="gaussian", nugget=0.1, sill=0.9, range_param=100.0)
+    assert cov_gau[0] == pytest.approx(1.0)
+    assert cov_gau[1] < 1.0
+
+    with pytest.raises(ValueError, match="Unknown variogram model"):
+        _theoretical_covariance(h, model="invalid_model")
+
+
+def test_simple_kriging_collocation_and_reversion():
+    samples_xy = np.array([[0.0, 0.0], [10.0, 0.0]])
+    sample_grades = np.array([2.0, 4.0])
+    mean = 3.0
+
+    grid_points = np.array([
+        [0.0, 0.0],     # Exact match with sample 0
+        [10.0, 0.0],    # Exact match with sample 1
+        [5.0, 0.0],     # Symmetrical midpoint
+        [1000.0, 0.0],  # Far beyond range
+    ])
+
+    estimates, variances = simple_kriging_grid_estimation(
+        samples_xy,
+        sample_grades,
+        grid_points,
+        mean=mean,
+        variogram_model="spherical",
+        nugget=0.0,
+        sill=1.0,
+        range_param=20.0,
+        k_neighbors=2,
+    )
+
+    # 1. Collocated points return exact grade and 0 variance
+    assert estimates[0] == pytest.approx(2.0, abs=1e-5)
+    assert variances[0] == pytest.approx(0.0, abs=1e-5)
+    assert estimates[1] == pytest.approx(4.0, abs=1e-5)
+    assert variances[1] == pytest.approx(0.0, abs=1e-5)
+
+    # 2. Midpoint gives unbiased symmetrical estimate (3.0) and reduced variance (< 1.0)
+    assert estimates[2] == pytest.approx(3.0, abs=1e-5)
+    assert 0.0 < variances[2] < 1.0
+
+    # 3. Far point beyond range reverts to prior mean and total sill (1.0)
+    assert estimates[3] == pytest.approx(mean, abs=1e-5)
+    assert variances[3] == pytest.approx(1.0, abs=1e-5)
+
+
+def test_simple_kriging_mask_extrapolation():
+    samples_xy = np.array([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]])
+    sample_grades = np.array([1.0, 2.0, 3.0])
+    grid_points = np.array([
+        [5.0, 2.0],     # Inside triangle hull
+        [5.0, -5.0],    # Outside hull
+    ])
+
+    # Unmasked: both evaluated
+    est_unmasked, var_unmasked = simple_kriging_grid_estimation(
+        samples_xy, sample_grades, grid_points, mean=2.0, mask_extrapolation=False
+    )
+    assert not np.isnan(est_unmasked[0])
+    assert not np.isnan(est_unmasked[1])
+
+    # Masked: outside point masked to NaN
+    est_masked, var_masked = simple_kriging_grid_estimation(
+        samples_xy, sample_grades, grid_points, mean=2.0, mask_extrapolation=True
+    )
+    assert not np.isnan(est_masked[0])
+    assert not np.isnan(var_masked[0])
+    assert np.isnan(est_masked[1])
+    assert np.isnan(var_masked[1])
+
+
+def test_ordinary_kriging_collocation_and_unbiasedness():
+    samples_xy = np.array([[0.0, 0.0], [10.0, 0.0]])
+    sample_grades = np.array([2.0, 4.0])
+
+    grid_points = np.array([
+        [0.0, 0.0],    # Exact match with sample 0
+        [10.0, 0.0],   # Exact match with sample 1
+        [5.0, 0.0],    # Symmetrical midpoint
+        [50.0, 0.0],   # Far point within search
+    ])
+
+    estimates, variances = ordinary_kriging_grid_estimation(
+        samples_xy,
+        sample_grades,
+        grid_points,
+        variogram_model="spherical",
+        nugget=0.0,
+        sill=1.0,
+        range_param=20.0,
+        k_neighbors=2,
+    )
+
+    # 1. Collocated points return exact grade and 0 variance
+    assert estimates[0] == pytest.approx(2.0, abs=1e-5)
+    assert variances[0] == pytest.approx(0.0, abs=1e-5)
+    assert estimates[1] == pytest.approx(4.0, abs=1e-5)
+    assert variances[1] == pytest.approx(0.0, abs=1e-5)
+
+    # 2. Midpoint gives unbiased 50/50 weighting: estimate = 3.0
+    assert estimates[2] == pytest.approx(3.0, abs=1e-5)
+    assert 0.0 < variances[2] < 1.0
+
+
+def test_ordinary_kriging_max_radius_and_mask_extrapolation():
+    samples_xy = np.array([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]])
+    sample_grades = np.array([1.0, 2.0, 3.0])
+    grid_points = np.array([
+        [5.0, 2.0],     # Inside triangle hull
+        [5.0, -5.0],    # Outside hull
+        [100.0, 100.0], # Far beyond max_radius
+    ])
+
+    # Unmasked with max_radius: far point gets NaN, others estimated
+    est, var = ordinary_kriging_grid_estimation(
+        samples_xy, sample_grades, grid_points, max_radius=30.0, mask_extrapolation=False
+    )
+    assert not np.isnan(est[0])
+    assert not np.isnan(est[1])
+    assert np.isnan(est[2])  # Beyond max_radius -> NaN in OK
+
+    # Masked: outside point masked to NaN
+    est_masked, var_masked = ordinary_kriging_grid_estimation(
+        samples_xy, sample_grades, grid_points, max_radius=30.0, mask_extrapolation=True
+    )
+    assert not np.isnan(est_masked[0])
+    assert np.isnan(est_masked[1])  # Outside hull -> NaN
+    assert np.isnan(est_masked[2])
+
+
+
 
 

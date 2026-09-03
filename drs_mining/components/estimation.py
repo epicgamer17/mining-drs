@@ -584,3 +584,337 @@ def nearest_neighbor_grid_estimation(
         max_radius=max_radius,
         mask_extrapolation=mask_extrapolation,
     )
+
+
+def _theoretical_covariance(
+    h: np.ndarray,
+    model: str = "spherical",
+    nugget: float = 0.0,
+    sill: float = 1.0,
+    range_param: float = 100.0,
+) -> np.ndarray:
+    """Evaluates theoretical spatial covariance C(h) = (c0 + c) - gamma(h).
+
+    Parameters
+    ----------
+    h : np.ndarray
+        Separation lag distance array.
+    model : str, default "spherical"
+        Variogram model ("spherical", "exponential", "gaussian").
+    nugget : float, default 0.0
+        Nugget variance c0 (micro-scale variance / noise at h=0).
+    sill : float, default 1.0
+        Partial sill variance c (total sill is c0 + c).
+    range_param : float, default 100.0
+        Practical correlation range a.
+
+    Returns
+    -------
+    np.ndarray
+        Covariance values C(h) of identical shape to h.
+    """
+    c0 = float(nugget)
+    c = float(sill)
+    a = max(float(range_param), 1e-6)
+    total_sill = c0 + c
+
+    h_arr = np.asarray(h, dtype=float)
+    gamma = np.zeros_like(h_arr)
+
+    # Positive lag mask (at h=0, gamma=0, C(0) = total_sill)
+    pos_mask = h_arr > 1e-12
+
+    if model.lower() == "spherical":
+        hr = h_arr / a
+        # Spherical variogram: c0 + c * [1.5*(h/a) - 0.5*(h/a)^3] for h <= a, else c0 + c
+        within_range = (h_arr <= a) & pos_mask
+        beyond_range = (h_arr > a) & pos_mask
+        gamma[within_range] = c0 + c * (
+            1.5 * hr[within_range] - 0.5 * np.power(hr[within_range], 3)
+        )
+        gamma[beyond_range] = total_sill
+    elif model.lower() == "exponential":
+        # Exponential variogram: c0 + c * [1 - exp(-3*h/a)]
+        gamma[pos_mask] = c0 + c * (1.0 - np.exp(-3.0 * h_arr[pos_mask] / a))
+    elif model.lower() == "gaussian":
+        # Gaussian variogram: c0 + c * [1 - exp(-3*(h/a)^2)]
+        gamma[pos_mask] = c0 + c * (
+            1.0 - np.exp(-3.0 * np.power(h_arr[pos_mask] / a, 2))
+        )
+    else:
+        raise ValueError(
+            f"Unknown variogram model: '{model}'. Choose 'spherical', 'exponential', or 'gaussian'."
+        )
+
+    # Covariance relation: C(h) = C(0) - gamma(h)
+    cov = total_sill - gamma
+    cov[~pos_mask] = total_sill
+    return cov
+
+
+def simple_kriging_grid_estimation(
+    samples_xy: np.ndarray,
+    sample_grades: np.ndarray,
+    grid_points: np.ndarray,
+    mean: float,
+    variogram_model: str = "spherical",
+    nugget: float = 0.0,
+    sill: float = 1.0,
+    range_param: float = 100.0,
+    k_neighbors: int = 16,
+    max_radius: Optional[float] = None,
+    mask_extrapolation: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Simple Kriging (SK) grid interpolation with known stationary mean.
+
+    Estimates values at target grid points by solving the unconstrained Simple
+    Kriging system K * lambda = k, where the estimate gracefully reverts to the
+    known global prior mean in regions devoid of sample support.
+
+    Parameters
+    ----------
+    samples_xy : np.ndarray
+        Sample coordinates of shape (N, 2) or (N, 3).
+    sample_grades : np.ndarray
+        Assay grades of shape (N,).
+    grid_points : np.ndarray
+        Target estimation coordinates of shape (M, 2) or (M, 3).
+    mean : float
+        Known stationary global mean of the domain.
+    variogram_model : str, default "spherical"
+        Theoretical variogram model ("spherical", "exponential", "gaussian").
+    nugget : float, default 0.0
+        Nugget variance c0 (measurement error / micro-scale noise).
+    sill : float, default 1.0
+        Partial sill variance c.
+    range_param : float, default 100.0
+        Spatial correlation range a.
+    k_neighbors : int, default 16
+        Maximum conditioning samples to query per target grid node.
+    max_radius : float, optional
+        Maximum search neighborhood radius.
+    mask_extrapolation : bool, default False
+        If True, masks blocks outside the drillhole convex hull to NaN.
+
+    Returns
+    -------
+    estimated_grades : np.ndarray
+        Simple Kriging grade estimates of shape (M,).
+    kriging_variance : np.ndarray
+        Estimation variance sigma_SK^2 of shape (M,).
+    """
+    # -------------------------------------------------------------------------
+    n_targets = len(grid_points)
+    total_sill = nugget + sill
+
+    # Initialize with the prior mean and maximum uncertainty (total sill)
+    estimates = np.full(n_targets, mean, dtype=float)
+    variances = np.full(n_targets, total_sill, dtype=float)
+
+    if len(samples_xy) == 0 or n_targets == 0:
+        return estimates, variances
+
+    # 1. Query k nearest neighbors using KDTree
+    # A kriging system cannot have more conditioning samples than total available samples
+    k_query = min(k_neighbors, len(samples_xy))
+    tree = KDTree(samples_xy)
+    upper_bound = max_radius if max_radius is not None else float("inf")
+    distances, indices = tree.query(
+        grid_points, k=k_query, distance_upper_bound=upper_bound
+    )
+
+    if k_query == 1:
+        distances = distances[:, None]
+        indices = indices[:, None]
+
+    # 2. Solve Simple Kriging system for each target point
+    for m in range(n_targets):
+        # Filter to valid neighbors within upper_bound (excluding inf)
+        valid_mask = np.isfinite(distances[m]) & (distances[m] <= upper_bound)
+        if not np.any(valid_mask):
+            continue  # No samples within range: remains prior mean and total sill
+
+        d_m = distances[m][valid_mask]
+        idx_m = indices[m][valid_mask]
+        k_m = len(idx_m)
+
+        # Exact collocation: if target lies directly on a sample point
+        if d_m[0] < 1e-6:
+            estimates[m] = sample_grades[idx_m[0]]
+            variances[m] = 0.0
+            continue
+
+        # Build sample-to-sample covariance matrix K_m of shape (k_m, k_m)
+        coords_m = samples_xy[idx_m]
+        diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
+        h_matrix = np.linalg.norm(diff_matrix, axis=2)
+        K_m = _theoretical_covariance(
+            h_matrix, variogram_model, nugget, sill, range_param
+        )
+        # Regularize diagonal to prevent singular matrices from collocated/collinear samples
+        K_m[np.diag_indices(k_m)] += 1e-9
+
+        # Build sample-to-target covariance vector k_0_m of shape (k_m,)
+        k0_m = _theoretical_covariance(d_m, variogram_model, nugget, sill, range_param)
+
+        # Solve linear system K_m * lambda_m = k0_m
+        weights_m = np.linalg.solve(K_m, k0_m)
+
+        # Simple Kriging estimate: Z*_SK = mean + sum_i lambda_i * (Z_i - mean)
+        grades_m = sample_grades[idx_m]
+        estimates[m] = mean + np.sum(weights_m * (grades_m - mean))
+
+        # Simple Kriging variance: sigma_SK^2 = C(0) - sum_i lambda_i * k0_i
+        var_val = total_sill - np.sum(weights_m * k0_m)
+        variances[m] = max(0.0, float(var_val))
+
+    # 3. Handle extrapolation masking
+    if mask_extrapolation:
+        inside_hull = is_within_convex_hull(samples_xy, grid_points)
+        estimates[~inside_hull] = np.nan
+        variances[~inside_hull] = np.nan
+
+    return estimates, variances
+
+
+def ordinary_kriging_grid_estimation(
+    samples_xy: np.ndarray,
+    sample_grades: np.ndarray,
+    grid_points: np.ndarray,
+    variogram_model: str = "spherical",
+    nugget: float = 0.0,
+    sill: float = 1.0,
+    range_param: float = 100.0,
+    k_neighbors: int = 16,
+    max_radius: Optional[float] = None,
+    mask_extrapolation: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Ordinary Kriging (OK) grid interpolation with unknown local mean.
+
+    Estimates values at target grid points by solving the constrained Ordinary
+    Kriging system with a Lagrange multiplier:
+        [K   1] [lambda]   [k_0]
+        [1^T 0] [  mu  ] = [ 1 ]
+    Guarantees local unbiasedness (sum(lambda_i) = 1) without requiring a known
+    global prior mean.
+
+    Parameters
+    ----------
+    samples_xy : np.ndarray
+        Sample coordinates of shape (N, 2) or (N, 3).
+    sample_grades : np.ndarray
+        Assay grades of shape (N,).
+    grid_points : np.ndarray
+        Target estimation coordinates of shape (M, 2) or (M, 3).
+    variogram_model : str, default "spherical"
+        Theoretical variogram model ("spherical", "exponential", "gaussian").
+    nugget : float, default 0.0
+        Nugget variance c0.
+    sill : float, default 1.0
+        Partial sill variance c.
+    range_param : float, default 100.0
+        Spatial correlation range a.
+    k_neighbors : int, default 16
+        Maximum conditioning samples to query per target point.
+    max_radius : float, optional
+        Maximum search neighborhood radius.
+    mask_extrapolation : bool, default False
+        If True, masks blocks outside the drillhole convex hull to NaN.
+
+    Returns
+    -------
+    estimated_grades : np.ndarray
+        Ordinary Kriging grade estimates of shape (M,).
+    kriging_variance : np.ndarray
+        Estimation variance sigma_OK^2 of shape (M,).
+    """
+    # -------------------------------------------------------------------------
+    # TODO: Implement Ordinary Kriging (OK) System:
+    # 1. Query k nearest neighbors for each grid point using KDTree(samples_xy).
+    n_targets = len(grid_points)
+    total_sill = nugget + sill
+
+    # Initialize with NaN and maximum uncertainty (total sill)
+    estimates = np.full(n_targets, np.nan, dtype=float)
+    variances = np.full(n_targets, total_sill, dtype=float)
+
+    if len(samples_xy) == 0 or n_targets == 0:
+        return estimates, variances
+
+    # 1. Query k nearest neighbors using KDTree
+    # A kriging system cannot have more conditioning samples than total available samples
+    k_query = min(k_neighbors, len(samples_xy))
+    tree = KDTree(samples_xy)
+    upper_bound = max_radius if max_radius is not None else float("inf")
+    distances, indices = tree.query(
+        grid_points, k=k_query, distance_upper_bound=upper_bound
+    )
+
+    if k_query == 1:
+        distances = distances[:, None]
+        indices = indices[:, None]
+
+    # 2. For each target point m with k active neighbors:
+    for m in range(n_targets):
+        # Filter to valid neighbors within upper_bound (excluding inf)
+        valid_mask = np.isfinite(distances[m]) & (distances[m] <= upper_bound)
+        if not np.any(valid_mask):
+            continue  # No samples within range: remains NaN and total sill
+
+        d_m = distances[m][valid_mask]
+        idx_m = indices[m][valid_mask]
+        k_m = len(idx_m)
+
+        # Exact collocation: if target lies directly on a sample point
+        if d_m[0] < 1e-6:
+            estimates[m] = sample_grades[idx_m[0]]
+            variances[m] = 0.0
+            continue
+
+        # Build sample-to-sample covariance matrix K_m of shape (k_m, k_m)
+        coords_m = samples_xy[idx_m]
+        diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
+        h_matrix = np.linalg.norm(diff_matrix, axis=2)
+        K_m = _theoretical_covariance(
+            h_matrix, variogram_model, nugget, sill, range_param
+        )
+        K_m[np.diag_indices(k_m)] += 1e-9  # Regularizer to guarantee invertibility
+
+        # Build sample-to-target covariance vector k0_m of shape (k_m,)
+        k0_m = _theoretical_covariance(
+            d_m, variogram_model, nugget, sill, range_param
+        )
+
+        # Build augmented Ordinary Kriging matrix K_aug of shape (k_m + 1, k_m + 1):
+        # [ K_m   1 ]
+        # [ 1^T   0 ]
+        K_aug = np.ones((k_m + 1, k_m + 1))
+        K_aug[:k_m, :k_m] = K_m
+        K_aug[k_m, k_m] = 0.0
+
+        # Build augmented target vector k0_aug of shape (k_m + 1,):
+        # [ k0_m ]
+        # [  1   ]
+        k0_aug = np.ones(k_m + 1)
+        k0_aug[:k_m] = k0_m
+        k0_aug[k_m] = 1.0
+
+        # Solve linear system: K_aug * [lambda; mu_lagrange] = k0_aug
+        solution = np.linalg.solve(K_aug, k0_aug)
+        weights_m = solution[:k_m]
+        mu_lagrange = solution[k_m]
+
+        # Ordinary Kriging estimate: Z*_OK = sum_i lambda_i * Z(x_i)
+        estimates[m] = np.sum(weights_m * sample_grades[idx_m])
+
+        # Ordinary Kriging variance: sigma_OK^2 = C(0) - sum_i lambda_i * k0_i - mu_lagrange
+        var_val = total_sill - np.sum(weights_m * k0_m) - mu_lagrange
+        variances[m] = max(0.0, float(var_val))
+
+    # 3. Handle extrapolation masking
+    if mask_extrapolation:
+        inside_hull = is_within_convex_hull(samples_xy, grid_points)
+        estimates[~inside_hull] = np.nan
+        variances[~inside_hull] = np.nan
+
+    return estimates, variances
