@@ -3,7 +3,6 @@ import drs
 from drs_mining.components import OperatingMode
 from drs_mining.rl.environments.controllers import RL_MineController
 from examples.blending_modes.simulation import (
-    CampaignTimers,
     create_blending_modes,
     update_campaign_mode,
     resolve_operating_mode,

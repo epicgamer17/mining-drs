@@ -96,29 +96,6 @@ def create_blending_modes() -> dict[str, OperatingMode]:
     }
 
 
-class CampaignTimers(drs.Module):
-    """Holds campaign and contingency countdown timers for DRS integration."""
-
-    def __init__(
-        self,
-        campaign_duration: float = CAMPAIGN_DURATION_DAYS,
-        contingency_duration: float = CONTINGENCY_SEGMENT_DURATION_DAYS,
-    ):
-        super().__init__()
-        self.campaign_timer = drs.Timer("current_campaign_duration", initial_value=0.0)
-        self.campaign_timer.rate = 1.0
-        self.campaign_timer.upper_threshold = campaign_duration
-
-        self.contingency_timer = drs.Timer("current_contingency_duration", initial_value=0.0)
-        self.contingency_timer.rate = 0.0
-        self.contingency_timer.upper_threshold = contingency_duration
-
-    def levels(self) -> Sequence[drs.Level]:
-        return (self.campaign_timer, self.contingency_timer)
-
-    def variables(self) -> Iterator[drs.Variable]:
-        yield self.campaign_timer
-        yield self.contingency_timer
 
 
 def update_campaign_mode(
@@ -240,22 +217,23 @@ def build_blending_network(
     )
 
     mill = Processor(name="mill", max_rate=MILL_MAX_RATE_TPD)
+    mill.campaign_timer = drs.Timer("current_campaign_duration", initial_value=0.0)
+    mill.campaign_timer.rate = 1.0
+    mill.campaign_timer.upper_threshold = duration_of_production_campaigns
+
+    mill.contingency_timer = drs.Timer("current_contingency_duration", initial_value=0.0)
+    mill.contingency_timer.rate = 0.0
+    mill.contingency_timer.upper_threshold = duration_of_contingency_segments
 
     blending_modes = dict(modes or create_blending_modes())
-
-    timers = CampaignTimers(
-        campaign_duration=duration_of_production_campaigns,
-        contingency_duration=duration_of_contingency_segments,
-    )
 
     active_campaign = drs.Variable("active_campaign_mode", blending_modes["MODE_A"])
     active_mode = drs.Variable("active_operating_mode", blending_modes["MODE_A"])
     blending_modes["MODE_A"].activate()
 
     control_state = {
-        "timers": timers,
-        "campaign_timer": timers.campaign_timer,
-        "contingency_timer": timers.contingency_timer,
+        "campaign_timer": mill.campaign_timer,
+        "contingency_timer": mill.contingency_timer,
         "active_campaign": active_campaign,
         "active_mode": active_mode,
         "modes": blending_modes,
@@ -275,7 +253,6 @@ def _register_and_policy(engine: DRSEngine, network: tuple) -> drs.Level:
     mill.cumulative_milled_mass = cumulative_milled_mass
 
     modes = control_state["modes"]
-    timers = control_state["timers"]
     campaign_timer = control_state["campaign_timer"]
     contingency_timer = control_state["contingency_timer"]
     active_campaign = control_state["active_campaign"]
@@ -286,7 +263,6 @@ def _register_and_policy(engine: DRSEngine, network: tuple) -> drs.Level:
         mill,
         ore1_stock,
         ore2_stock,
-        timers,
         *modes.values(),
     )
 
