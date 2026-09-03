@@ -39,7 +39,7 @@ from .estimation import (
     plot_simulation_realizations_dashboard,
     create_block_model,
     ordinary_kriging_block_estimation,
-    SearchNeighborhood,
+    simple_kriging_block_estimation,
 )
 
 __all__ = [
@@ -90,5 +90,5 @@ __all__ = [
     "plot_simulation_realizations_dashboard",
     "create_block_model",
     "ordinary_kriging_block_estimation",
-    "SearchNeighborhood",
+    "simple_kriging_block_estimation",
 ]

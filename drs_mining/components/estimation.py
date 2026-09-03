@@ -557,24 +557,32 @@ def inverse_distance_weighting(
         Distances to informing samples. Shape (M,) if k=1, else (M, k).
     """
     if (sample_domains is None) != (grid_domains is None):
-        raise ValueError("Both sample_domains and grid_domains must be provided together.")
+        raise ValueError(
+            "Both sample_domains and grid_domains must be provided together."
+        )
 
     # Handle domain-segregated estimation
     if sample_domains is not None and grid_domains is not None:
         s_dom = np.asarray(sample_domains)
         g_dom = np.asarray(grid_domains)
         if len(s_dom) != len(samples_xy):
-            raise ValueError(f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)}).")
+            raise ValueError(
+                f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)})."
+            )
         if len(g_dom) != len(grid_points):
-            raise ValueError(f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)}).")
+            raise ValueError(
+                f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)})."
+            )
 
         estimated_grades = np.full(len(grid_points), np.nan)
-        dist_shape = (len(grid_points),) if k_neighbors == 1 else (len(grid_points), k_neighbors)
+        dist_shape = (
+            (len(grid_points),) if k_neighbors == 1 else (len(grid_points), k_neighbors)
+        )
         distances = np.full(dist_shape, np.nan)
 
         for dom in np.unique(g_dom):
-            g_mask = (g_dom == dom)
-            s_mask = (s_dom == dom)
+            g_mask = g_dom == dom
+            s_mask = s_dom == dom
             if not np.any(s_mask):
                 continue
             est_dom, dist_dom = inverse_distance_weighting(
@@ -805,26 +813,34 @@ def simple_kriging_grid_estimation(
         Estimation variance sigma_SK^2 of shape (M,).
     """
     if (sample_domains is None) != (grid_domains is None):
-        raise ValueError("Both sample_domains and grid_domains must be provided together.")
+        raise ValueError(
+            "Both sample_domains and grid_domains must be provided together."
+        )
 
     # Handle domain-segregated estimation
     if sample_domains is not None and grid_domains is not None:
         s_dom = np.asarray(sample_domains)
         g_dom = np.asarray(grid_domains)
         if len(s_dom) != len(samples_xy):
-            raise ValueError(f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)}).")
+            raise ValueError(
+                f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)})."
+            )
         if len(g_dom) != len(grid_points):
-            raise ValueError(f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)}).")
+            raise ValueError(
+                f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)})."
+            )
 
         estimates = np.full(len(grid_points), np.nan)
         variances = np.full(len(grid_points), np.nan)
 
         for dom in np.unique(g_dom):
-            g_mask = (g_dom == dom)
-            s_mask = (s_dom == dom)
+            g_mask = g_dom == dom
+            s_mask = s_dom == dom
             dom_mean = mean[dom] if isinstance(mean, Mapping) else mean
             dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
-            dom_range = range_param[dom] if isinstance(range_param, Mapping) else range_param
+            dom_range = (
+                range_param[dom] if isinstance(range_param, Mapping) else range_param
+            )
             dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
 
             if not np.any(s_mask):
@@ -856,7 +872,9 @@ def simple_kriging_grid_estimation(
     n_targets = len(grid_points)
     base_mean = mean if not isinstance(mean, Mapping) else list(mean.values())[0]
     base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
-    base_nugget = nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
+    base_nugget = (
+        nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
+    )
     total_sill = base_nugget + base_sill
 
     # Initialize with the prior mean and maximum uncertainty (total sill)
@@ -1008,25 +1026,33 @@ def ordinary_kriging_grid_estimation(
         Estimation variance sigma_OK^2 of shape (M,).
     """
     if (sample_domains is None) != (grid_domains is None):
-        raise ValueError("Both sample_domains and grid_domains must be provided together.")
+        raise ValueError(
+            "Both sample_domains and grid_domains must be provided together."
+        )
 
     # Handle domain-segregated estimation
     if sample_domains is not None and grid_domains is not None:
         s_dom = np.asarray(sample_domains)
         g_dom = np.asarray(grid_domains)
         if len(s_dom) != len(samples_xy):
-            raise ValueError(f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)}).")
+            raise ValueError(
+                f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)})."
+            )
         if len(g_dom) != len(grid_points):
-            raise ValueError(f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)}).")
+            raise ValueError(
+                f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)})."
+            )
 
         estimates = np.full(len(grid_points), np.nan)
         variances = np.full(len(grid_points), np.nan)
 
         for dom in np.unique(g_dom):
-            g_mask = (g_dom == dom)
-            s_mask = (s_dom == dom)
+            g_mask = g_dom == dom
+            s_mask = s_dom == dom
             dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
-            dom_range = range_param[dom] if isinstance(range_param, Mapping) else range_param
+            dom_range = (
+                range_param[dom] if isinstance(range_param, Mapping) else range_param
+            )
             dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
 
             if not np.any(s_mask):
@@ -1055,7 +1081,9 @@ def ordinary_kriging_grid_estimation(
     # 1. Query k nearest neighbors for each grid point using KDTree(samples_xy).
     n_targets = len(grid_points)
     base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
-    base_nugget = nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
+    base_nugget = (
+        nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
+    )
     total_sill = base_nugget + base_sill
 
     # Initialize with NaN and maximum uncertainty (total sill)
@@ -1171,54 +1199,6 @@ def ordinary_kriging_grid_estimation(
 # =============================================================================
 
 
-@dataclass
-class SearchNeighborhood:
-    """Defines 3D anisotropic search ellipsoid and drillhole sample constraints.
-
-    Industry standard for Kriging and IDW search neighborhood control
-    (Isaaks & Srivastava 1989; Armstrong 1998; SME Handbook Section 4.4).
-    Prevents single-drillhole clustering bias and aligns search radii with
-    geological strike, dip, and plunge.
-
-    Attributes
-    ----------
-    radius_major : float
-        Search radius along principal continuity axis (strike/plunge).
-    radius_semi : float
-        Search radius along semi-major axis (dip plane).
-    radius_minor : float
-        Search radius along minor axis (across-strike / thickness).
-    azimuth : float, default 0.0
-        Rotation angle around Z axis (strike / bearing in degrees: 0 = North, 90 = East).
-    dip : float, default 0.0
-        Dip angle in degrees below horizontal (-90 to +90).
-    plunge : float, default 0.0
-        Plunge angle along strike in degrees.
-    min_samples : int, default 4
-        Minimum number of samples required to inform an estimate.
-    max_samples : int, default 16
-        Maximum total samples used in estimation.
-    max_per_hole : Optional[int], default None
-        Maximum composites allowed from any single drillhole (prevents hole dominance).
-    min_octants : int, default 1
-        Minimum informed octants/quadrants required (ensures spatial support).
-    max_per_octant : Optional[int], default None
-        Maximum samples accepted per octant.
-    """
-
-    radius_major: float
-    radius_semi: float
-    radius_minor: float
-    azimuth: float = 0.0
-    dip: float = 0.0
-    plunge: float = 0.0
-    min_samples: int = 4
-    max_samples: int = 16
-    max_per_hole: Optional[int] = None
-    min_octants: int = 1
-    max_per_octant: Optional[int] = None
-
-
 def create_block_model(
     origin: Tuple[float, float, float],
     block_size: Tuple[float, float, float],
@@ -1291,14 +1271,17 @@ def ordinary_kriging_block_estimation(
     samples_xyz: np.ndarray,
     sample_grades: np.ndarray,
     block_model: pd.DataFrame,
-    sill: float,
-    range_param: float,
+    sill: Union[float, Mapping[Any, float]],
+    range_param: Union[float, Mapping[Any, float]],
     discretization: Tuple[int, int, int] = (4, 4, 2),
     variogram_model: str = "spherical",
-    nugget: float = 0.0,
-    search_neighborhood: Optional[SearchNeighborhood] = None,
+    nugget: Union[float, Mapping[Any, float]] = 0.0,
+    k_neighbors: int = 16,
+    max_radius: Optional[float] = None,
+    min_samples: int = 1,
     domain_col: Optional[str] = None,
-    sample_domain_col: Optional[str] = None,
+    sample_domains: Optional[Sequence[Any]] = None,
+    sample_domain_col: Optional[Union[str, Sequence[Any]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Estimates block grades using 3D Ordinary Block Kriging with internal discretization.
 
@@ -1317,34 +1300,435 @@ def ordinary_kriging_block_estimation(
         Assay grades of shape (N,).
     block_model : pd.DataFrame
         Table of blocks containing centroid coordinates (x, y, z) and dimensions (dx, dy, dz).
-    sill : float
-        Partial sill variance.
-    range_param : float
-        Spatial correlation range.
+    sill : float or Mapping
+        Partial sill variance (or dict mapping domain to sill).
+    range_param : float or Mapping
+        Spatial correlation range (or dict mapping domain to range).
     discretization : tuple of (int, int, int), default (4, 4, 2)
         Number of internal discretization points (nx_disc, ny_disc, nz_disc) per block.
     variogram_model : str, default "spherical"
         Variogram model ("spherical", "exponential", "gaussian").
-    nugget : float, default 0.0
-        Nugget variance.
-    search_neighborhood : SearchNeighborhood, optional
-        Anisotropic search ellipsoid and drillhole sharing constraints.
+    nugget : float or Mapping, default 0.0
+        Nugget variance (or dict mapping domain to nugget).
+    k_neighbors : int, default 16
+        Maximum number of informing samples queried per block.
+    max_radius : float, optional
+        Maximum search radius. Samples beyond this distance are excluded.
+    min_samples : int, default 1
+        Minimum number of samples required within search radius to estimate a block.
     domain_col : str, optional
         Geological domain column in block_model.
-    sample_domain_col : str, optional
-        Geological domain column for conditioning samples.
+    sample_domains : Sequence[Any], optional
+        Geological domain identifiers for conditioning samples.
+    sample_domain_col : str or Sequence[Any], optional
+        Geological domain identifiers or column for conditioning samples.
 
     Returns
     -------
     Tuple[np.ndarray, np.ndarray, float]
         (block_estimates, block_variances, block_dispersion_variance).
     """
-    # TODO: Implement 3D Block Kriging with internal point discretization (nx, ny, nz),
-    # sample-to-block covariance C_bar(x_i, V), and block dispersion variance BV.
-    raise NotImplementedError(
-        "TODO: 3D Block Kriging with internal point discretization is planned. "
-        "Use ordinary_kriging_grid_estimation() for 2D point interpolation."
+    n_blocks = len(block_model)
+    if n_blocks == 0:
+        return np.array([]), np.array([]), 0.0
+
+    # Handle domain-segregated estimation
+    s_dom = sample_domains if sample_domains is not None else sample_domain_col
+    if (
+        domain_col is not None
+        and domain_col in block_model.columns
+        and s_dom is not None
+    ):
+        s_dom_arr = np.asarray(s_dom)
+        b_dom_arr = np.asarray(block_model[domain_col])
+        if len(s_dom_arr) != len(samples_xyz):
+            raise ValueError(
+                f"sample_domains length ({len(s_dom_arr)}) must match samples_xyz ({len(samples_xyz)})."
+            )
+
+        block_estimates = np.full(n_blocks, np.nan, dtype=float)
+        block_variances = np.full(n_blocks, np.nan, dtype=float)
+        overall_disp_var = 0.0
+
+        for dom in np.unique(b_dom_arr):
+            b_mask = b_dom_arr == dom
+            s_mask = s_dom_arr == dom
+            dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
+            dom_range = (
+                range_param[dom] if isinstance(range_param, Mapping) else range_param
+            )
+            dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
+
+            if not np.any(s_mask):
+                continue
+
+            sub_bm = block_model[b_mask].copy()
+            est_dom, var_dom, disp_dom = ordinary_kriging_block_estimation(
+                samples_xyz=samples_xyz[s_mask],
+                sample_grades=sample_grades[s_mask],
+                block_model=sub_bm,
+                sill=dom_sill,
+                range_param=dom_range,
+                discretization=discretization,
+                variogram_model=variogram_model,
+                nugget=dom_nugget,
+                k_neighbors=k_neighbors,
+                max_radius=max_radius,
+                min_samples=min_samples,
+                domain_col=None,
+                sample_domains=None,
+            )
+            block_estimates[b_mask] = est_dom
+            block_variances[b_mask] = var_dom
+            overall_disp_var = disp_dom
+
+        return block_estimates, block_variances, overall_disp_var
+
+    base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
+    base_nugget = (
+        nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
     )
+    base_range = (
+        range_param
+        if not isinstance(range_param, Mapping)
+        else list(range_param.values())[0]
+    )
+
+    # Discretization resolution along each axis
+    nx, ny, nz = discretization  # e.g., (4, 4, 2) -> 32 sub-points per block
+
+    # Nominal block dimensions (can be read from block_model columns dx, dy, dz)
+    dx = float(block_model["dx"].iloc[0])
+    dy = float(block_model["dy"].iloc[0])
+    dz = float(block_model["dz"].iloc[0])
+
+    # 1. Compute 1D offset positions centered at 0 within [-dx/2, +dx/2]
+    # Formula: (i + 0.5) / n - 0.5 places points at cell centers of the discretization grid
+    x_offsets = ((np.arange(nx) + 0.5) / nx - 0.5) * dx
+    y_offsets = ((np.arange(ny) + 0.5) / ny - 0.5) * dy
+    z_offsets = ((np.arange(nz) + 0.5) / nz - 0.5) * dz
+
+    # 2. Meshgrid to create all 3D relative coordinate combinations
+    xx, yy, zz = np.meshgrid(x_offsets, y_offsets, z_offsets, indexing="ij")
+
+    # 3. Flatten into an (M, 3) relative offset matrix, where M = nx * ny * nz  e.g. shape (32, 3)
+    disc_offsets = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+
+    # 4. Compute Block Self-Covariance $\bar{C}(V, V)$ & Dispersion Variance
+    # OPTIMIZATION: For regular blocks of identical dimensions (dx, dy, dz),
+    # the internal distances and C_bar(V, V) depend ONLY on the relative offsets.
+    # Computing it once upfront saves O(N_blocks * M^2) operations.
+    internal_diffs = disc_offsets[:, None, :] - disc_offsets[None, :, :]
+    internal_dists = np.linalg.norm(internal_diffs, axis=2)
+    internal_covs = _theoretical_covariance(
+        internal_dists, variogram_model, base_nugget, base_sill, base_range
+    )
+    c_vv = float(np.mean(internal_covs))
+    total_sill = float(base_nugget + base_sill)
+    block_dispersion_var = max(0.0, total_sill - c_vv)
+
+    # 5. Neighbor Search Setup & Spatial Query
+    upper_bound = max_radius if max_radius is not None else float("inf")
+    block_coords = block_model[["x", "y", "z"]].to_numpy(dtype=float)
+
+    # Initialize outputs: unestimated blocks remain NaN and receive maximum block uncertainty (c_vv)
+    block_estimates = np.full(n_blocks, np.nan, dtype=float)
+    block_variances = np.full(n_blocks, c_vv, dtype=float)
+
+    if len(samples_xyz) == 0:
+        return block_estimates, block_variances, block_dispersion_var
+
+    tree = KDTree(samples_xyz)
+    k_query = min(k_neighbors, len(samples_xyz))
+
+    distances, indices = tree.query(
+        block_coords,
+        k=k_query,
+        distance_upper_bound=upper_bound,
+    )
+
+    if k_query == 1:
+        distances = distances[:, None]
+        indices = indices[:, None]
+
+    # 6. Point-to-Block Covariance & Ordinary Kriging Solution per Block
+    for b in range(n_blocks):
+        # a. Filter valid neighbors within upper_bound search radius
+        valid_mask = np.isfinite(distances[b]) & (distances[b] <= upper_bound)
+        if not np.any(valid_mask) or np.sum(valid_mask) < min_samples:
+            continue  # Insufficient sample support: remains NaN and c_vv
+
+        active_indices = indices[b][valid_mask]
+        coords_active = samples_xyz[active_indices]  # shape (k, 3)
+        grades_active = sample_grades[active_indices]  # shape (k,)
+        k_active = len(active_indices)
+
+        # b. Get absolute coordinates of the M discretization points for block b
+        block_points = block_coords[b] + disc_offsets  # shape (M, 3)
+
+        # c. Compute Sample-to-Block covariance vector k_0 of shape (k,)
+        # Distances between each active sample i and each internal sub-point j:
+        sample_to_disc_diffs = (
+            coords_active[:, None, :] - block_points[None, :, :]
+        )  # (k, M, 3)
+        sample_to_disc_dists = np.linalg.norm(sample_to_disc_diffs, axis=2)  # (k, M)
+        sample_to_disc_covs = _theoretical_covariance(
+            sample_to_disc_dists, variogram_model, base_nugget, base_sill, base_range
+        )
+        # Average across the M sub-points: C_bar(x_i, V)
+        k0_block = np.mean(sample_to_disc_covs, axis=1)  # shape (k,)
+
+        # d. Build Sample-to-Sample covariance matrix K of shape (k, k)
+        sample_diffs = coords_active[:, None, :] - coords_active[None, :, :]
+        sample_dists = np.linalg.norm(sample_diffs, axis=2)
+        K_mat = _theoretical_covariance(
+            sample_dists, variogram_model, base_nugget, base_sill, base_range
+        )
+        # Regularize diagonal to avoid singularity from collocated/close samples
+        K_mat[np.diag_indices(k_active)] += 1e-9
+
+        # e. Assemble (k+1) x (k+1) Ordinary Kriging system:
+        # [ K   1 ] [ lambda ] = [ k0_block ]
+        # [ 1^T 0 ] [   mu   ]   [    1     ]
+        A = np.ones((k_active + 1, k_active + 1), dtype=float)
+        A[:k_active, :k_active] = K_mat
+        A[k_active, k_active] = 0.0
+
+        rhs = np.ones(k_active + 1, dtype=float)
+        rhs[:k_active] = k0_block
+
+        try:
+            solution = np.linalg.solve(A, rhs)
+            weights = solution[:k_active]
+            mu = solution[k_active]
+            # Block Grade Estimate: Z*(V) = sum(lambda_i * Z_i)
+            block_estimates[b] = float(np.sum(weights * grades_active))
+            # Block Kriging Variance: sigma_OK^2 = C_bar(V, V) - sum(lambda_i * C_bar(x_i, V)) - mu
+            raw_variance = c_vv - np.sum(weights * k0_block) - mu
+            block_variances[b] = max(0.0, float(raw_variance))
+        except np.linalg.LinAlgError:
+            # Fallback for singular matrix
+            continue
+
+    return block_estimates, block_variances, block_dispersion_var
+
+
+def simple_kriging_block_estimation(
+    samples_xyz: np.ndarray,
+    sample_grades: np.ndarray,
+    block_model: pd.DataFrame,
+    mean: Union[float, Mapping[Any, float]],
+    sill: Union[float, Mapping[Any, float]],
+    range_param: Union[float, Mapping[Any, float]],
+    discretization: Tuple[int, int, int] = (4, 4, 2),
+    variogram_model: str = "spherical",
+    nugget: Union[float, Mapping[Any, float]] = 0.0,
+    k_neighbors: int = 16,
+    max_radius: Optional[float] = None,
+    min_samples: int = 0,
+    domain_col: Optional[str] = None,
+    sample_domains: Optional[Sequence[Any]] = None,
+    sample_domain_col: Optional[Union[str, Sequence[Any]]] = None,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Estimates block grades using 3D Simple Block Kriging with a known stationary mean.
+
+    In Simple Kriging, the mean is assumed known and stationary across the domain.
+    When sample conditioning data is distant or sparse, the block estimate smoothly
+    reverts to the global prior mean m, and block kriging variance reaches C_bar(V, V).
+
+    Parameters
+    ----------
+    samples_xyz : np.ndarray
+        Sample coordinates of shape (N, 3).
+    sample_grades : np.ndarray
+        Assay grades of shape (N,).
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z) and dimensions (dx, dy, dz).
+    mean : float or Mapping
+        Known stationary mean grade m (or dict mapping domain to mean).
+    sill : float or Mapping
+        Partial sill variance (or dict mapping domain to sill).
+    range_param : float or Mapping
+        Spatial correlation range (or dict mapping domain to range).
+    discretization : tuple of (int, int, int), default (4, 4, 2)
+        Number of internal discretization points (nx_disc, ny_disc, nz_disc) per block.
+    variogram_model : str, default "spherical"
+        Variogram model ("spherical", "exponential", "gaussian").
+    nugget : float or Mapping, default 0.0
+        Nugget variance (or dict mapping domain to nugget).
+    k_neighbors : int, default 16
+        Maximum number of informing samples queried per block.
+    max_radius : float, optional
+        Maximum search radius. Samples beyond this distance are excluded.
+    min_samples : int, default 0
+        Minimum number of samples required. If 0 and no samples are found, reverts to mean.
+    domain_col : str, optional
+        Geological domain column in block_model.
+    sample_domains : Sequence[Any], optional
+        Geological domain identifiers for conditioning samples.
+    sample_domain_col : str or Sequence[Any], optional
+        Geological domain identifiers or column for conditioning samples.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, float]
+        (block_estimates, block_variances, block_dispersion_variance).
+    """
+    n_blocks = len(block_model)
+    if n_blocks == 0:
+        return np.array([]), np.array([]), 0.0
+
+    # Handle domain-segregated estimation
+    s_dom = sample_domains if sample_domains is not None else sample_domain_col
+    if (
+        domain_col is not None
+        and domain_col in block_model.columns
+        and s_dom is not None
+    ):
+        s_dom_arr = np.asarray(s_dom)
+        b_dom_arr = np.asarray(block_model[domain_col])
+        if len(s_dom_arr) != len(samples_xyz):
+            raise ValueError(
+                f"sample_domains length ({len(s_dom_arr)}) must match samples_xyz ({len(samples_xyz)})."
+            )
+
+        block_estimates = np.full(n_blocks, np.nan, dtype=float)
+        block_variances = np.full(n_blocks, np.nan, dtype=float)
+        overall_disp_var = 0.0
+
+        for dom in np.unique(b_dom_arr):
+            b_mask = b_dom_arr == dom
+            s_mask = s_dom_arr == dom
+            dom_mean = mean[dom] if isinstance(mean, Mapping) else mean
+            dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
+            dom_range = (
+                range_param[dom] if isinstance(range_param, Mapping) else range_param
+            )
+            dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
+
+            if not np.any(s_mask):
+                continue
+
+            sub_bm = block_model[b_mask].copy()
+            est_dom, var_dom, disp_dom = simple_kriging_block_estimation(
+                samples_xyz=samples_xyz[s_mask],
+                sample_grades=sample_grades[s_mask],
+                block_model=sub_bm,
+                mean=dom_mean,
+                sill=dom_sill,
+                range_param=dom_range,
+                discretization=discretization,
+                variogram_model=variogram_model,
+                nugget=dom_nugget,
+                k_neighbors=k_neighbors,
+                max_radius=max_radius,
+                min_samples=min_samples,
+                domain_col=None,
+                sample_domains=None,
+            )
+            block_estimates[b_mask] = est_dom
+            block_variances[b_mask] = var_dom
+            overall_disp_var = disp_dom
+
+        return block_estimates, block_variances, overall_disp_var
+
+    base_mean = mean if not isinstance(mean, Mapping) else list(mean.values())[0]
+    base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
+    base_nugget = (
+        nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
+    )
+    base_range = (
+        range_param
+        if not isinstance(range_param, Mapping)
+        else list(range_param.values())[0]
+    )
+
+    # Discretization resolution along each axis
+    nx, ny, nz = discretization
+
+    dx = float(block_model["dx"].iloc[0])
+    dy = float(block_model["dy"].iloc[0])
+    dz = float(block_model["dz"].iloc[0])
+
+    x_offsets = ((np.arange(nx) + 0.5) / nx - 0.5) * dx
+    y_offsets = ((np.arange(ny) + 0.5) / ny - 0.5) * dy
+    z_offsets = ((np.arange(nz) + 0.5) / nz - 0.5) * dz
+
+    xx, yy, zz = np.meshgrid(x_offsets, y_offsets, z_offsets, indexing="ij")
+    disc_offsets = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+
+    internal_diffs = disc_offsets[:, None, :] - disc_offsets[None, :, :]
+    internal_dists = np.linalg.norm(internal_diffs, axis=2)
+    internal_covs = _theoretical_covariance(
+        internal_dists, variogram_model, base_nugget, base_sill, base_range
+    )
+    c_vv = float(np.mean(internal_covs))
+    total_sill = float(base_nugget + base_sill)
+    block_dispersion_var = max(0.0, total_sill - c_vv)
+
+    upper_bound = max_radius if max_radius is not None else float("inf")
+    block_coords = block_model[["x", "y", "z"]].to_numpy(dtype=float)
+
+    # In Simple Kriging, unestimated blocks smoothly revert to the stationary prior mean
+    block_estimates = np.full(n_blocks, float(base_mean), dtype=float)
+    block_variances = np.full(n_blocks, c_vv, dtype=float)
+
+    if len(samples_xyz) == 0:
+        return block_estimates, block_variances, block_dispersion_var
+
+    tree = KDTree(samples_xyz)
+    k_query = min(k_neighbors, len(samples_xyz))
+
+    distances, indices = tree.query(
+        block_coords,
+        k=k_query,
+        distance_upper_bound=upper_bound,
+    )
+
+    if k_query == 1:
+        distances = distances[:, None]
+        indices = indices[:, None]
+
+    for b in range(n_blocks):
+        valid_mask = np.isfinite(distances[b]) & (distances[b] <= upper_bound)
+        if not np.any(valid_mask) or np.sum(valid_mask) < min_samples:
+            continue
+
+        active_indices = indices[b][valid_mask]
+        coords_active = samples_xyz[active_indices]
+        grades_active = sample_grades[active_indices]
+        k_active = len(active_indices)
+
+        block_points = block_coords[b] + disc_offsets
+
+        sample_to_disc_diffs = (
+            coords_active[:, None, :] - block_points[None, :, :]
+        )
+        sample_to_disc_dists = np.linalg.norm(sample_to_disc_diffs, axis=2)
+        sample_to_disc_covs = _theoretical_covariance(
+            sample_to_disc_dists, variogram_model, base_nugget, base_sill, base_range
+        )
+        k0_block = np.mean(sample_to_disc_covs, axis=1)
+
+        sample_diffs = coords_active[:, None, :] - coords_active[None, :, :]
+        sample_dists = np.linalg.norm(sample_diffs, axis=2)
+        K_mat = _theoretical_covariance(
+            sample_dists, variogram_model, base_nugget, base_sill, base_range
+        )
+        K_mat[np.diag_indices(k_active)] += 1e-9
+
+        try:
+            weights = np.linalg.solve(K_mat, k0_block)
+            # SK estimate: m + sum(lambda_i * (Z_i - m))
+            residual = grades_active - base_mean
+            block_estimates[b] = float(base_mean + np.sum(weights * residual))
+            # SK block variance: C_bar(V, V) - sum(lambda_i * C_bar(x_i, V))
+            raw_variance = c_vv - np.sum(weights * k0_block)
+            block_variances[b] = max(0.0, float(raw_variance))
+        except np.linalg.LinAlgError:
+            continue
+
+    return block_estimates, block_variances, block_dispersion_var
 
 
 def plot_grade_tonnage_curve(

@@ -42,7 +42,7 @@ from drs_mining.components.estimation import (
     plot_simulation_realizations_dashboard,
     create_block_model,
     ordinary_kriging_block_estimation,
-    SearchNeighborhood,
+    simple_kriging_block_estimation,
     _theoretical_covariance,
 )
 
@@ -1235,19 +1235,7 @@ def test_simulation_stubs_raise_not_implemented():
         )
 
 
-def test_create_block_model_and_search_neighborhood():
-    # Test SearchNeighborhood dataclass
-    sn = SearchNeighborhood(
-        radius_major=100.0,
-        radius_semi=80.0,
-        radius_minor=30.0,
-        azimuth=45.0,
-        dip=-30.0,
-        max_per_hole=3,
-    )
-    assert sn.radius_major == 100.0
-    assert sn.max_per_hole == 3
-
+def test_create_block_model():
     # Test create_block_model
     bm = create_block_model(
         origin=(100.0, 200.0, 0.0),
@@ -1264,15 +1252,34 @@ def test_create_block_model_and_search_neighborhood():
     assert bm["x"].min() == 105.0  # origin + 0.5 * dx
     assert bm["z"].max() == 12.5   # 0 + 2.5 * 5.0
 
-    # Test ordinary_kriging_block_estimation stub raises NotImplementedError
-    with pytest.raises(NotImplementedError):
-        ordinary_kriging_block_estimation(
-            samples_xyz=np.zeros((5, 3)),
-            sample_grades=np.ones(5),
-            block_model=bm,
-            sill=1.0,
-            range_param=50.0,
-        )
+    # Test ordinary_kriging_block_estimation
+    samples_xyz = np.array([
+        [110.0, 210.0, 5.0],
+        [120.0, 220.0, 5.0],
+        [130.0, 210.0, 5.0],
+        [140.0, 230.0, 5.0],
+        [115.0, 225.0, 10.0],
+    ])
+    sample_grades = np.array([1.5, 2.0, 1.2, 0.8, 1.8])
+
+    est, var, disp_var = ordinary_kriging_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        sill=1.0,
+        range_param=50.0,
+        nugget=0.1,
+        discretization=(3, 3, 2),
+    )
+
+    assert len(est) == 60
+    assert len(var) == 60
+    assert np.all(np.isfinite(est))
+    assert np.all(var >= 0.0)
+    # Support effect: Block dispersion variance must be strictly positive and less than total sill (1.1)
+    assert 0.0 < disp_var < 1.1
+    # Block kriging variance should not exceed the total sill
+    assert np.all(var <= 1.1)
 
 
 def test_domain_constrained_estimation_all_methods():
@@ -1360,14 +1367,102 @@ def test_domain_constrained_estimation_all_methods():
     assert (poly_df[poly_df["domain"] == "DomainA"]["grade"] == 10.0).all()
     assert (poly_df[poly_df["domain"] == "DomainB"]["grade"] == 1.0).all()
 
+    # 6. Test Block Kriging with domain segregation
+    bm_domains = pd.DataFrame({
+        "x": [40.0, 60.0],
+        "y": [30.0, 30.0],
+        "z": [0.0, 0.0],
+        "dx": [10.0, 10.0],
+        "dy": [10.0, 10.0],
+        "dz": [5.0, 5.0],
+        "domain": ["DomainA", "DomainB"],
+    })
+    samples_xyz = np.column_stack([samples_xy, np.zeros(len(samples_xy))])
+    blk_est, blk_var, blk_disp = ordinary_kriging_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm_domains,
+        sill={"DomainA": 1.0, "DomainB": 0.5},
+        range_param=100.0,
+        domain_col="domain",
+        sample_domains=sample_domains,
+    )
+    assert np.isclose(blk_est[0], 10.0)
+    assert np.isclose(blk_est[1], 1.0)
 
 
+def test_simple_kriging_block_estimation():
+    # Test Simple Block Kriging
+    bm = create_block_model(
+        origin=(0.0, 0.0, 0.0),
+        block_size=(10.0, 10.0, 5.0),
+        n_blocks=(3, 3, 1),
+    )
+    samples_xyz = np.array([
+        [5.0, 5.0, 2.5],
+        [15.0, 5.0, 2.5],
+        [25.0, 5.0, 2.5],
+    ])
+    sample_grades = np.array([3.0, 2.0, 1.0])
 
+    est, var, disp_var = simple_kriging_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        mean=2.0,
+        sill=1.0,
+        range_param=30.0,
+        nugget=0.0,
+        k_neighbors=8,
+    )
+    assert len(est) == 9
+    assert len(var) == 9
+    assert np.all(np.isfinite(est))
+    assert np.all(var >= 0.0)
+    assert 0.0 < disp_var < 1.0
 
+    # Distant blocks outside search radius revert to prior mean
+    samples_far = np.array([[500.0, 500.0, 500.0]])
+    grades_far = np.array([10.0])
+    est_far, var_far, _ = simple_kriging_block_estimation(
+        samples_xyz=samples_far,
+        sample_grades=grades_far,
+        block_model=bm,
+        mean=5.5,
+        sill=1.0,
+        range_param=30.0,
+        max_radius=50.0,  # Blocks are at ~10m, samples are at 500m
+        k_neighbors=8,
+    )
+    assert np.allclose(est_far, 5.5)
 
+    # Multi-domain Simple Block Kriging
+    bm_dom = pd.DataFrame({
+        "x": [5.0, 100.0],
+        "y": [5.0, 100.0],
+        "z": [2.5, 2.5],
+        "dx": [10.0, 10.0],
+        "dy": [10.0, 10.0],
+        "dz": [5.0, 5.0],
+        "domain": ["DomainA", "DomainB"],
+    })
+    samples_dom = np.array([
+        [5.0, 5.0, 2.5],
+        [100.0, 100.0, 2.5],
+    ])
+    grades_dom = np.array([10.0, 1.0])
+    s_domains = ["DomainA", "DomainB"]
 
-
-
-
-
+    est_d, var_d, _ = simple_kriging_block_estimation(
+        samples_xyz=samples_dom,
+        sample_grades=grades_dom,
+        block_model=bm_dom,
+        mean={"DomainA": 10.0, "DomainB": 1.0},
+        sill={"DomainA": 1.0, "DomainB": 0.5},
+        range_param=50.0,
+        domain_col="domain",
+        sample_domains=s_domains,
+    )
+    assert np.isclose(est_d[0], 10.0)
+    assert np.isclose(est_d[1], 1.0)
 
