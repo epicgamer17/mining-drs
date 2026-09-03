@@ -129,7 +129,6 @@ def main():
     # Run cell declustering to compute spatial weights for EDA comparison
     weights, _, _ = cell_declustering(
         capped_df,
-        cell_sizes=np.linspace(20.0, 150.0, 15),
         grade_col="capped_grade",
     )
     capped_df["declust_weight"] = weights
@@ -193,26 +192,29 @@ def main():
     # STAGE 4: INTERPOLATION & RESERVE CONVERSION
     # -------------------------------------------------------------------------
     print("\n>>> STAGE 4: INTERPOLATION & RESERVE DELINEATION")
-    # Ordinary Kriging on high-grade Porphyry domain
-    porphyry_df = capped_df[capped_df["domain"] == "PorphyryCore"].copy()
-    dh_collars = porphyry_df.groupby("hole_id")[["x", "y", "capped_grade"]].mean().reset_index()
+    # Multi-domain Ordinary Kriging: honors Hard Boundary diagnosed in Stage 3
+    dh_all = capped_df.groupby(["hole_id", "domain"])[["x", "y", "capped_grade"]].mean().reset_index()
+    samples_xy = dh_all[["x", "y"]].to_numpy()
+    sample_grades = dh_all["capped_grade"].to_numpy()
+    sample_domains = dh_all["domain"].to_numpy()
 
-    grid_x = np.linspace(200.0, 360.0, 25)
+    # Target grid covers deposit across both domains
+    grid_x = np.linspace(80.0, 360.0, 30)
     grid_y = np.linspace(60.0, 340.0, 25)
     gx, gy = np.meshgrid(grid_x, grid_y)
     grid_pts = np.column_stack([gx.ravel(), gy.ravel()])
-
-    samples_xy = dh_collars[["x", "y"]].to_numpy()
-    sample_grades = dh_collars["capped_grade"].to_numpy()
+    grid_domains = np.where(grid_pts[:, 0] >= 200.0, "PorphyryCore", "SkarnWallRock")
 
     ok_estimates, ok_vars = ordinary_kriging_grid_estimation(
         samples_xy=samples_xy,
         sample_grades=sample_grades,
         grid_points=grid_pts,
-        sill=0.20,
-        range_param=120.0,
-        nugget=0.05,
+        sill={"PorphyryCore": 0.20, "SkarnWallRock": 0.10},
+        range_param={"PorphyryCore": 120.0, "SkarnWallRock": 80.0},
+        nugget={"PorphyryCore": 0.05, "SkarnWallRock": 0.02},
         k_neighbors=min(16, len(samples_xy)),
+        sample_domains=sample_domains,
+        grid_domains=grid_domains,
     )
 
     # Cut-Off Grade Determination
@@ -236,6 +238,7 @@ def main():
         "tonnes": block_tonnes,
         "x": grid_pts[:, 0],
         "y": grid_pts[:, 1],
+        "domain": grid_domains,
     })
 
     # Mineral Resource Statement

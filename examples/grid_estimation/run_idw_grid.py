@@ -152,9 +152,8 @@ def main():
     print(f"Total Block Model Tonnage: {len(grid_points) * block_tonnes:,.0f} tonnes.")
 
     # 2. Cell Declustering Analysis (SME Handbook Section 4.3)
-    declust_cell_sizes = np.linspace(20.0, 350.0, 21)
     declust_weights, declust_df, opt_cell_size = cell_declustering(
-        drillholes, cell_sizes=declust_cell_sizes, grade_col="grade", x_col="x", y_col="y", min_mean=True
+        drillholes, grade_col="grade", x_col="x", y_col="y", min_mean=True
     )
     opt_declust_mean = float(
         declust_df.loc[declust_df["cell_size"] == opt_cell_size, "declustered_mean"].iloc[0]

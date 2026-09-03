@@ -34,8 +34,13 @@ def polygonal_estimation(
     x_col: str = "x",
     y_col: str = "y",
     hole_id_col: str = "hole_id",
+    domain_col: Optional[str] = None,
+    domain_boundaries: Optional[Mapping[Any, Sequence[Tuple[float, float]]]] = None,
 ) -> pd.DataFrame:
     """Estimates mineral reserves using the method of polygons of influence (Voronoi tessellation).
+
+    Supports geological domain boundaries: when `domain_col` is provided, Voronoi tessellations
+    are constructed strictly within each domain, ensuring polygons never cross geological contacts.
 
     Parameters
     ----------
@@ -60,6 +65,11 @@ def polygonal_estimation(
         Northing coordinate column name.
     hole_id_col : str, default "hole_id"
         Identifier column name for each drillhole.
+    domain_col : str, optional
+        Column name for geological domain. When provided, polygons are strictly segregated
+        by domain, honoring hard geological boundaries.
+    domain_boundaries : Mapping[Any, Sequence[Tuple[float, float]]], optional
+        Mapping from domain identifier to boundary polygon coordinates for that specific domain.
 
     Returns
     -------
@@ -71,6 +81,7 @@ def polygonal_estimation(
         - tonnes: Mineral mass (volume * bulk_density)
         - contained_metal: Quantity of metal (tonnes * grade)
         - vertices: List of (x, y) coordinates forming the polygon perimeter
+        - domain: Geological domain identifier (if domain_col provided)
     """
     output_cols = [
         hole_id_col,
@@ -85,8 +96,34 @@ def polygonal_estimation(
         "vertices",
     ]
 
-    # TODO: Add domain_col support to execute domain-segregated polygonal estimation,
-    # ensuring Voronoi polygons are strictly bounded/clipped by individual geological domain polygons.
+    # Handle domain-segregated polygonal estimation
+    if domain_col is not None and domain_col in drillholes.columns:
+        output_cols_dom = output_cols + [domain_col]
+        if drillholes.empty:
+            return pd.DataFrame(columns=output_cols_dom)
+
+        dfs = []
+        for dom, grp in drillholes.groupby(domain_col):
+            dom_bound = domain_boundaries.get(dom) if domain_boundaries else boundary
+            dom_df = polygonal_estimation(
+                drillholes=grp,
+                boundary=dom_bound,
+                bulk_density=bulk_density,
+                max_radius=max_radius,
+                clip_to_convex_hull=clip_to_convex_hull,
+                grade_col=grade_col,
+                thickness_col=thickness_col,
+                x_col=x_col,
+                y_col=y_col,
+                hole_id_col=hole_id_col,
+                domain_col=None,
+            )
+            dom_df[domain_col] = dom
+            dfs.append(dom_df)
+
+        if not dfs:
+            return pd.DataFrame(columns=output_cols_dom)
+        return pd.concat(dfs, ignore_index=True)
 
     if drillholes.empty:
         return pd.DataFrame(columns=output_cols)
@@ -482,8 +519,14 @@ def inverse_distance_weighting(
     k_neighbors: int = 8,
     max_radius: Optional[float] = None,
     mask_extrapolation: bool = False,
+    sample_domains: Optional[Sequence[Any]] = None,
+    grid_domains: Optional[Sequence[Any]] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Inverse Distance Weighting (IDW) interpolation using a k-d tree.
+
+    Supports geological domain boundaries: when `sample_domains` and `grid_domains` are
+    provided, estimation is strictly segregated so that grid nodes are only informed
+    by samples sharing the same geological domain.
 
     Parameters
     ----------
@@ -501,6 +544,10 @@ def inverse_distance_weighting(
         Maximum search radius. Points with no samples within this radius are NaN.
     mask_extrapolation : bool, default False
         If True, blocks outside the drillhole convex hull are set to NaN.
+    sample_domains : Sequence[Any], optional
+        Geological domain identifiers for conditioning samples of shape (N,).
+    grid_domains : Sequence[Any], optional
+        Geological domain identifiers for target grid points of shape (M,).
 
     Returns
     -------
@@ -509,6 +556,43 @@ def inverse_distance_weighting(
     distances : np.ndarray
         Distances to informing samples. Shape (M,) if k=1, else (M, k).
     """
+    if (sample_domains is None) != (grid_domains is None):
+        raise ValueError("Both sample_domains and grid_domains must be provided together.")
+
+    # Handle domain-segregated estimation
+    if sample_domains is not None and grid_domains is not None:
+        s_dom = np.asarray(sample_domains)
+        g_dom = np.asarray(grid_domains)
+        if len(s_dom) != len(samples_xy):
+            raise ValueError(f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)}).")
+        if len(g_dom) != len(grid_points):
+            raise ValueError(f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)}).")
+
+        estimated_grades = np.full(len(grid_points), np.nan)
+        dist_shape = (len(grid_points),) if k_neighbors == 1 else (len(grid_points), k_neighbors)
+        distances = np.full(dist_shape, np.nan)
+
+        for dom in np.unique(g_dom):
+            g_mask = (g_dom == dom)
+            s_mask = (s_dom == dom)
+            if not np.any(s_mask):
+                continue
+            est_dom, dist_dom = inverse_distance_weighting(
+                samples_xy[s_mask],
+                sample_grades[s_mask],
+                grid_points[g_mask],
+                power=power,
+                k_neighbors=k_neighbors,
+                max_radius=max_radius,
+                mask_extrapolation=mask_extrapolation,
+                sample_domains=None,
+                grid_domains=None,
+            )
+            estimated_grades[g_mask] = est_dom
+            distances[g_mask] = dist_dom
+
+        return estimated_grades, distances
+
     # Step 1: Build spatial index
     tree = KDTree(samples_xy)
 
@@ -580,8 +664,10 @@ def nearest_neighbor_grid_estimation(
     grid_points: np.ndarray,
     max_radius: Optional[float] = None,
     mask_extrapolation: bool = False,
+    sample_domains: Optional[Sequence[Any]] = None,
+    grid_domains: Optional[Sequence[Any]] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Nearest neighbor estimation (IDW with k=1)."""
+    """Nearest neighbor estimation (IDW with k=1) with optional domain segregation."""
     return inverse_distance_weighting(
         samples_xy,
         sample_grades,
@@ -589,6 +675,8 @@ def nearest_neighbor_grid_estimation(
         k_neighbors=1,
         max_radius=max_radius,
         mask_extrapolation=mask_extrapolation,
+        sample_domains=sample_domains,
+        grid_domains=grid_domains,
     )
 
 
@@ -662,20 +750,23 @@ def simple_kriging_grid_estimation(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
     grid_points: np.ndarray,
-    mean: float,
-    sill: float,
-    range_param: float,
+    mean: Union[float, Mapping[Any, float]],
+    sill: Union[float, Mapping[Any, float]],
+    range_param: Union[float, Mapping[Any, float]],
     variogram_model: str = "spherical",
-    nugget: float = 0.0,
+    nugget: Union[float, Mapping[Any, float]] = 0.0,
     k_neighbors: int = 16,
     max_radius: Optional[float] = None,
     mask_extrapolation: bool = False,
+    sample_domains: Optional[Sequence[Any]] = None,
+    grid_domains: Optional[Sequence[Any]] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Simple Kriging (SK) grid interpolation with known stationary mean.
 
-    Estimates values at target grid points by solving the unconstrained Simple
-    Kriging system K * lambda = k, where the estimate gracefully reverts to the
-    known global prior mean in regions devoid of sample support.
+    Supports geological domain boundaries: when `sample_domains` and `grid_domains` are
+    provided, estimation is strictly segregated so that grid nodes are only informed
+    by samples sharing the same geological domain. Parameter mappings (mean, sill, range,
+    nugget) can be supplied per-domain.
 
     Parameters
     ----------
@@ -685,22 +776,26 @@ def simple_kriging_grid_estimation(
         Assay grades of shape (N,).
     grid_points : np.ndarray
         Target estimation coordinates of shape (M, 2) or (M, 3).
-    mean : float
-        Known stationary global mean of the domain.
+    mean : float or Mapping
+        Known stationary global mean of the domain (or dict mapping domain to mean).
     variogram_model : str, default "spherical"
         Theoretical variogram model ("spherical", "exponential", "gaussian").
-    nugget : float, default 0.0
-        Nugget variance c0 (measurement error / micro-scale noise).
-    sill : float, default 1.0
-        Partial sill variance c.
-    range_param : float, default 100.0
-        Spatial correlation range a.
+    nugget : float or Mapping, default 0.0
+        Nugget variance c0 (or dict mapping domain to nugget).
+    sill : float or Mapping, default 1.0
+        Partial sill variance c (or dict mapping domain to sill).
+    range_param : float or Mapping, default 100.0
+        Spatial correlation range a (or dict mapping domain to range).
     k_neighbors : int, default 16
         Maximum conditioning samples to query per target grid node.
     max_radius : float, optional
         Maximum search neighborhood radius.
     mask_extrapolation : bool, default False
         If True, masks blocks outside the drillhole convex hull to NaN.
+    sample_domains : Sequence[Any], optional
+        Geological domain identifiers for conditioning samples of shape (N,).
+    grid_domains : Sequence[Any], optional
+        Geological domain identifiers for target grid points of shape (M,).
 
     Returns
     -------
@@ -709,12 +804,63 @@ def simple_kriging_grid_estimation(
     kriging_variance : np.ndarray
         Estimation variance sigma_SK^2 of shape (M,).
     """
+    if (sample_domains is None) != (grid_domains is None):
+        raise ValueError("Both sample_domains and grid_domains must be provided together.")
+
+    # Handle domain-segregated estimation
+    if sample_domains is not None and grid_domains is not None:
+        s_dom = np.asarray(sample_domains)
+        g_dom = np.asarray(grid_domains)
+        if len(s_dom) != len(samples_xy):
+            raise ValueError(f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)}).")
+        if len(g_dom) != len(grid_points):
+            raise ValueError(f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)}).")
+
+        estimates = np.full(len(grid_points), np.nan)
+        variances = np.full(len(grid_points), np.nan)
+
+        for dom in np.unique(g_dom):
+            g_mask = (g_dom == dom)
+            s_mask = (s_dom == dom)
+            dom_mean = mean[dom] if isinstance(mean, Mapping) else mean
+            dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
+            dom_range = range_param[dom] if isinstance(range_param, Mapping) else range_param
+            dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
+
+            if not np.any(s_mask):
+                estimates[g_mask] = dom_mean
+                variances[g_mask] = dom_sill + dom_nugget
+                continue
+
+            est_dom, var_dom = simple_kriging_grid_estimation(
+                samples_xy=samples_xy[s_mask],
+                sample_grades=sample_grades[s_mask],
+                grid_points=grid_points[g_mask],
+                mean=dom_mean,
+                sill=dom_sill,
+                range_param=dom_range,
+                variogram_model=variogram_model,
+                nugget=dom_nugget,
+                k_neighbors=k_neighbors,
+                max_radius=max_radius,
+                mask_extrapolation=mask_extrapolation,
+                sample_domains=None,
+                grid_domains=None,
+            )
+            estimates[g_mask] = est_dom
+            variances[g_mask] = var_dom
+
+        return estimates, variances
+
     # -------------------------------------------------------------------------
     n_targets = len(grid_points)
-    total_sill = nugget + sill
+    base_mean = mean if not isinstance(mean, Mapping) else list(mean.values())[0]
+    base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
+    base_nugget = nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
+    total_sill = base_nugget + base_sill
 
     # Initialize with the prior mean and maximum uncertainty (total sill)
-    estimates = np.full(n_targets, mean, dtype=float)
+    estimates = np.full(n_targets, base_mean, dtype=float)
     variances = np.full(n_targets, total_sill, dtype=float)
 
     if len(samples_xy) == 0 or n_targets == 0:
@@ -810,22 +956,22 @@ def ordinary_kriging_grid_estimation(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
     grid_points: np.ndarray,
-    sill: float,
-    range_param: float,
+    sill: Union[float, Mapping[Any, float]],
+    range_param: Union[float, Mapping[Any, float]],
     variogram_model: str = "spherical",
-    nugget: float = 0.0,
+    nugget: Union[float, Mapping[Any, float]] = 0.0,
     k_neighbors: int = 16,
     max_radius: Optional[float] = None,
     mask_extrapolation: bool = False,
+    sample_domains: Optional[Sequence[Any]] = None,
+    grid_domains: Optional[Sequence[Any]] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Ordinary Kriging (OK) grid interpolation with unknown local mean.
 
-    Estimates values at target grid points by solving the constrained Ordinary
-    Kriging system with a Lagrange multiplier:
-        [K   1] [lambda]   [k_0]
-        [1^T 0] [  mu  ] = [ 1 ]
-    Guarantees local unbiasedness (sum(lambda_i) = 1) without requiring a known
-    global prior mean.
+    Supports geological domain boundaries: when `sample_domains` and `grid_domains` are
+    provided, estimation is strictly segregated so that grid nodes are only informed
+    by samples sharing the same geological domain. Parameter mappings (sill, range,
+    nugget) can be supplied per-domain.
 
     Parameters
     ----------
@@ -837,18 +983,22 @@ def ordinary_kriging_grid_estimation(
         Target estimation coordinates of shape (M, 2) or (M, 3).
     variogram_model : str, default "spherical"
         Theoretical variogram model ("spherical", "exponential", "gaussian").
-    nugget : float, default 0.0
-        Nugget variance c0.
-    sill : float, default 1.0
-        Partial sill variance c.
-    range_param : float, default 100.0
-        Spatial correlation range a.
+    nugget : float or Mapping, default 0.0
+        Nugget variance c0 (or dict mapping domain to nugget).
+    sill : float or Mapping, default 1.0
+        Partial sill variance c (or dict mapping domain to sill).
+    range_param : float or Mapping, default 100.0
+        Spatial correlation range a (or dict mapping domain to range).
     k_neighbors : int, default 16
         Maximum conditioning samples to query per target point.
     max_radius : float, optional
         Maximum search neighborhood radius.
     mask_extrapolation : bool, default False
         If True, masks blocks outside the drillhole convex hull to NaN.
+    sample_domains : Sequence[Any], optional
+        Geological domain identifiers for conditioning samples of shape (N,).
+    grid_domains : Sequence[Any], optional
+        Geological domain identifiers for target grid points of shape (M,).
 
     Returns
     -------
@@ -857,10 +1007,56 @@ def ordinary_kriging_grid_estimation(
     kriging_variance : np.ndarray
         Estimation variance sigma_OK^2 of shape (M,).
     """
+    if (sample_domains is None) != (grid_domains is None):
+        raise ValueError("Both sample_domains and grid_domains must be provided together.")
+
+    # Handle domain-segregated estimation
+    if sample_domains is not None and grid_domains is not None:
+        s_dom = np.asarray(sample_domains)
+        g_dom = np.asarray(grid_domains)
+        if len(s_dom) != len(samples_xy):
+            raise ValueError(f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)}).")
+        if len(g_dom) != len(grid_points):
+            raise ValueError(f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)}).")
+
+        estimates = np.full(len(grid_points), np.nan)
+        variances = np.full(len(grid_points), np.nan)
+
+        for dom in np.unique(g_dom):
+            g_mask = (g_dom == dom)
+            s_mask = (s_dom == dom)
+            dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
+            dom_range = range_param[dom] if isinstance(range_param, Mapping) else range_param
+            dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
+
+            if not np.any(s_mask):
+                continue
+
+            est_dom, var_dom = ordinary_kriging_grid_estimation(
+                samples_xy=samples_xy[s_mask],
+                sample_grades=sample_grades[s_mask],
+                grid_points=grid_points[g_mask],
+                sill=dom_sill,
+                range_param=dom_range,
+                variogram_model=variogram_model,
+                nugget=dom_nugget,
+                k_neighbors=k_neighbors,
+                max_radius=max_radius,
+                mask_extrapolation=mask_extrapolation,
+                sample_domains=None,
+                grid_domains=None,
+            )
+            estimates[g_mask] = est_dom
+            variances[g_mask] = var_dom
+
+        return estimates, variances
+
     # -------------------------------------------------------------------------
     # 1. Query k nearest neighbors for each grid point using KDTree(samples_xy).
     n_targets = len(grid_points)
-    total_sill = nugget + sill
+    base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
+    base_nugget = nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
+    total_sill = base_nugget + base_sill
 
     # Initialize with NaN and maximum uncertainty (total sill)
     estimates = np.full(n_targets, np.nan, dtype=float)
@@ -1280,11 +1476,11 @@ def plot_grade_tonnage_curve(
 
 def cell_declustering(
     drillholes: pd.DataFrame,
-    cell_sizes: Union[float, Sequence[float]],
+    cell_sizes: Optional[Union[float, Sequence[float]]] = None,
     grade_col: str = "grade",
     x_col: str = "x",
     y_col: str = "y",
-    n_offsets: int = 4,
+    n_offsets: int = 8,
     min_mean: bool = True,
 ) -> Tuple[np.ndarray, pd.DataFrame, float]:
     """Calculates spatial declustering weights and cell size sensitivity.
@@ -1302,8 +1498,10 @@ def cell_declustering(
     ----------
     drillholes : pd.DataFrame
         Table of drillholes containing spatial coordinates and grades.
-    cell_sizes : float or Sequence[float]
+    cell_sizes : float or Sequence[float], optional
         Single cell dimension or sequence of cell dimensions (m) to test.
+        If None, automatically determines a comprehensive range from below the minimum
+        drillhole spacing up to 3.5x the deposit extent, guaranteeing a complete U-shaped curve.
     grade_col : str, default "grade"
         Grade column name in drillholes.
     x_col : str, default "x"
@@ -1331,7 +1529,22 @@ def cell_declustering(
     z = np.asarray(drillholes[grade_col], dtype=float)
     n_samples = len(x)
 
-    if isinstance(cell_sizes, (int, float)):
+    if cell_sizes is None:
+        dx = float(x.max() - x.min())
+        dy = float(y.max() - y.min())
+        diag = float(np.hypot(dx, dy))
+        if n_samples > 1:
+            pts = np.column_stack([x, y])
+            diffs = pts[:, None, :] - pts[None, :, :]
+            dists = np.linalg.norm(diffs, axis=2)
+            np.fill_diagonal(dists, np.inf)
+            min_dist = float(dists.min())
+            min_cs = max(min_dist * 0.5, 1e-3)
+        else:
+            min_cs = 1.0
+        max_cs = max(diag * 7.0, min_cs * 15.0)
+        cell_sizes_list = list(np.linspace(min_cs, max_cs, 45))
+    elif isinstance(cell_sizes, (int, float)):
         cell_sizes_list = [float(cell_sizes)]
     else:
         cell_sizes_list = [float(cs) for cs in cell_sizes]

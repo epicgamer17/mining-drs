@@ -608,6 +608,17 @@ def test_cell_declustering_removes_clustering_bias():
     # So expected declustered mean is roughly 0.5 * 2.0 + 0.5 * 0.5 = 1.25
     assert min_declust_mean < 1.45
 
+    # Test automatic cell size range calculation (cell_sizes=None)
+    auto_weights, auto_df, auto_opt_cs = cell_declustering(df, min_mean=True)
+    assert len(auto_weights) == 5
+    assert len(auto_df) == 45
+    assert auto_df["cell_size"].iloc[0] < 10.0
+    assert auto_df["cell_size"].iloc[-1] > 200.0
+    # U-shape verification: both ends should approach naive mean
+    assert np.isclose(auto_df["declustered_mean"].iloc[0], naive_mean, atol=1e-3)
+    assert np.isclose(auto_df["declustered_mean"].iloc[-1], naive_mean, atol=0.05)
+
+
 
 def test_plot_cell_declustering_curve():
     sensitivity_df = pd.DataFrame({
@@ -1262,6 +1273,93 @@ def test_create_block_model_and_search_neighborhood():
             sill=1.0,
             range_param=50.0,
         )
+
+
+def test_domain_constrained_estimation_all_methods():
+    # Setup two sharply contrasting domains separated at x = 50m
+    # Domain A (x < 50): High grade ~10.0% Cu
+    # Domain B (x >= 50): Low grade ~1.0% Cu
+    samples_xy = np.array([
+        [20.0, 30.0],
+        [40.0, 30.0],
+        [60.0, 30.0],
+        [80.0, 30.0],
+    ])
+    sample_grades = np.array([10.0, 10.0, 1.0, 1.0])
+    sample_domains = np.array(["DomainA", "DomainA", "DomainB", "DomainB"])
+
+    # Target points right next to the boundary
+    grid_points = np.array([
+        [49.0, 30.0],  # Right on the Domain A side
+        [51.0, 30.0],  # Right on the Domain B side
+    ])
+    grid_domains = np.array(["DomainA", "DomainB"])
+
+    # 1. Test IDW with domain segregation (no smearing across x=50!)
+    idw_est, _ = inverse_distance_weighting(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        sample_domains=sample_domains,
+        grid_domains=grid_domains,
+    )
+    assert np.isclose(idw_est[0], 10.0), f"Expected 10.0 for Domain A, got {idw_est[0]}"
+    assert np.isclose(idw_est[1], 1.0), f"Expected 1.0 for Domain B, got {idw_est[1]}"
+
+    # 2. Test Nearest Neighbor with domain segregation
+    nn_est, _ = nearest_neighbor_grid_estimation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        sample_domains=sample_domains,
+        grid_domains=grid_domains,
+    )
+    assert np.isclose(nn_est[0], 10.0)
+    assert np.isclose(nn_est[1], 1.0)
+
+    # 3. Test Ordinary Kriging with domain segregation
+    ok_est, ok_var = ordinary_kriging_grid_estimation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        sill=1.0,
+        range_param=100.0,
+        sample_domains=sample_domains,
+        grid_domains=grid_domains,
+    )
+    assert np.isclose(ok_est[0], 10.0)
+    assert np.isclose(ok_est[1], 1.0)
+
+    # 4. Test Simple Kriging with domain segregation and per-domain priors
+    sk_est, sk_var = simple_kriging_grid_estimation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        mean={"DomainA": 10.0, "DomainB": 1.0},
+        sill={"DomainA": 1.0, "DomainB": 0.5},
+        range_param=100.0,
+        sample_domains=sample_domains,
+        grid_domains=grid_domains,
+    )
+    assert np.isclose(sk_est[0], 10.0)
+    assert np.isclose(sk_est[1], 1.0)
+
+    # 5. Test Polygonal Estimation with domain_col
+    dh_df = pd.DataFrame({
+        "hole_id": ["DH01", "DH02", "DH03", "DH04"],
+        "x": [20.0, 40.0, 60.0, 80.0],
+        "y": [30.0, 30.0, 30.0, 30.0],
+        "grade": [10.0, 10.0, 1.0, 1.0],
+        "thickness": [5.0, 5.0, 5.0, 5.0],
+        "domain": ["DomainA", "DomainA", "DomainB", "DomainB"],
+    })
+    poly_df = polygonal_estimation(dh_df, domain_col="domain")
+    assert len(poly_df) == 4
+    assert "domain" in poly_df.columns
+    assert set(poly_df["domain"]) == {"DomainA", "DomainB"}
+    assert (poly_df[poly_df["domain"] == "DomainA"]["grade"] == 10.0).all()
+    assert (poly_df[poly_df["domain"] == "DomainB"]["grade"] == 1.0).all()
+
 
 
 
