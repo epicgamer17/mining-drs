@@ -36,6 +36,12 @@ from .components import (
     plot_contact_profile,
     reconcile_production_to_reserve,
     plot_production_reconciliation,
+    sequential_gaussian_simulation,
+    compute_etype_mtype_maps,
+    plot_simulation_realizations_dashboard,
+    create_block_model,
+    ordinary_kriging_block_estimation,
+    SearchNeighborhood,
 )
 
 __all__ = [
@@ -80,4 +86,10 @@ __all__ = [
     "plot_contact_profile",
     "reconcile_production_to_reserve",
     "plot_production_reconciliation",
+    "sequential_gaussian_simulation",
+    "compute_etype_mtype_maps",
+    "plot_simulation_realizations_dashboard",
+    "create_block_model",
+    "ordinary_kriging_block_estimation",
+    "SearchNeighborhood",
 ]

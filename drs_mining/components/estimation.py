@@ -8,6 +8,7 @@ of influence), global reserve calculations, cutoff-grade sensitivity analysis
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon as MplPolygon
@@ -83,6 +84,9 @@ def polygonal_estimation(
         "contained_metal",
         "vertices",
     ]
+
+    # TODO: Add domain_col support to execute domain-segregated polygonal estimation,
+    # ensuring Voronoi polygons are strictly bounded/clipped by individual geological domain polygons.
 
     if drillholes.empty:
         return pd.DataFrame(columns=output_cols)
@@ -854,7 +858,6 @@ def ordinary_kriging_grid_estimation(
         Estimation variance sigma_OK^2 of shape (M,).
     """
     # -------------------------------------------------------------------------
-    # TODO: Implement Ordinary Kriging (OK) System:
     # 1. Query k nearest neighbors for each grid point using KDTree(samples_xy).
     n_targets = len(grid_points)
     total_sill = nugget + sill
@@ -965,6 +968,187 @@ def ordinary_kriging_grid_estimation(
         variances[~inside_hull] = np.nan
 
     return estimates, variances
+
+
+# =============================================================================
+# 3D BLOCK MODELING & BLOCK KRIGING (SUPPORT EFFECT & DISCRETIZATION)
+# =============================================================================
+
+
+@dataclass
+class SearchNeighborhood:
+    """Defines 3D anisotropic search ellipsoid and drillhole sample constraints.
+
+    Industry standard for Kriging and IDW search neighborhood control
+    (Isaaks & Srivastava 1989; Armstrong 1998; SME Handbook Section 4.4).
+    Prevents single-drillhole clustering bias and aligns search radii with
+    geological strike, dip, and plunge.
+
+    Attributes
+    ----------
+    radius_major : float
+        Search radius along principal continuity axis (strike/plunge).
+    radius_semi : float
+        Search radius along semi-major axis (dip plane).
+    radius_minor : float
+        Search radius along minor axis (across-strike / thickness).
+    azimuth : float, default 0.0
+        Rotation angle around Z axis (strike / bearing in degrees: 0 = North, 90 = East).
+    dip : float, default 0.0
+        Dip angle in degrees below horizontal (-90 to +90).
+    plunge : float, default 0.0
+        Plunge angle along strike in degrees.
+    min_samples : int, default 4
+        Minimum number of samples required to inform an estimate.
+    max_samples : int, default 16
+        Maximum total samples used in estimation.
+    max_per_hole : Optional[int], default None
+        Maximum composites allowed from any single drillhole (prevents hole dominance).
+    min_octants : int, default 1
+        Minimum informed octants/quadrants required (ensures spatial support).
+    max_per_octant : Optional[int], default None
+        Maximum samples accepted per octant.
+    """
+
+    radius_major: float
+    radius_semi: float
+    radius_minor: float
+    azimuth: float = 0.0
+    dip: float = 0.0
+    plunge: float = 0.0
+    min_samples: int = 4
+    max_samples: int = 16
+    max_per_hole: Optional[int] = None
+    min_octants: int = 1
+    max_per_octant: Optional[int] = None
+
+
+def create_block_model(
+    origin: Tuple[float, float, float],
+    block_size: Tuple[float, float, float],
+    n_blocks: Tuple[int, int, int],
+    default_density: float = 2.70,
+    default_domain: str = "Default",
+) -> pd.DataFrame:
+    """Constructs a regular 3D Block Model DataFrame for resource estimation.
+
+    Parameters
+    ----------
+    origin : tuple of (float, float, float)
+        (x0, y0, z0) minimum coordinate origin (south-west-bottom corner of first block).
+    block_size : tuple of (float, float, float)
+        (dx, dy, dz) block dimensions in meters (SMU size).
+    n_blocks : tuple of (int, int, int)
+        (nx, ny, nz) number of blocks along X, Y, and Z axes.
+    default_density : float, default 2.70
+        Bulk density / specific gravity (t/m^3).
+    default_domain : str, default "Default"
+        Initial geological domain identifier.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with block centroids (x, y, z), dimensions (dx, dy, dz),
+        volume_m3, density, tonnes, and domain.
+    """
+    x0, y0, z0 = origin
+    dx, dy, dz = block_size
+    nx, ny, nz = n_blocks
+
+    if nx <= 0 or ny <= 0 or nz <= 0:
+        raise ValueError("Number of blocks in each dimension must be positive.")
+    if dx <= 0 or dy <= 0 or dz <= 0:
+        raise ValueError("Block dimensions must be positive.")
+
+    # Block centroids: origin + (i + 0.5) * d
+    xc = x0 + (np.arange(nx) + 0.5) * dx
+    yc = y0 + (np.arange(ny) + 0.5) * dy
+    zc = z0 + (np.arange(nz) + 0.5) * dz
+
+    # Meshgrid (X fast, Y medium, Z slow)
+    grid_x, grid_y, grid_z = np.meshgrid(xc, yc, zc, indexing="ij")
+
+    vol = float(dx * dy * dz)
+    tonnes = vol * default_density
+
+    df_blocks = pd.DataFrame(
+        {
+            "x": grid_x.ravel(),
+            "y": grid_y.ravel(),
+            "z": grid_z.ravel(),
+            "dx": dx,
+            "dy": dy,
+            "dz": dz,
+            "volume_m3": vol,
+            "density": default_density,
+            "tonnes": tonnes,
+            "domain": default_domain,
+        }
+    )
+    df_blocks.attrs["origin"] = origin
+    df_blocks.attrs["block_size"] = block_size
+    df_blocks.attrs["n_blocks"] = n_blocks
+    return df_blocks
+
+
+def ordinary_kriging_block_estimation(
+    samples_xyz: np.ndarray,
+    sample_grades: np.ndarray,
+    block_model: pd.DataFrame,
+    sill: float,
+    range_param: float,
+    discretization: Tuple[int, int, int] = (4, 4, 2),
+    variogram_model: str = "spherical",
+    nugget: float = 0.0,
+    search_neighborhood: Optional[SearchNeighborhood] = None,
+    domain_col: Optional[str] = None,
+    sample_domain_col: Optional[str] = None,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Estimates block grades using 3D Ordinary Block Kriging with internal discretization.
+
+    Block Kriging (Journel & Huijbregts 1978; SME Handbook Section 4.5) accounts for the
+    Support Effect by discretizing each mining block into an internal grid of
+    (nx_disc * ny_disc * nz_disc) points. It calculates:
+    1. Average sample-to-block covariance: C_bar(x_i, V)
+    2. Block-to-block self-covariance: C_bar(V, V)
+    3. Block dispersion variance: BV = C(0) - C_bar(V, V)
+
+    Parameters
+    ----------
+    samples_xyz : np.ndarray
+        Sample coordinates of shape (N, 3).
+    sample_grades : np.ndarray
+        Assay grades of shape (N,).
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z) and dimensions (dx, dy, dz).
+    sill : float
+        Partial sill variance.
+    range_param : float
+        Spatial correlation range.
+    discretization : tuple of (int, int, int), default (4, 4, 2)
+        Number of internal discretization points (nx_disc, ny_disc, nz_disc) per block.
+    variogram_model : str, default "spherical"
+        Variogram model ("spherical", "exponential", "gaussian").
+    nugget : float, default 0.0
+        Nugget variance.
+    search_neighborhood : SearchNeighborhood, optional
+        Anisotropic search ellipsoid and drillhole sharing constraints.
+    domain_col : str, optional
+        Geological domain column in block_model.
+    sample_domain_col : str, optional
+        Geological domain column for conditioning samples.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, float]
+        (block_estimates, block_variances, block_dispersion_variance).
+    """
+    # TODO: Implement 3D Block Kriging with internal point discretization (nx, ny, nz),
+    # sample-to-block covariance C_bar(x_i, V), and block dispersion variance BV.
+    raise NotImplementedError(
+        "TODO: 3D Block Kriging with internal point discretization is planned. "
+        "Use ordinary_kriging_grid_estimation() for 2D point interpolation."
+    )
 
 
 def plot_grade_tonnage_curve(
@@ -2487,7 +2671,9 @@ def plot_resource_to_reserve_waterfall(
         # Callout values
         for i, bar in enumerate(bars):
             val = heights[i]
-            val_signed = deltas[i] if (0 < i < n - 1) else (finals if i == n - 1 else val)
+            val_signed = (
+                deltas[i] if (0 < i < n - 1) else (finals if i == n - 1 else val)
+            )
             prefix = "+" if (0 < i < n - 1 and val_signed > 0) else ""
             y_pos = bottoms[i] + heights[i] + (max(deltas[0], finals) * 0.02)
             ax.text(
@@ -2909,7 +3095,9 @@ def composite_drillhole_intervals(
             if total_weight <= 0:
                 continue
 
-            weighted_grade = float((active_weights * active_grades).sum() / total_weight)
+            weighted_grade = float(
+                (active_weights * active_grades).sum() / total_weight
+            )
 
             rec: dict = {
                 hole_id_col: hole_id,
@@ -2926,7 +3114,9 @@ def composite_drillhole_intervals(
             for c_name in coord_cols:
                 raw_coords = sub[c_name].to_numpy(dtype=float)
                 # Weighted average coordinate for midpoint
-                comp_coord = float((active_lens * raw_coords[valid_mask]).sum() / active_lens.sum())
+                comp_coord = float(
+                    (active_lens * raw_coords[valid_mask]).sum() / active_lens.sum()
+                )
                 rec[c_name] = comp_coord
 
             composite_records.append(rec)
@@ -2974,7 +3164,9 @@ def apply_grade_capping(
         comprehensive audit metadata attached in .attrs["capping_summary"].
     """
     if cap_grade is None and percentile is None:
-        raise ValueError("Must specify either an explicit cap_grade or a percentile (e.g. 99.0).")
+        raise ValueError(
+            "Must specify either an explicit cap_grade or a percentile (e.g. 99.0)."
+        )
 
     if grade_col not in composite_df.columns:
         raise ValueError(f"Grade column '{grade_col}' not found in DataFrame.")
@@ -3214,7 +3406,9 @@ def exploratory_data_analysis(
     if cv_val <= 1.0:
         cv_status = "Well-behaved / Low skewness (linear geostatistics suitable)"
     elif cv_val <= 1.5:
-        cv_status = "Moderately skewed (monitor variogram stability and kriging weights)"
+        cv_status = (
+            "Moderately skewed (monitor variogram stability and kriging weights)"
+        )
     else:
         cv_status = "Highly skewed / Outlier risk (CV > 1.5: top-cutting or domain review recommended)"
 
@@ -3331,22 +3525,48 @@ def plot_eda_distributions(
     ax1_cum.set_ylim(0, 105)
 
     # Reference lines
-    ax1.axvline(mean_g, color="#d62728", linestyle="--", linewidth=1.5, label=f"Mean: {mean_g:.2f}")
-    ax1.axvline(med_g, color="#ff7f0e", linestyle=":", linewidth=1.5, label=f"Median: {med_g:.2f}")
+    ax1.axvline(
+        mean_g,
+        color="#d62728",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"Mean: {mean_g:.2f}",
+    )
+    ax1.axvline(
+        med_g,
+        color="#ff7f0e",
+        linestyle=":",
+        linewidth=1.5,
+        label=f"Median: {med_g:.2f}",
+    )
     if cap_grade is not None:
         ax1.axvline(
-            cap_grade, color="black", linestyle="-.", linewidth=1.5, label=f"Cap: {cap_grade:.2f}"
+            cap_grade,
+            color="black",
+            linestyle="-.",
+            linewidth=1.5,
+            label=f"Cap: {cap_grade:.2f}",
         )
 
     ax1.set_xlabel(f"Grade ({grade_unit})", fontsize=10, fontweight="bold")
     ax1.set_ylabel("Sample Frequency", fontsize=10, fontweight="bold")
-    ax1.set_title(f"Histogram & Cumulative Frequency\n(N={n}, CV={cv_g:.2f})", fontsize=11, fontweight="bold")
+    ax1.set_title(
+        f"Histogram & Cumulative Frequency\n(N={n}, CV={cv_g:.2f})",
+        fontsize=11,
+        fontweight="bold",
+    )
     ax1.grid(True, linestyle=":", alpha=0.5)
 
     # Combine legends from both axes
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax1_cum.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=8, framealpha=0.9)
+    ax1.legend(
+        lines1 + lines2,
+        labels1 + labels2,
+        loc="upper right",
+        fontsize=8,
+        framealpha=0.9,
+    )
 
     # -------------------------------------------------------------------------
     # Panel 2: Log-Transformed Distribution (Unimodal vs. Multimodal)
@@ -3369,11 +3589,17 @@ def plot_eda_distributions(
     std_log = float(log_grades.std())
     x_eval = np.linspace(log_grades.min(), log_grades.max(), 200)
     pdf_eval = stats.norm.pdf(x_eval, mu_log, std_log)
-    ax2.plot(x_eval, pdf_eval, color="#d62728", linewidth=2.0, label="Fitted Log-Normal")
+    ax2.plot(
+        x_eval, pdf_eval, color="#d62728", linewidth=2.0, label="Fitted Log-Normal"
+    )
 
     ax2.set_xlabel(f"ln(Grade {grade_unit})", fontsize=10, fontweight="bold")
     ax2.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
-    ax2.set_title("Log-Transformed Distribution\n(Population Modality)", fontsize=11, fontweight="bold")
+    ax2.set_title(
+        "Log-Transformed Distribution\n(Population Modality)",
+        fontsize=11,
+        fontweight="bold",
+    )
     ax2.grid(True, linestyle=":", alpha=0.5)
     ax2.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
 
@@ -3421,18 +3647,38 @@ def plot_eda_distributions(
     ax3.set_yscale("log")
 
     # Set probability-spaced ticks on x-axis
-    prob_ticks = np.array([0.001, 0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 0.999])
+    prob_ticks = np.array(
+        [0.001, 0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 0.999]
+    )
     z_ticks = stats.norm.ppf(prob_ticks)
-    prob_labels = ["0.1%", "1%", "5%", "10%", "25%", "50%", "75%", "90%", "95%", "99%", "99.9%"]
+    prob_labels = [
+        "0.1%",
+        "1%",
+        "5%",
+        "10%",
+        "25%",
+        "50%",
+        "75%",
+        "90%",
+        "95%",
+        "99%",
+        "99.9%",
+    ]
 
     # Filter ticks within actual z range
     in_range = (z_ticks >= z_scores.min() - 0.2) & (z_ticks <= z_scores.max() + 0.2)
     ax3.set_xticks(z_ticks[in_range])
-    ax3.set_xticklabels([prob_labels[k] for k in range(len(prob_labels)) if in_range[k]], fontsize=8)
+    ax3.set_xticklabels(
+        [prob_labels[k] for k in range(len(prob_labels)) if in_range[k]], fontsize=8
+    )
 
     ax3.set_xlabel("Cumulative Probability (%)", fontsize=10, fontweight="bold")
     ax3.set_ylabel(f"Grade ({grade_unit}, Log Scale)", fontsize=10, fontweight="bold")
-    ax3.set_title("Log-Probability Plot\n(Capping & Outlier Diagnostic)", fontsize=11, fontweight="bold")
+    ax3.set_title(
+        "Log-Probability Plot\n(Capping & Outlier Diagnostic)",
+        fontsize=11,
+        fontweight="bold",
+    )
     ax3.grid(True, which="both", linestyle=":", alpha=0.5)
     ax3.legend(loc="upper left", fontsize=8.5, framealpha=0.9)
 
@@ -3513,7 +3759,9 @@ def contact_profile_analysis(
     if domain_a is None or domain_b is None:
         top_domains = df[domain_col].value_counts().index.tolist()
         if len(top_domains) < 2:
-            raise ValueError(f"Need at least 2 unique domains in '{domain_col}' for contact analysis.")
+            raise ValueError(
+                f"Need at least 2 unique domains in '{domain_col}' for contact analysis."
+            )
         dom_a = top_domains[0] if domain_a is None else domain_a
         dom_b = top_domains[1] if domain_b is None else domain_b
     else:
@@ -3596,16 +3844,18 @@ def contact_profile_analysis(
             std_g = np.nan
             sem_g = np.nan
 
-        records.append({
-            "bin_center": b_center,
-            "bin_min": b_min,
-            "bin_max": b_max,
-            "domain": dom_a if is_domain_a else dom_b,
-            "sample_count": cnt,
-            "mean_grade": mean_g,
-            "std_grade": std_g,
-            "sem_grade": sem_g,
-        })
+        records.append(
+            {
+                "bin_center": b_center,
+                "bin_min": b_min,
+                "bin_max": b_max,
+                "domain": dom_a if is_domain_a else dom_b,
+                "sample_count": cnt,
+                "mean_grade": mean_g,
+                "std_grade": std_g,
+                "sem_grade": sem_g,
+            }
+        )
 
     profile_df = pd.DataFrame(records)
 
@@ -3629,7 +3879,9 @@ def contact_profile_analysis(
         step_ratio = step_change / base_g if base_g > 0 else 1.0
 
         # Uncertainty threshold: step must exceed combined standard error
-        combined_sem = np.sqrt(sem_a**2 + sem_b**2) if (sem_a > 0 or sem_b > 0) else 0.01
+        combined_sem = (
+            np.sqrt(sem_a**2 + sem_b**2) if (sem_a > 0 or sem_b > 0) else 0.01
+        )
 
         if step_ratio >= 0.40 and step_change > 1.5 * combined_sem:
             boundary_type = "Hard"
@@ -3696,7 +3948,9 @@ def plot_contact_profile(
     Tuple[plt.Figure, Sequence[plt.Axes]]
         Figure and (ax_profile, ax_counts) axes.
     """
-    dom_a = domain_a_name or str(contact_df.attrs.get("domain_a", "Domain A (Host Rock)"))
+    dom_a = domain_a_name or str(
+        contact_df.attrs.get("domain_a", "Domain A (Host Rock)")
+    )
     dom_b = domain_b_name or str(contact_df.attrs.get("domain_b", "Domain B (Deposit)"))
     b_type = str(contact_df.attrs.get("boundary_type", "Indeterminate"))
     step_val = contact_df.attrs.get("step_change", np.nan)
@@ -3766,7 +4020,12 @@ def plot_contact_profile(
             xy=(0.0, mid_y),
             xytext=(10.0, mid_y),
             arrowprops=dict(facecolor="black", shrink=0.08, width=1.5, headwidth=6),
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="#ffffcc", edgecolor="gray", alpha=0.9),
+            bbox=dict(
+                boxstyle="round,pad=0.4",
+                facecolor="#ffffcc",
+                edgecolor="gray",
+                alpha=0.9,
+            ),
             fontsize=9,
             fontweight="bold",
         )
@@ -3781,15 +4040,21 @@ def plot_contact_profile(
     if b_type == "Hard":
         badge_color = "#ffcccc"
         badge_edge = "#d62728"
-        badge_text = "DECISION: HARD BOUNDARY\n(Strict Segregation: No Cross-Boundary Samples)"
+        badge_text = (
+            "DECISION: HARD BOUNDARY\n(Strict Segregation: No Cross-Boundary Samples)"
+        )
     elif b_type == "Soft":
         badge_color = "#ccffcc"
         badge_edge = "#2ca02c"
-        badge_text = "DECISION: SOFT BOUNDARY\n(Free Sample Sharing Permitted Across Contact)"
+        badge_text = (
+            "DECISION: SOFT BOUNDARY\n(Free Sample Sharing Permitted Across Contact)"
+        )
     elif b_type == "Semi-Soft":
         badge_color = "#fff2cc"
         badge_edge = "#ff7f0e"
-        badge_text = "DECISION: SEMI-SOFT BOUNDARY\n(Restricted Buffer Sharing Recommended)"
+        badge_text = (
+            "DECISION: SEMI-SOFT BOUNDARY\n(Restricted Buffer Sharing Recommended)"
+        )
     else:
         badge_color = "#f0f0f0"
         badge_edge = "gray"
@@ -3803,7 +4068,12 @@ def plot_contact_profile(
         fontsize=9.0,
         fontweight="bold",
         verticalalignment="top",
-        bbox=dict(boxstyle="round,pad=0.5", facecolor=badge_color, edgecolor=badge_edge, linewidth=1.5),
+        bbox=dict(
+            boxstyle="round,pad=0.5",
+            facecolor=badge_color,
+            edgecolor=badge_edge,
+            linewidth=1.5,
+        ),
     )
 
     ax1.set_ylabel(f"Average Grade ({grade_unit})", fontsize=11, fontweight="bold")
@@ -3829,7 +4099,9 @@ def plot_contact_profile(
     )
     ax2.axvline(0.0, color="black", linestyle="--", linewidth=1.5)
     ax2.set_ylabel("Composites", fontsize=10, fontweight="bold")
-    ax2.set_xlabel("Signed Distance from Contact Surface (m)", fontsize=11, fontweight="bold")
+    ax2.set_xlabel(
+        "Signed Distance from Contact Surface (m)", fontsize=11, fontweight="bold"
+    )
     ax2.grid(True, linestyle=":", alpha=0.5)
 
     fig.tight_layout()
@@ -3893,6 +4165,7 @@ def reconcile_production_to_reserve(
         factors and component ratios. Attributes (.attrs) contain cumulative metrics
         and the value chain health diagnosis.
     """
+
     def _to_df(data: Union[pd.DataFrame, Dict[str, float]]) -> pd.DataFrame:
         if isinstance(data, dict):
             return pd.DataFrame([data])
@@ -3906,7 +4179,9 @@ def reconcile_production_to_reserve(
     # Handle period identifier
     if period_col is None or period_col not in df_res.columns:
         p_col = "period"
-        df_res[p_col] = [f"P{i+1}" if len(df_res) > 1 else "Total" for i in range(len(df_res))]
+        df_res[p_col] = [
+            f"P{i+1}" if len(df_res) > 1 else "Total" for i in range(len(df_res))
+        ]
         df_plant[p_col] = df_res[p_col].values
         if has_gc:
             df_gc[p_col] = df_res[p_col].values
@@ -3987,7 +4262,9 @@ def reconcile_production_to_reserve(
 
         tot_t_plant = float(res_df["plant_tonnes"].sum())
         tot_m_plant = float(res_df["plant_metal"].sum())
-        tot_g_plant = (tot_m_plant / tot_t_plant) * grade_scale if tot_t_plant > 0 else 0.0
+        tot_g_plant = (
+            (tot_m_plant / tot_t_plant) * grade_scale if tot_t_plant > 0 else 0.0
+        )
 
         tot_rec = {
             "period": "Total",
@@ -4100,20 +4377,60 @@ def plot_production_reconciliation(
     ax_t, ax_g = axes[0, 0], axes[0, 1]
     ax_m, ax_f = axes[1, 0], axes[1, 1]
 
-    col_res = "#1f77b4"   # Blue (Reserve Model)
-    col_gc = "#ff7f0e"    # Orange (Grade Control)
-    col_plant = "#2ca02c" # Green (Plant Feed)
+    col_res = "#1f77b4"  # Blue (Reserve Model)
+    col_gc = "#ff7f0e"  # Orange (Grade Control)
+    col_plant = "#2ca02c"  # Green (Plant Feed)
 
     # -------------------------------------------------------------------------
     # Panel 1: Ore Tonnage
     # -------------------------------------------------------------------------
     if has_gc:
-        ax_t.bar(x - width, plot_df["reserve_tonnes"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
-        ax_t.bar(x, plot_df["gc_tonnes"], width, label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85)
-        ax_t.bar(x + width, plot_df["plant_tonnes"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+        ax_t.bar(
+            x - width,
+            plot_df["reserve_tonnes"],
+            width,
+            label="Reserve Model",
+            color=col_res,
+            edgecolor="black",
+            alpha=0.85,
+        )
+        ax_t.bar(
+            x,
+            plot_df["gc_tonnes"],
+            width,
+            label="Grade Control",
+            color=col_gc,
+            edgecolor="black",
+            alpha=0.85,
+        )
+        ax_t.bar(
+            x + width,
+            plot_df["plant_tonnes"],
+            width,
+            label="Plant Feed",
+            color=col_plant,
+            edgecolor="black",
+            alpha=0.85,
+        )
     else:
-        ax_t.bar(x - width / 2, plot_df["reserve_tonnes"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
-        ax_t.bar(x + width / 2, plot_df["plant_tonnes"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+        ax_t.bar(
+            x - width / 2,
+            plot_df["reserve_tonnes"],
+            width,
+            label="Reserve Model",
+            color=col_res,
+            edgecolor="black",
+            alpha=0.85,
+        )
+        ax_t.bar(
+            x + width / 2,
+            plot_df["plant_tonnes"],
+            width,
+            label="Plant Feed",
+            color=col_plant,
+            edgecolor="black",
+            alpha=0.85,
+        )
 
     ax_t.set_ylabel(f"Ore Tonnage ({tonnage_unit})", fontsize=10, fontweight="bold")
     ax_t.set_title("Ore Tonnage Reconciliation", fontsize=11, fontweight="bold")
@@ -4126,12 +4443,52 @@ def plot_production_reconciliation(
     # Panel 2: Head Grade
     # -------------------------------------------------------------------------
     if has_gc:
-        ax_g.bar(x - width, plot_df["reserve_grade"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
-        ax_g.bar(x, plot_df["gc_grade"], width, label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85)
-        ax_g.bar(x + width, plot_df["plant_grade"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+        ax_g.bar(
+            x - width,
+            plot_df["reserve_grade"],
+            width,
+            label="Reserve Model",
+            color=col_res,
+            edgecolor="black",
+            alpha=0.85,
+        )
+        ax_g.bar(
+            x,
+            plot_df["gc_grade"],
+            width,
+            label="Grade Control",
+            color=col_gc,
+            edgecolor="black",
+            alpha=0.85,
+        )
+        ax_g.bar(
+            x + width,
+            plot_df["plant_grade"],
+            width,
+            label="Plant Feed",
+            color=col_plant,
+            edgecolor="black",
+            alpha=0.85,
+        )
     else:
-        ax_g.bar(x - width / 2, plot_df["reserve_grade"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
-        ax_g.bar(x + width / 2, plot_df["plant_grade"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+        ax_g.bar(
+            x - width / 2,
+            plot_df["reserve_grade"],
+            width,
+            label="Reserve Model",
+            color=col_res,
+            edgecolor="black",
+            alpha=0.85,
+        )
+        ax_g.bar(
+            x + width / 2,
+            plot_df["plant_grade"],
+            width,
+            label="Plant Feed",
+            color=col_plant,
+            edgecolor="black",
+            alpha=0.85,
+        )
 
     ax_g.set_ylabel(f"Head Grade ({grade_unit})", fontsize=10, fontweight="bold")
     ax_g.set_title("Head Grade Reconciliation", fontsize=11, fontweight="bold")
@@ -4144,12 +4501,52 @@ def plot_production_reconciliation(
     # Panel 3: Contained Metal
     # -------------------------------------------------------------------------
     if has_gc:
-        ax_m.bar(x - width, plot_df["reserve_metal"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
-        ax_m.bar(x, plot_df["gc_metal"], width, label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85)
-        ax_m.bar(x + width, plot_df["plant_metal"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+        ax_m.bar(
+            x - width,
+            plot_df["reserve_metal"],
+            width,
+            label="Reserve Model",
+            color=col_res,
+            edgecolor="black",
+            alpha=0.85,
+        )
+        ax_m.bar(
+            x,
+            plot_df["gc_metal"],
+            width,
+            label="Grade Control",
+            color=col_gc,
+            edgecolor="black",
+            alpha=0.85,
+        )
+        ax_m.bar(
+            x + width,
+            plot_df["plant_metal"],
+            width,
+            label="Plant Feed",
+            color=col_plant,
+            edgecolor="black",
+            alpha=0.85,
+        )
     else:
-        ax_m.bar(x - width / 2, plot_df["reserve_metal"], width, label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85)
-        ax_m.bar(x + width / 2, plot_df["plant_metal"], width, label="Plant Feed", color=col_plant, edgecolor="black", alpha=0.85)
+        ax_m.bar(
+            x - width / 2,
+            plot_df["reserve_metal"],
+            width,
+            label="Reserve Model",
+            color=col_res,
+            edgecolor="black",
+            alpha=0.85,
+        )
+        ax_m.bar(
+            x + width / 2,
+            plot_df["plant_metal"],
+            width,
+            label="Plant Feed",
+            color=col_plant,
+            edgecolor="black",
+            alpha=0.85,
+        )
 
     ax_m.set_ylabel(f"Contained Metal ({metal_unit})", fontsize=10, fontweight="bold")
     ax_m.set_title("Contained Metal Reconciliation", fontsize=11, fontweight="bold")
@@ -4167,24 +4564,71 @@ def plot_production_reconciliation(
 
     if n_p > 1:
         if has_gc:
-            ax_f.plot(x, plot_df["f1_metal_factor"], "-o", color=col_res, linewidth=2.0, markersize=6, label="F1 (Model → Mine)")
-            ax_f.plot(x, plot_df["f2_metal_factor"], "-s", color=col_gc, linewidth=2.0, markersize=6, label="F2 (Mine → Mill)")
-        ax_f.plot(x, plot_df["f3_metal_factor"], "-^", color=col_plant, linewidth=2.5, markersize=7, label="F3 (Total Value Chain)")
+            ax_f.plot(
+                x,
+                plot_df["f1_metal_factor"],
+                "-o",
+                color=col_res,
+                linewidth=2.0,
+                markersize=6,
+                label="F1 (Model → Mine)",
+            )
+            ax_f.plot(
+                x,
+                plot_df["f2_metal_factor"],
+                "-s",
+                color=col_gc,
+                linewidth=2.0,
+                markersize=6,
+                label="F2 (Mine → Mill)",
+            )
+        ax_f.plot(
+            x,
+            plot_df["f3_metal_factor"],
+            "-^",
+            color=col_plant,
+            linewidth=2.5,
+            markersize=7,
+            label="F3 (Total Value Chain)",
+        )
         ax_f.set_xticks(x)
         ax_f.set_xticklabels(periods, fontsize=9)
     else:
         # Single period bar representation
-        cats = ["F1 (Model→Mine)", "F2 (Mine→Mill)", "F3 (Total)"] if has_gc else ["F3 (Total)"]
-        vals = [float(plot_df["f1_metal_factor"].iloc[0]), float(plot_df["f2_metal_factor"].iloc[0]), float(plot_df["f3_metal_factor"].iloc[0])] if has_gc else [float(plot_df["f3_metal_factor"].iloc[0])]
+        cats = (
+            ["F1 (Model→Mine)", "F2 (Mine→Mill)", "F3 (Total)"]
+            if has_gc
+            else ["F3 (Total)"]
+        )
+        vals = (
+            [
+                float(plot_df["f1_metal_factor"].iloc[0]),
+                float(plot_df["f2_metal_factor"].iloc[0]),
+                float(plot_df["f3_metal_factor"].iloc[0]),
+            ]
+            if has_gc
+            else [float(plot_df["f3_metal_factor"].iloc[0])]
+        )
         bar_c = [col_res, col_gc, col_plant] if has_gc else [col_plant]
-        ax_f.bar(range(len(cats)), vals, width=0.45, color=bar_c, edgecolor="black", alpha=0.85)
+        ax_f.bar(
+            range(len(cats)),
+            vals,
+            width=0.45,
+            color=bar_c,
+            edgecolor="black",
+            alpha=0.85,
+        )
         ax_f.set_xticks(range(len(cats)))
         ax_f.set_xticklabels(cats, fontsize=9, fontweight="bold")
         for idx, v in enumerate(vals):
-            ax_f.text(idx, v + 0.02, f"{v:.3f}", ha="center", fontsize=9, fontweight="bold")
+            ax_f.text(
+                idx, v + 0.02, f"{v:.3f}", ha="center", fontsize=9, fontweight="bold"
+            )
 
     ax_f.set_ylabel("Reconciliation Factor (Ratio)", fontsize=10, fontweight="bold")
-    ax_f.set_title("Harry Parker F1, F2, F3 Performance Factors", fontsize=11, fontweight="bold")
+    ax_f.set_title(
+        "Harry Parker F1, F2, F3 Performance Factors", fontsize=11, fontweight="bold"
+    )
     ax_f.grid(True, linestyle=":", alpha=0.5)
     ax_f.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
 
@@ -4198,15 +4642,230 @@ def plot_production_reconciliation(
             transform=ax_f.transAxes,
             fontsize=8.5,
             fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="#ffffcc", edgecolor="gray", alpha=0.9),
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="#ffffcc",
+                edgecolor="gray",
+                alpha=0.9,
+            ),
         )
 
-    dashboard_title = title or "Mine-to-Mill Production Reconciliation Dashboard (Parker F-Factors)"
+    dashboard_title = (
+        title or "Mine-to-Mill Production Reconciliation Dashboard (Parker F-Factors)"
+    )
     fig.suptitle(dashboard_title, fontsize=12, fontweight="bold", y=0.995)
     fig.tight_layout()
     return fig, axes.flatten()
 
 
+# =============================================================================
+# GEOSTATISTICAL CONDITIONAL SIMULATION & UNCERTAINTY (E-TYPE & M-TYPE)
+# =============================================================================
 
 
+def sequential_gaussian_simulation(
+    samples_xy: np.ndarray,
+    sample_grades: np.ndarray,
+    grid_points: np.ndarray,
+    sill: float,
+    range_param: float,
+    n_realizations: int = 50,
+    variogram_model: str = "spherical",
+    nugget: float = 0.0,
+    seed: Optional[int] = None,
+) -> np.ndarray:
+    """Generates equiprobable conditional realizations via Sequential Gaussian Simulation (SGS).
 
+    Sequential Gaussian Simulation (Isaaks 1990; Deutsch & Journel 1998; SME Handbook)
+    models spatial uncertainty by generating multiple stochastic realizations that honor:
+    1. Conditioning sample values at drillhole locations.
+    2. The experimental univariate histogram (via normal-score transformation).
+    3. The spatial covariance / variogram structure (retaining short-range variance).
+
+    Unlike linear kriging, each realization reproduces the realistic spatial heterogeneity,
+    nugget variance, and extreme values of the deposit without artificial smoothing.
+
+    Parameters
+    ----------
+    samples_xy : np.ndarray
+        Array of shape (N, 2) with conditioning sample coordinates.
+    sample_grades : np.ndarray
+        Array of shape (N,) with conditioning assay grades.
+    grid_points : np.ndarray
+        Array of shape (M, 2) with target simulation grid coordinates.
+    sill : float
+        Variogram sill (C) in Gaussian space.
+    range_param : float
+        Variogram range (a).
+    n_realizations : int, default 50
+        Number of equiprobable stochastic realizations to generate.
+    variogram_model : str, default "spherical"
+        Spatial correlation structure ("spherical", "exponential", "gaussian").
+    nugget : float, default 0.0
+        Nugget variance (C0).
+    seed : int, optional
+        Random number generator seed for reproducible simulations.
+
+    Returns
+    -------
+    np.ndarray
+        Array of shape (M, n_realizations) containing the simulated realizations.
+    """
+    raise NotImplementedError(
+        "Sequential Gaussian Simulation (SGS) engine is planned. "
+        "Use compute_etype_mtype_maps() on pre-computed realization arrays."
+    )
+
+
+def compute_etype_mtype_maps(
+    realizations: np.ndarray,
+    cutoff_grade: Optional[float] = None,
+    percentiles: Tuple[float, float] = (10.0, 90.0),
+) -> pd.DataFrame:
+    """Computes E-Type (mean), M-Type (median), and spatial uncertainty metrics from realizations.
+
+    Definitions:
+    ------------
+    1. E-Type (Conditional Expectation):
+       e_type(x) = (1 / L) * sum_{l=1}^L Z^{(l)}(x)
+       Pointwise average across all realizations. In a multi-Gaussian framework,
+       the E-type map asymptotically converges to the Simple Kriging estimate.
+    2. M-Type (Conditional Median / P50):
+       m_type(x) = median({Z^{(1)}(x), ..., Z^{(L)}(x)})
+       Pointwise 50th percentile. More robust than E-type in highly skewed,
+       high-nugget deposits (e.g. epithermal gold) where extreme tail simulations
+       would otherwise distort the expectation.
+    3. Conditional Variance & Standard Deviation:
+       Quantifies local estimation uncertainty and risk at each grid point.
+    4. Probability of Exceedance:
+       P(Z(x) >= cutoff) = (1 / L) * sum_{l=1}^L I(Z^{(l)}(x) >= cutoff)
+       Evaluates the spatial probability that a block exceeds the economic cutoff grade.
+
+    Theoretical Limitations of E-Type Mapping:
+    -------------------------------------------
+    E-type maps are mathematically smoothed conditional expectations. Because averaging
+    suppresses spatial variance (Var(E-type) << Var(Realization)), E-type estimates:
+    - Underestimate high grades and overestimate low grades (re-introducing Kriging smoothing).
+    - Fail to reproduce extreme values and short-scale spatial variability (nugget effect).
+    - Fail to reproduce higher-order geological structures (e.g., connected high-permeability
+      channels or fault boundaries).
+    IMPORTANT: Non-linear transfer functions (such as pit optimization, flow modeling, or
+    mill blending simulations) must be evaluated individually on each realization and then
+    summarized, rather than evaluated once on the smoothed E-type map.
+
+    Parameters
+    ----------
+    realizations : np.ndarray
+        Array of shape (M, L) where M is the number of grid points and L is the
+        number of equiprobable realizations.
+    cutoff_grade : float, optional
+        Economic cut-off grade for calculating Probability of Exceedance P(Z >= cutoff).
+    percentiles : tuple of (float, float), default (10.0, 90.0)
+        Lower and upper percentiles for uncertainty confidence bounds.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns:
+        - "e_type": Conditional expectation (mean).
+        - "m_type": Conditional median (P50).
+        - "conditional_std": Local standard deviation (uncertainty).
+        - "conditional_var": Local variance.
+        - "p_lower": Lower confidence percentile (default P10).
+        - "p_upper": Upper confidence percentile (default P90).
+        - "prob_exceedance": P(Z >= cutoff) if cutoff_grade is provided.
+        Attributes (.attrs) contain the smoothing ratio and regulatory audit notes.
+    """
+    realizations = np.asarray(realizations, dtype=float)
+    if realizations.ndim != 2:
+        raise ValueError(
+            f"Expected a 2D array of shape (n_points, n_realizations), got {realizations.shape}."
+        )
+
+    n_pts, n_real = realizations.shape
+    if n_real < 2:
+        raise ValueError(
+            f"Need at least 2 realizations to compute statistics, got {n_real}."
+        )
+
+    p_low, p_high = percentiles
+    e_type = np.mean(realizations, axis=1)
+    m_type = np.median(realizations, axis=1)
+    cond_var = np.var(realizations, axis=1, ddof=1)
+    cond_std = np.sqrt(cond_var)
+    p_lower_vals = np.percentile(realizations, p_low, axis=1)
+    p_upper_vals = np.percentile(realizations, p_high, axis=1)
+
+    data = {
+        "e_type": e_type,
+        "m_type": m_type,
+        "conditional_std": cond_std,
+        "conditional_var": cond_var,
+        f"p{int(p_low)}": p_lower_vals,
+        f"p{int(p_high)}": p_upper_vals,
+    }
+
+    if cutoff_grade is not None:
+        data["prob_exceedance"] = np.mean(realizations >= cutoff_grade, axis=1)
+
+    df_out = pd.DataFrame(data)
+
+    # Calculate smoothing ratio: Var(E-type) / Mean(Var(Realization))
+    realization_variances = np.var(realizations, axis=0, ddof=1)
+    mean_real_var = (
+        float(np.mean(realization_variances)) if len(realization_variances) > 0 else 1.0
+    )
+    etype_var = float(np.var(e_type, ddof=1))
+    smoothing_ratio = etype_var / mean_real_var if mean_real_var > 0 else 1.0
+
+    df_out.attrs["smoothing_ratio"] = smoothing_ratio
+    df_out.attrs["n_realizations"] = n_real
+    df_out.attrs["n_points"] = n_pts
+    df_out.attrs["limitations_note"] = (
+        "E-type maps are smoothed conditional expectations. They fail to reproduce extreme "
+        "grades or short-range spatial variance. Non-linear processes (e.g. pit limits, "
+        "flow simulation) should be run directly on individual realizations."
+    )
+    return df_out
+
+
+def plot_simulation_realizations_dashboard(
+    realizations: np.ndarray,
+    grid_xy: np.ndarray,
+    cutoff_grade: Optional[float] = None,
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (14.0, 10.0),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Generates a 4-panel comparison dashboard of simulation realizations vs. E-type map.
+
+    Visualizes:
+    1. Realization 1 (showing full spatial variance, texture, and extreme values).
+    2. Realization 2 (an alternative equiprobable stochastic outcome).
+    3. E-Type Map (the smoothed conditional expectation).
+    4. Conditional Uncertainty / Probability of Exceedance Map.
+
+    Parameters
+    ----------
+    realizations : np.ndarray
+        Array of shape (M, L) with simulated realizations.
+    grid_xy : np.ndarray
+        Array of shape (M, 2) with spatial coordinates.
+    cutoff_grade : float, optional
+        Cut-off grade for probability of exceedance map.
+    grade_unit : str, default "% Cu"
+        Grade unit label.
+    title : str, optional
+        Dashboard title.
+    figsize : tuple of float, default (14.0, 10.0)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Figure and axes sequence.
+    """
+    raise NotImplementedError(
+        "Simulation realizations dashboard plotting stub. "
+        "Will visualize realizations vs. smoothed E-type map."
+    )

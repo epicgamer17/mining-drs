@@ -37,6 +37,12 @@ from drs_mining.components.estimation import (
     plot_contact_profile,
     reconcile_production_to_reserve,
     plot_production_reconciliation,
+    sequential_gaussian_simulation,
+    compute_etype_mtype_maps,
+    plot_simulation_realizations_dashboard,
+    create_block_model,
+    ordinary_kriging_block_estimation,
+    SearchNeighborhood,
     _theoretical_covariance,
 )
 
@@ -1168,6 +1174,96 @@ def test_plot_production_reconciliation():
     assert "Metal" in axes[2].get_title()
     assert "Parker" in axes[3].get_title()
     plt.close(fig)
+
+
+def test_compute_etype_mtype_maps_and_smoothing_ratio():
+    np.random.seed(42)
+    n_pts = 100
+    n_real = 30
+    # Simulate realizations with spatial fluctuations
+    realizations = np.random.normal(loc=1.20, scale=0.40, size=(n_pts, n_real))
+
+    df_maps = compute_etype_mtype_maps(realizations, cutoff_grade=1.00)
+
+    assert len(df_maps) == n_pts
+    assert "e_type" in df_maps.columns
+    assert "m_type" in df_maps.columns
+    assert "conditional_std" in df_maps.columns
+    assert "prob_exceedance" in df_maps.columns
+    assert "p10" in df_maps.columns
+    assert "p90" in df_maps.columns
+
+    # Verify E-type is arithmetic mean and M-type is median
+    assert np.allclose(df_maps["e_type"].to_numpy(), np.mean(realizations, axis=1))
+    assert np.allclose(df_maps["m_type"].to_numpy(), np.median(realizations, axis=1))
+
+    # Probability of exceedance above cutoff 1.00
+    expected_prob = np.mean(realizations >= 1.00, axis=1)
+    assert np.allclose(df_maps["prob_exceedance"].to_numpy(), expected_prob)
+
+    # Verify smoothing effect: Var(E-type) must be significantly lower than average realization variance
+    smoothing_ratio = df_maps.attrs["smoothing_ratio"]
+    assert smoothing_ratio < 0.50, f"Expected smoothing ratio < 0.50, got {smoothing_ratio}"
+    assert "limitations_note" in df_maps.attrs
+
+
+def test_simulation_stubs_raise_not_implemented():
+    with pytest.raises(NotImplementedError):
+        sequential_gaussian_simulation(
+            samples_xy=np.zeros((5, 2)),
+            sample_grades=np.ones(5),
+            grid_points=np.zeros((10, 2)),
+            sill=1.0,
+            range_param=100.0,
+        )
+
+    with pytest.raises(NotImplementedError):
+        plot_simulation_realizations_dashboard(
+            realizations=np.zeros((10, 5)),
+            grid_xy=np.zeros((10, 2)),
+        )
+
+
+def test_create_block_model_and_search_neighborhood():
+    # Test SearchNeighborhood dataclass
+    sn = SearchNeighborhood(
+        radius_major=100.0,
+        radius_semi=80.0,
+        radius_minor=30.0,
+        azimuth=45.0,
+        dip=-30.0,
+        max_per_hole=3,
+    )
+    assert sn.radius_major == 100.0
+    assert sn.max_per_hole == 3
+
+    # Test create_block_model
+    bm = create_block_model(
+        origin=(100.0, 200.0, 0.0),
+        block_size=(10.0, 10.0, 5.0),
+        n_blocks=(5, 4, 3),  # 5 * 4 * 3 = 60 blocks
+        default_density=2.70,
+        default_domain="Porphyry",
+    )
+    assert len(bm) == 60
+    assert set(bm.columns) >= {"x", "y", "z", "dx", "dy", "dz", "volume_m3", "density", "tonnes", "domain"}
+    assert np.isclose(bm["volume_m3"].iloc[0], 10.0 * 10.0 * 5.0)
+    assert np.isclose(bm["tonnes"].iloc[0], 500.0 * 2.70)
+    assert (bm["domain"] == "Porphyry").all()
+    assert bm["x"].min() == 105.0  # origin + 0.5 * dx
+    assert bm["z"].max() == 12.5   # 0 + 2.5 * 5.0
+
+    # Test ordinary_kriging_block_estimation stub raises NotImplementedError
+    with pytest.raises(NotImplementedError):
+        ordinary_kriging_block_estimation(
+            samples_xyz=np.zeros((5, 3)),
+            sample_grades=np.ones(5),
+            block_model=bm,
+            sill=1.0,
+            range_param=50.0,
+        )
+
+
 
 
 
