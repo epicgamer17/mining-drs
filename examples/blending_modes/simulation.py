@@ -20,7 +20,6 @@ from drs_mining.components import (
 from drs_mining.components.plot import (
     plot_single_face_dashboard,
     prepare_history,
-    print_deficit_by_mode,
     print_transition_log,
 )
 
@@ -422,7 +421,6 @@ def run_blending_simulation(
         history = telemetry.to_dataframe()
         history = prepare_history(history)
         print_transition_log(history)
-        print_deficit_by_mode(history, extraction_cols=["mine_face_reserve_cumulative_extracted_mass"])
         plot_single_face_dashboard(history)
 
     return result, history

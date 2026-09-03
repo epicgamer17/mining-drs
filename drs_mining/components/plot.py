@@ -9,7 +9,6 @@ from drs.plot import (
     _get_ax,
     apply_plot_style,
     plot_dual_axis_step,
-    plot_safety_margin,
     plot_time_series,
 )
 
@@ -220,324 +219,6 @@ def plot_normalized_deviation_violin(
     return ax
 
 
-def _resolve_extraction_series(df: pd.DataFrame, extraction_col: Any) -> pd.Series:
-    """Helper to safely extract step-by-step mined mass series from a dataframe."""
-    if isinstance(extraction_col, (list, tuple)):
-        valid = [c for c in extraction_col if c in df.columns]
-        if valid:
-            return df[valid].sum(axis=1).diff().shift(-1).fillna(0)
-    elif extraction_col in df.columns:
-        return df[extraction_col].diff().shift(-1).fillna(0)
-
-    for candidate in ["total_mined", "total_extracted_ore", "cumulative_extracted_mass", "cumulative_milled_mass"]:
-        if candidate in df.columns:
-            return df[candidate].diff().shift(-1).fillna(0)
-
-    candidates = [c for c in df.columns if "extracted_mass" in c or "mined" in c]
-    if candidates:
-        return df[candidates].sum(axis=1).diff().shift(-1).fillna(0)
-
-    return pd.Series(0.0, index=df.index)
-
-
-def plot_attributed_deficit(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass",
-                            ideal_rate_per_day=6000.0, title="Cumulative Production Deficit by Mode", ax=None, palette=None):
-    ax = _get_ax(ax, figsize=(12, 6))
-
-    dt = df[time_col].diff().shift(-1).fillna(0) if time_col in df.columns else df.get("day", pd.Series(0, index=df.index)).diff().shift(-1).fillna(0)
-    actual_extraction_step = _resolve_extraction_series(df, extraction_col)
-
-    ideal_extraction_step = dt * ideal_rate_per_day
-    step_deficit = ideal_extraction_step - actual_extraction_step
-
-    step_deficit = step_deficit.clip(lower=0)
-
-    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
-    time_col_name = time_col if time_col in df.columns else "day"
-
-    deficit_df = pd.DataFrame({
-        'time': df[time_col_name],
-        'mode': df[mode_col_name].astype(str),
-        'deficit': step_deficit
-    })
-
-    pivot_df = deficit_df.pivot_table(index='time', columns='mode', values='deficit', aggfunc='sum').fillna(0)
-
-    cumulative_pivot = pivot_df.cumsum()
-
-    cols = list(cumulative_pivot.columns)
-    shutdown_mode = next((c for c in cols if "SHUTDOWN" in str(c).upper()), None)
-    if shutdown_mode and shutdown_mode in cols:
-        cols.remove(shutdown_mode)
-        cols = [shutdown_mode] + cols
-
-    import matplotlib
-    cmap = matplotlib.colormaps["tab10"]
-    palette = palette or {}
-    colors = []
-    for idx, c in enumerate(cols):
-        clean_c = str(c).split('.')[-1].upper()
-        if clean_c in palette:
-            colors.append(palette[clean_c])
-        elif clean_c == "MODE_A_CONTINGENCY":
-            colors.append("gold")
-        elif clean_c == "MODE_B_CONTINGENCY":
-            colors.append("cyan")
-        elif clean_c == "SHUTDOWN":
-            colors.append("gray")
-        else:
-            colors.append(cmap(idx % 10))
-
-    cumulative_pivot[cols].plot.area(ax=ax, alpha=0.8, linewidth=0, color=colors)
-
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.set_xlabel("Simulation Time (Days)", fontsize=12)
-    ax.set_ylabel("Cumulative Lost Production (Tons)", fontsize=12)
-    ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
-
-    total_lost = cumulative_pivot.iloc[-1].sum() if not cumulative_pivot.empty else 0
-    ax.text(0.02, 0.95, f"Total Lost: {total_lost:,.0f} tons",
-            transform=ax.transAxes, fontsize=12, fontweight='bold',
-            ha='left', va='top', bbox=dict(facecolor='white', alpha=0.8))
-
-    handles, labels = ax.get_legend_handles_labels()
-    clean_labels = [str(l).split('.')[-1] for l in labels]
-    ax.legend(handles, clean_labels, loc='upper left')
-
-    return ax
-
-
-def plot_deficit_disparity(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate=6000.0, title="Mode Efficiency (Time Spent vs. Deficit Caused)", ax=None, verbose=True):
-    ax = _get_ax(ax, figsize=(10, 6))
-
-    df = df.copy()
-    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
-    time_col_name = time_col if time_col in df.columns else "day"
-    df[mode_col_name] = df[mode_col_name].astype(str)
-    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
-    df['dx'] = _resolve_extraction_series(df, extraction_col)
-
-    df['ideal_dx'] = df['dt'] * ideal_rate
-    df['deficit'] = (df['ideal_dx'] - df['dx']).clip(lower=0)
-
-    summary = df.groupby(mode_col_name).agg({'dt': 'sum', 'deficit': 'sum'})
-
-    summary['% of Total Time'] = (summary['dt'] / summary['dt'].sum()) * 100
-    summary['% of Total Deficit'] = (summary['deficit'] / summary['deficit'].sum()) * 100
-
-    if verbose:
-        print(f"\n--- {title} ---")
-        print(summary[['% of Total Time', '% of Total Deficit']].round(1).to_string())
-        print("-" * (8 + len(title)))
-
-    melted = summary[['% of Total Time', '% of Total Deficit']].reset_index().melt(
-        id_vars=mode_col_name, var_name="Metric", value_name="Percentage"
-    )
-
-    order = summary.sort_values('% of Total Deficit', ascending=False).index
-
-    sns.barplot(data=melted, y=mode_col_name, x="Percentage", hue="Metric", order=order, palette=["#1f77b4", "#d62728"], ax=ax)
-
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.set_xlabel("Percentage (%)", fontsize=12)
-    ax.set_ylabel("")
-    ax.xaxis.set_major_formatter(mtick.PercentFormatter(decimals=0))
-
-    return ax
-
-
-def plot_deficit_breakdown_bar(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate_per_day=6000.0, title="Final Deficit Breakdown by Mode (%)", ax=None, palette=None, verbose=True):
-    ax = _get_ax(ax, figsize=(10, 6))
-
-    df = df.copy()
-    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
-    time_col_name = time_col if time_col in df.columns else "day"
-    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
-    df['dx'] = _resolve_extraction_series(df, extraction_col)
-    df['deficit'] = ((df['dt'] * ideal_rate_per_day) - df['dx']).clip(lower=0)
-    df['mode_str'] = df[mode_col_name].astype(str).apply(lambda x: x.split('.')[-1])
-
-    summary = df.groupby('mode_str')['deficit'].sum()
-    summary = summary[summary > 0].sort_values(ascending=True)
-    total_deficit = summary.sum()
-
-    if total_deficit > 0:
-        summary_pct = (summary / total_deficit) * 100
-    else:
-        summary_pct = summary
-
-    if verbose:
-        print(f"\n--- {title} ---")
-        for mode in summary.index[::-1]:
-            print(f"{mode}: {summary[mode]:,.1f} t ({summary_pct[mode]:.1f}%)")
-        print(f"TOTAL LOST: {total_deficit:,.1f} t")
-        print("-" * (8 + len(title)))
-
-    palette = palette or {}
-    colors = [palette.get(m.upper(), "gray") for m in summary.index]
-
-    bars = ax.barh(summary.index, summary_pct.values, color=colors, edgecolor='black', alpha=0.8)
-
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.set_xlabel("% of Total Lost Tonnage", fontsize=12)
-    ax.set_xlim(0, max(summary_pct.max() * 1.15, 100))
-
-    for bar in bars:
-        width = bar.get_width()
-        ax.annotate(f'{width:.1f}%',
-                    xy=(width, bar.get_y() + bar.get_height() / 2),
-                    xytext=(5, 0),
-                    textcoords="offset points",
-                    ha='left', va='center', fontsize=11, fontweight='bold')
-
-    ax.text(0.95, 0.05, f"Total Lost: {total_deficit:,.0f} t",
-            transform=ax.transAxes, fontsize=12, fontweight='bold',
-            ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.8))
-
-    return ax
-
-
-def plot_structural_vs_operational_deficit(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate=6000.0, structural_modes=None, ax=None, verbose=True):
-    ax = _get_ax(ax, figsize=(10, 6))
-
-    df = df.copy()
-    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
-    time_col_name = time_col if time_col in df.columns else "day"
-    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
-    df['dx'] = _resolve_extraction_series(df, extraction_col)
-    df['deficit'] = ((df['dt'] * ideal_rate) - df['dx']).clip(lower=0)
-    df['mode_str'] = df[mode_col_name].astype(str)
-
-    structural_modes = structural_modes or []
-
-    def classify_bucket(mode):
-        if any(sm in mode for sm in structural_modes) and "CONTINGENCY" not in mode and "SURGING" not in mode:
-            return "Structural (Unavoidable: Geology & Shutdowns)"
-        else:
-            return "Operational (Avoidable: Control Logic & Contingencies)"
-
-    df['Deficit_Type'] = df['mode_str'].apply(classify_bucket)
-
-    pivot = df.pivot_table(index=time_col_name, columns='Deficit_Type', values='deficit', aggfunc='sum').fillna(0)
-    cumsum_pivot = pivot.cumsum()
-
-    if verbose:
-        title_str = "Structural vs. Operational Deficit"
-        print(f"\n--- {title_str} ---")
-        final_totals = cumsum_pivot.iloc[-1] if not cumsum_pivot.empty else {}
-        for deficit_type, val in final_totals.items():
-            print(f"{deficit_type}: {val:,.1f} t")
-        print("-" * (8 + len(title_str)))
-
-    cols = sorted(list(cumsum_pivot.columns), reverse=True)
-    cumsum_pivot[cols].plot.area(ax=ax, color=["gray", "firebrick"], alpha=0.7, linewidth=0)
-
-    ax.set_title("Structural vs. Operational Deficit", fontsize=14, pad=15)
-    ax.set_xlabel("Simulation Time (Days)", fontsize=12)
-    ax.set_ylabel("Cumulative Lost Tonnage", fontsize=12)
-    ax.legend(loc='upper left')
-
-    ax.text(0.5, 0.85, "RL Optimization Target:\nSquash the Red Layer to Zero",
-            transform=ax.transAxes, fontsize=12, color="firebrick", fontweight="bold",
-            ha="center", bbox=dict(facecolor='white', alpha=0.8, edgecolor='firebrick'))
-
-    return ax
-
-
-def plot_normalized_cumulative_deficit(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate_per_day=6000.0, title="Deficit Composition Over Time (100% Stacked)", ax=None, palette=None):
-    ax = _get_ax(ax, figsize=(12, 6))
-
-    df = df.copy()
-    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
-    time_col_name = time_col if time_col in df.columns else "day"
-    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
-    df['dx'] = _resolve_extraction_series(df, extraction_col)
-    df['deficit'] = ((df['dt'] * ideal_rate_per_day) - df['dx']).clip(lower=0)
-    df['mode_str'] = df[mode_col_name].astype(str).apply(lambda x: x.split('.')[-1])
-
-    pivot_df = df.pivot_table(index=time_col_name, columns='mode_str', values='deficit', aggfunc='sum').fillna(0)
-    cumulative_pivot = pivot_df.cumsum()
-
-    row_sums = cumulative_pivot.sum(axis=1)
-    normalized_pivot = cumulative_pivot.div(row_sums.replace(0, 1), axis=0) * 100
-
-    cols = list(normalized_pivot.columns)
-    if "SHUTDOWN" in cols:
-        cols.remove("SHUTDOWN")
-        cols = ["SHUTDOWN"] + cols
-
-    palette = palette or {}
-    colors = [palette.get(c.upper(), "gray") for c in cols]
-
-    normalized_pivot[cols].plot.area(ax=ax, alpha=0.8, linewidth=0, color=colors)
-
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.set_xlabel("Simulation Time (Days)", fontsize=12)
-    ax.set_ylabel("% of Total Cumulative Deficit", fontsize=12)
-    ax.set_ylim(0, 100)
-    ax.yaxis.set_major_formatter(mtick.PercentFormatter(decimals=0))
-    ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
-
-    return ax
-
-
-def plot_structural_vs_operational_by_mode(df, time_col="time", mode_col="active_operating_mode", extraction_col="cumulative_extracted_mass", ideal_rate=6000.0, title="Structural vs. Operational Deficit by Base Mode", structural_modes=None, base_mode_mapper=None, ax=None, verbose=True):
-    ax = _get_ax(ax, figsize=(10, 6))
-
-    df = df.copy()
-    mode_col_name = mode_col if mode_col in df.columns else ("active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode")
-    time_col_name = time_col if time_col in df.columns else "day"
-    df['dt'] = df[time_col_name].diff().shift(-1).fillna(0)
-    df['dx'] = _resolve_extraction_series(df, extraction_col)
-    df['deficit'] = ((df['dt'] * ideal_rate) - df['dx']).clip(lower=0)
-    df['mode_str'] = df[mode_col_name].astype(str).apply(lambda x: x.split('.')[-1])
-
-    structural_modes = structural_modes or []
-
-    def get_base_mode(m):
-        if base_mode_mapper:
-            return base_mode_mapper(m)
-        return m.split('_CONTINGENCY')[0].split('_MINE')[0]
-
-    def get_deficit_type(m):
-        if any(sm in m for sm in structural_modes) and "CONTINGENCY" not in m and "SURGING" not in m:
-            return "Structural (Unavoidable)"
-        return "Operational (Avoidable)"
-
-    df['Base_Mode'] = df['mode_str'].apply(get_base_mode)
-    df['Deficit_Type'] = df['mode_str'].apply(get_deficit_type)
-
-    summary = df.groupby(['Base_Mode', 'Deficit_Type'])['deficit'].sum().unstack(fill_value=0)
-
-    for col in ["Structural (Unavoidable)", "Operational (Avoidable)"]:
-        if col not in summary.columns:
-            summary[col] = 0
-
-    if verbose:
-        print(f"\n--- {title} ---")
-        print(summary.round(1).to_string())
-        print("-" * (8 + len(title)))
-
-    order = sorted(df['Base_Mode'].unique())
-    summary = summary.reindex(order).fillna(0)
-
-    col_order = ["Operational (Avoidable)", "Structural (Unavoidable)"]
-    summary = summary[[c for c in col_order if c in summary.columns]]
-
-    summary.plot(kind='bar', stacked=True, color=["firebrick", "gray"], ax=ax, alpha=0.85, edgecolor='black')
-
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.set_xlabel("")
-    ax.set_ylabel("Total Lost Tonnage", fontsize=12)
-    ax.tick_params(axis='x', rotation=0, labelsize=11)
-
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format(int(x), ',')))
-
-    ax.legend(title="Deficit Classification", loc="upper left")
-
-    return ax
-
-
 def plot_mode_distribution(
     df,
     mode_col="current_mode",
@@ -613,64 +294,6 @@ def plot_mode_distribution(
 
     return ax
 
-
-def plot_mode_dwell_times(
-    df,
-    time_col="time",
-    mode_col="current_mode",
-    title="Mode Stability (Dwell Times)",
-    ax=None,
-    verbose=True,
-):
-    df = df.copy()
-    df[mode_col] = df[mode_col].astype(str)
-
-    blocks = (df[mode_col] != df[mode_col].shift(1)).cumsum().rename("block")
-
-    df["dt"] = df[time_col].diff().shift(-1).fillna(0)
-
-    durations = df.groupby([blocks, mode_col])["dt"].sum().reset_index()
-    durations.columns = ["block", "mode", "duration"]
-
-    durations = durations[durations["duration"] > 0.01]
-
-    if verbose:
-        print(f"\n--- {title} ---")
-        dwell_summary = durations.groupby("mode")["duration"].agg(
-            ["count", "mean", "median", "max"]
-        )
-        print(dwell_summary.round(2).to_string())
-        print("-" * (8 + len(title)))
-
-    ax = _get_ax(ax, figsize=(10, 6))
-
-    sns.boxplot(
-        data=durations,
-        x="duration",
-        y="mode",
-        ax=ax,
-        palette="Set2",
-        hue="mode",
-        legend=False,
-    )
-    sns.stripplot(
-        data=durations, x="duration", y="mode", color="black", alpha=0.4, size=4, ax=ax
-    )
-
-    ax.set_title(title, fontsize=14, pad=15)
-    ax.set_xlabel("Duration Before Switch (Days)", fontsize=12)
-    ax.set_ylabel("")
-
-    ax.axvline(
-        x=2.0,
-        color="red",
-        linestyle="--",
-        alpha=0.5,
-        label="Chattering Threshold (<2 days)",
-    )
-    ax.legend(loc="lower right")
-
-    return ax
 
 
 def plot_truck_idle_and_utilization(
@@ -901,69 +524,20 @@ def print_transition_log(
     print("---------------------------\n")
 
 
-def print_deficit_by_mode(
-    df,
-    extraction_cols,
-    ideal_rate=6000.0,
-    heading="Cumulative Lost Production (Deficit) by Mode",
-):
-    """Print a per-mode cumulative production deficit table.
-
-    ``extraction_cols`` names the cumulative extraction columns to sum; the
-    single-face history uses ``["cumulative_extracted_mass"]`` while the
-    multi-face history uses ``["face1_extracted_mass", "face2_extracted_mass"]``.
-    """
-    dt = df["time"].diff().fillna(0) if "time" in df.columns else df.get("day", pd.Series(0, index=df.index)).diff().fillna(0)
-    valid_cols = [c for c in extraction_cols if c in df.columns]
-    if not valid_cols:
-        for candidate in ["total_mined", "total_extracted_ore", "cumulative_extracted_mass", "cumulative_milled_mass"]:
-            if candidate in df.columns:
-                valid_cols = [candidate]
-                break
-        if not valid_cols:
-            valid_cols = [c for c in df.columns if "extracted_mass" in c or "mined" in c]
-
-    if valid_cols:
-        actual_extraction_step = df[valid_cols].sum(axis=1).diff().fillna(0)
-    else:
-        actual_extraction_step = pd.Series(0.0, index=df.index)
-
-    ideal_extraction_step = dt * ideal_rate
-    step_deficit = (ideal_extraction_step - actual_extraction_step).clip(lower=0)
-
-    mode_col = "active_operating_mode_name" if "active_operating_mode_name" in df.columns else "mill_mode"
-    deficit_df = pd.DataFrame(
-        {"mode": df[mode_col], "deficit": step_deficit}
-    )
-
-    total_deficit_by_mode = (
-        deficit_df.groupby("mode")["deficit"].sum().sort_values(ascending=False)
-    )
-
-    print(f"\n--- {heading} ---")
-    total_lost = total_deficit_by_mode.sum()
-    for mode, lost in total_deficit_by_mode.items():
-        mode_name = str(mode).split(".")[-1]
-        pct = (lost / total_lost * 100) if total_lost > 0 else 0
-        print(f"{mode_name}: {lost:.1f} tons ({pct:.1f}%)")
-    print(f"TOTAL: {total_lost:.1f} tons")
-    print("----------------------------------------------------\n")
-
-
 def plot_single_face_dashboard(
     df,
     save_path="plots/Comprehensive_Diagnostics_Plot.png",
-    figsize=(18, 69),
+    figsize=(18, 25),
     title="Comprehensive Mine Diagnostics",
     palette=None,
 ):
-    """Build and save the 14-panel single-face diagnostics dashboard."""
+    """Build and save the 5-panel single-face diagnostics dashboard."""
     palette = palette or MODE_PALETTE
 
     dash = Dashboard(
-        nrows=14, ncols=1, figsize=figsize, sharex=False, title=title
+        nrows=5, ncols=1, figsize=figsize, sharex=False, title=title
     )
-    dash.link_xaxes([0, 1, 2, 3, 4, 8, 11, 12])
+    dash.link_xaxes([0, 1, 2])
 
     plot_time_series(
         df,
@@ -1013,38 +587,13 @@ def plot_single_face_dashboard(
         title="Current Parcel Properties",
         ax=dash[2],
     )
-    plot_safety_margin(
-        df,
-        level_col="Ore1Stock_mass",
-        constraint_value=0.0,
-        constraint_type="lower",
-        title="Safety Margin: Ore 1 Distance to Floor",
-        danger_threshold=1000.0,
-        ax=dash[3],
-    )
-    plot_safety_margin(
-        df,
-        level_col="Ore2Stock_mass",
-        constraint_value=0.0,
-        constraint_type="lower",
-        title="Safety Margin: Ore 2 Distance to Floor",
-        danger_threshold=1000.0,
-        ax=dash[4],
-    )
     plot_mode_distribution(
         df,
         mode_col="active_operating_mode_name",
         time_col="time",
         title="Mode Distribution (% of Time Spent)",
         palette=palette,
-        ax=dash[5],
-    )
-    plot_mode_dwell_times(
-        df,
-        time_col="time",
-        mode_col="active_operating_mode_name",
-        title="Mode Stability (Dwell Times)",
-        ax=dash[6],
+        ax=dash[3],
     )
     plot_normalized_deviation_violin(
         df,
@@ -1052,52 +601,7 @@ def plot_single_face_dashboard(
         target_total=60000.0,
         target_ore1=42000.0,
         target_ore2=18000.0,
-        ax=dash[7],
-    )
-    plot_attributed_deficit(
-        df,
-        time_col="time",
-        mode_col="active_operating_mode_name",
-        extraction_col="cumulative_extracted_mass",
-        ideal_rate_per_day=6000.0,
-        title="Cumulative Production Deficit by Mode",
-        palette=palette,
-        ax=dash[8],
-    )
-    plot_deficit_disparity(
-        df,
-        mode_col="active_operating_mode_name",
-        title="Mode Efficiency (Time Spent vs. Deficit Caused)",
-        ideal_rate=6000.0,
-        ax=dash[9],
-    )
-    plot_deficit_breakdown_bar(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate_per_day=6000.0,
-        palette=palette,
-        ax=dash[10],
-    )
-    plot_structural_vs_operational_deficit(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate=6000.0,
-        structural_modes=STRUCTURAL_MODES,
-        ax=dash[11],
-    )
-    plot_normalized_cumulative_deficit(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate_per_day=6000.0,
-        palette=palette,
-        ax=dash[12],
-    )
-    plot_structural_vs_operational_by_mode(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate=6000.0,
-        structural_modes=STRUCTURAL_MODES,
-        ax=dash[13],
+        ax=dash[4],
     )
 
     dash.save(save_path)

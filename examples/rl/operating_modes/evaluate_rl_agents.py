@@ -614,20 +614,12 @@ def generate_rl_dashboard(
     from drs.plot import (
         plot_time_series,
         plot_dual_axis_step,
-        plot_safety_margin,
         Dashboard,
     )
     from drs_mining.components.plot import (
         plot_ore_with_modes,
         plot_mode_distribution,
-        plot_mode_dwell_times,
         plot_normalized_deviation_violin,
-        plot_attributed_deficit,
-        plot_deficit_disparity,
-        plot_deficit_breakdown_bar,
-        plot_structural_vs_operational_deficit,
-        plot_normalized_cumulative_deficit,
-        plot_structural_vs_operational_by_mode,
     )
 
     palette = {
@@ -640,12 +632,10 @@ def generate_rl_dashboard(
         "SHUTDOWN": "#FFD700",
     }
 
-    structural_modes = ["SHUTDOWN", "MODE_A"]
-
     dash = Dashboard(
-        nrows=14, ncols=1, figsize=(18, 69), sharex=False, title=f"Comprehensive Diagnostics ({model_name})"
+        nrows=5, ncols=1, figsize=(18, 25), sharex=False, title=f"Comprehensive Diagnostics ({model_name})"
     )
-    dash.link_xaxes([0, 1, 2, 3, 4, 8, 11, 12])
+    dash.link_xaxes([0, 1, 2])
 
     plot_time_series(
         df,
@@ -695,38 +685,13 @@ def generate_rl_dashboard(
         title="Current Parcel Properties",
         ax=dash[2],
     )
-    plot_safety_margin(
-        df,
-        level_col="Ore1Stock_mass",
-        constraint_value=0.0,
-        constraint_type="lower",
-        title="Safety Margin: Ore 1 Distance to Floor",
-        danger_threshold=1000.0,
-        ax=dash[3],
-    )
-    plot_safety_margin(
-        df,
-        level_col="Ore2Stock_mass",
-        constraint_value=0.0,
-        constraint_type="lower",
-        title="Safety Margin: Ore 2 Distance to Floor",
-        danger_threshold=1000.0,
-        ax=dash[4],
-    )
     plot_mode_distribution(
         df,
         mode_col="active_operating_mode_name",
         time_col="time",
         title="Mode Distribution (% of Time Spent)",
         palette=palette,
-        ax=dash[5],
-    )
-    plot_mode_dwell_times(
-        df,
-        time_col="time",
-        mode_col="active_operating_mode_name",
-        title="Mode Stability (Dwell Times)",
-        ax=dash[6],
+        ax=dash[3],
     )
     plot_normalized_deviation_violin(
         df,
@@ -734,52 +699,7 @@ def generate_rl_dashboard(
         target_total=60000.0,
         target_ore1=42000.0,
         target_ore2=18000.0,
-        ax=dash[7],
-    )
-    plot_attributed_deficit(
-        df,
-        time_col="time",
-        mode_col="active_operating_mode_name",
-        extraction_col="cumulative_extracted_mass",
-        ideal_rate_per_day=6000.0,
-        title="Cumulative Production Deficit by Mode",
-        palette=palette,
-        ax=dash[8],
-    )
-    plot_deficit_disparity(
-        df,
-        mode_col="active_operating_mode_name",
-        title="Mode Efficiency (Time Spent vs. Deficit Caused)",
-        ideal_rate=6000.0,
-        ax=dash[9],
-    )
-    plot_deficit_breakdown_bar(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate_per_day=6000.0,
-        palette=palette,
-        ax=dash[10],
-    )
-    plot_structural_vs_operational_deficit(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate=6000.0,
-        structural_modes=structural_modes,
-        ax=dash[11],
-    )
-    plot_normalized_cumulative_deficit(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate_per_day=6000.0,
-        palette=palette,
-        ax=dash[12],
-    )
-    plot_structural_vs_operational_by_mode(
-        df,
-        mode_col="active_operating_mode_name",
-        ideal_rate=6000.0,
-        structural_modes=structural_modes,
-        ax=dash[13],
+        ax=dash[4],
     )
 
     out_name = f"plots/Comprehensive_Diagnostics_Plot_{model_name}.png"
