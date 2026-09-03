@@ -15,6 +15,7 @@ from .components import (
     is_within_convex_hull,
     simple_kriging_grid_estimation,
     ordinary_kriging_grid_estimation,
+    plot_grade_tonnage_curve,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "is_within_convex_hull",
     "simple_kriging_grid_estimation",
     "ordinary_kriging_grid_estimation",
+    "plot_grade_tonnage_curve",
 ]

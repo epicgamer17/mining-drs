@@ -7,7 +7,7 @@ of influence), global reserve calculations, cutoff-grade sensitivity analysis
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon as MplPolygon
 from matplotlib.collections import PatchCollection
@@ -918,3 +918,157 @@ def ordinary_kriging_grid_estimation(
         variances[~inside_hull] = np.nan
 
     return estimates, variances
+
+
+def plot_grade_tonnage_curve(
+    gt_data: Union[pd.DataFrame, Mapping[str, pd.DataFrame]],
+    grade_unit: str = "% Cu",
+    tonnage_unit: str = "Mt",
+    title: str = "Grade–Tonnage Sensitivity Curve",
+    ax: Optional[plt.Axes] = None,
+    figsize: Tuple[float, float] = (8.5, 5.0),
+    show_metal: bool = False,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Plots standard dual-axis or comparative Grade–Tonnage sensitivity curves.
+
+    Conforms to NI 43-101 (Item 14) and JORC Table 1 mineral reporting standards:
+    - Primary Y-axis (left): Ore Tonnage above cutoff (monotonically decreasing).
+    - Secondary Y-axis (right): Average Grade above cutoff (monotonically increasing).
+    - If a dictionary of tables is provided, overlays models (e.g. NN vs IDW vs OK)
+      to visually audit volume-variance smoothing and cutoff sensitivity.
+
+    Parameters
+    ----------
+    gt_data : pd.DataFrame or Mapping[str, pd.DataFrame]
+        Output of `grade_tonnage_table` with cutoff index, or a dictionary mapping
+        model names to their respective grade-tonnage DataFrames.
+    grade_unit : str, default "% Cu"
+        Unit label for cutoff and average grades.
+    tonnage_unit : str, default "Mt"
+        Unit for ore tonnage: "Mt" (1e6 tonnes), "kt" (1e3 tonnes), or "tonnes" (1:1).
+    title : str, default "Grade–Tonnage Sensitivity Curve"
+        Plot title.
+    ax : plt.Axes, optional
+        Primary Matplotlib Axes for the plot. If None, a new figure is created.
+    figsize : Tuple[float, float], default (8.5, 5.0)
+        Figure dimensions if created.
+    show_metal : bool, default False
+        If True and a single table is provided, plots metal recovery percentage.
+
+    Returns
+    -------
+    Tuple[plt.Figure, plt.Axes]
+        The Matplotlib Figure and primary Axes.
+    """
+    unit_divisors = {"mt": 1e6, "kt": 1e3, "tonnes": 1.0, "t": 1.0}
+    t_divisor = unit_divisors.get(tonnage_unit.lower(), 1.0)
+
+    if ax is None:
+        fig, ax1 = plt.subplots(figsize=figsize)
+    else:
+        ax1 = ax
+        fig = ax1.figure
+
+    ax2 = ax1.twinx()
+
+    # Case A: Single Model Dual-Axis Plot
+    if isinstance(gt_data, pd.DataFrame):
+        cutoffs = np.asarray(gt_data.index, dtype=float)
+        tonnes = gt_data["ore_tonnes"].to_numpy() / t_divisor
+        grades = gt_data["ore_grade"].to_numpy()
+
+        line1 = ax1.plot(
+            cutoffs,
+            tonnes,
+            color="#1f77b4",
+            linewidth=2.5,
+            marker="o",
+            markersize=5,
+            label=f"Ore Tonnage ({tonnage_unit})",
+        )
+        line2 = ax2.plot(
+            cutoffs,
+            grades,
+            color="#d62728",
+            linewidth=2.5,
+            marker="s",
+            markersize=5,
+            label=f"Average Grade ({grade_unit})",
+        )
+
+        lines = line1 + line2
+        labels = [l.get_label() for l in lines]
+
+        if show_metal and "metal_recovery_pct" in gt_data.columns:
+            metal_rec = gt_data["metal_recovery_pct"].to_numpy()
+            line3 = ax1.plot(
+                cutoffs,
+                metal_rec * (tonnes.max() / 100.0) if tonnes.max() > 0 else metal_rec,
+                color="#2ca02c",
+                linewidth=1.8,
+                linestyle="--",
+                label="Metal Recovery (%)",
+            )
+            lines += line3
+            labels.append("Metal Recovery (%)")
+
+        ax1.set_xlabel(f"Cutoff Grade ({grade_unit})", fontsize=11, fontweight="bold")
+        ax1.set_ylabel(f"Ore Tonnage ({tonnage_unit})", fontsize=11, fontweight="bold", color="#1f77b4")
+        ax2.set_ylabel(f"Average Ore Grade ({grade_unit})", fontsize=11, fontweight="bold", color="#d62728")
+        ax1.tick_params(axis="y", labelcolor="#1f77b4")
+        ax2.tick_params(axis="y", labelcolor="#d62728")
+        ax1.grid(True, linestyle=":", alpha=0.6)
+        ax1.legend(lines, labels, loc="center left", framealpha=0.9)
+
+    # Case B: Multi-Model Audit Plot
+    else:
+        colors = plt.cm.tab10.colors
+        lines_tonnage = []
+        lines_grade = []
+        labels_tonnage = []
+        labels_grade = []
+
+        for idx, (model_name, df_m) in enumerate(gt_data.items()):
+            color = colors[idx % len(colors)]
+            cutoffs = np.asarray(df_m.index, dtype=float)
+            tonnes = df_m["ore_tonnes"].to_numpy() / t_divisor
+            grades = df_m["ore_grade"].to_numpy()
+
+            l1 = ax1.plot(
+                cutoffs,
+                tonnes,
+                color=color,
+                linewidth=2.2,
+                linestyle="-",
+                marker="o",
+                markersize=4,
+                label=f"{model_name} Tonnage",
+            )
+            l2 = ax2.plot(
+                cutoffs,
+                grades,
+                color=color,
+                linewidth=2.0,
+                linestyle="--",
+                marker="s",
+                markersize=4,
+                label=f"{model_name} Grade",
+            )
+            lines_tonnage.append(l1[0])
+            labels_tonnage.append(f"{model_name} Tonnage")
+            lines_grade.append(l2[0])
+            labels_grade.append(f"{model_name} Grade")
+
+        ax1.set_xlabel(f"Cutoff Grade ({grade_unit})", fontsize=11, fontweight="bold")
+        ax1.set_ylabel(f"Ore Tonnage ({tonnage_unit}) [Solid]", fontsize=11, fontweight="bold")
+        ax2.set_ylabel(f"Average Grade ({grade_unit}) [Dashed]", fontsize=11, fontweight="bold")
+        ax1.grid(True, linestyle=":", alpha=0.6)
+
+        # Unified legend for model comparisons
+        all_lines = lines_tonnage + lines_grade
+        all_labels = labels_tonnage + labels_grade
+        ax1.legend(all_lines, all_labels, loc="center right", fontsize=8.5, framealpha=0.9)
+
+    ax1.set_title(title, fontsize=12, fontweight="bold", pad=12)
+    fig.tight_layout()
+    return fig, ax1

@@ -23,6 +23,7 @@ from drs_mining.components.estimation import (
     format_reserve_summary,
     grade_tonnage_table,
     plot_polygonal_map,
+    plot_grade_tonnage_curve,
 )
 
 
@@ -146,21 +147,35 @@ def main():
     gt_display["metal_recovery_pct"] = gt_display["metal_recovery_pct"].map(lambda x: f"{x:.1f}%")
     print(gt_display.to_string())
 
-    # 6. Spatial visualization
+    # 6. Spatial visualization & Grade-Tonnage Curve
     if not args.no_plot:
         Path(args.save_plot).parent.mkdir(parents=True, exist_ok=True)
-        fig, ax = plt.subplots(figsize=(10, 8))
+        fig, (ax_map, ax_gt) = plt.subplots(1, 2, figsize=(18, 7))
+
+        # Panel 1: Plan Map
         plot_polygonal_map(
             polygons_df,
             boundary=boundary,
-            title=f"Polygonal Estimation (Porphyry Bench - max_radius={args.max_radius})",
+            title=f"Polygonal Reserves (max_radius={args.max_radius})",
             cmap="viridis",
-            ax=ax,
+            ax=ax_map,
         )
+
+        # Panel 2: Standard Dual-Axis Grade-Tonnage Curve (NI 43-101)
+        plot_grade_tonnage_curve(
+            gt_curve,
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            title="Grade–Tonnage Sensitivity Curve",
+            ax=ax_gt,
+            show_metal=True,
+        )
+
+        fig.suptitle("Executive Polygonal Mineral Resource Report", fontsize=15, fontweight="bold")
         fig.tight_layout()
-        fig.savefig(args.save_plot, dpi=150)
+        fig.savefig(args.save_plot, dpi=180, bbox_inches="tight")
         plt.close(fig)
-        print(f"\nSpatial 2D plan map saved to: {args.save_plot}")
+        print(f"\nExecutive report figure saved to: {args.save_plot}")
 
 
 if __name__ == "__main__":

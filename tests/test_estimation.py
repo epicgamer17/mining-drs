@@ -16,6 +16,7 @@ from drs_mining.components.estimation import (
     is_within_convex_hull,
     simple_kriging_grid_estimation,
     ordinary_kriging_grid_estimation,
+    plot_grade_tonnage_curve,
     _theoretical_covariance,
 )
 
@@ -379,6 +380,45 @@ def test_ordinary_kriging_max_radius_and_mask_extrapolation():
     assert np.isnan(est_masked[2])
 
 
+def test_plot_grade_tonnage_curve_single_table():
+    df = pd.DataFrame({
+        "grade": [0.5, 0.8, 1.2, 1.5, 2.0],
+        "tonnes": [10000.0, 10000.0, 10000.0, 10000.0, 10000.0],
+    })
+    gt = grade_tonnage_table(df, cutoffs=[0.0, 0.5, 1.0, 1.5])
+
+    fig, ax = plot_grade_tonnage_curve(
+        gt,
+        grade_unit="% Cu",
+        tonnage_unit="kt",
+        title="Test Single Curve",
+        show_metal=True,
+    )
+    assert isinstance(fig, plt.Figure)
+    assert isinstance(ax, plt.Axes)
+    plt.close(fig)
 
 
+def test_plot_grade_tonnage_curve_multi_model():
+    df1 = pd.DataFrame({
+        "grade": [0.5, 0.8, 1.2, 1.5],
+        "tonnes": [10000.0, 10000.0, 10000.0, 10000.0],
+    })
+    df2 = pd.DataFrame({
+        "grade": [0.6, 0.9, 1.1, 1.4],
+        "tonnes": [10000.0, 10000.0, 10000.0, 10000.0],
+    })
+    gt1 = grade_tonnage_table(df1, cutoffs=[0.0, 0.5, 1.0])
+    gt2 = grade_tonnage_table(df2, cutoffs=[0.0, 0.5, 1.0])
 
+    model_dict = {"Model A": gt1, "Model B": gt2}
+
+    fig, ax = plot_grade_tonnage_curve(
+        model_dict,
+        grade_unit="% Cu",
+        tonnage_unit="Mt",
+        title="Comparative Audit",
+    )
+    assert isinstance(fig, plt.Figure)
+    assert isinstance(ax, plt.Axes)
+    plt.close(fig)

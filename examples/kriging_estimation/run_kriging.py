@@ -30,6 +30,7 @@ from drs_mining.components.estimation import (
     inverse_distance_weighting,
     is_within_convex_hull,
     grade_tonnage_table,
+    plot_grade_tonnage_curve,
 )
 
 
@@ -269,16 +270,18 @@ def main():
         })
     print(pd.DataFrame(stats_rows).to_string(index=False))
 
-    # 8. Grade-Tonnage Sensitivity for Ordinary Kriging
-    block_df = pd.DataFrame({
-        "grade": ok_grades[~np.isnan(ok_grades)],
-        "tonnes": block_tonnes,
-    })
+    # 8. Grade-Tonnage Sensitivity for All Models (Model Audit)
     cutoffs = [0.0, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5]
-    gt_table = grade_tonnage_table(block_df, cutoffs=cutoffs)
+    gt_models = {}
+    for name, (g, _) in models.items():
+        block_df = pd.DataFrame({
+            "grade": g[~np.isnan(g)],
+            "tonnes": block_tonnes,
+        })
+        gt_models[name] = grade_tonnage_table(block_df, cutoffs=cutoffs)
 
     print("\n--- Ordinary Kriging Grade–Tonnage Sensitivity Curve ---")
-    gt_disp = gt_table.copy()
+    gt_disp = gt_models["Ordinary Kriging (OK)"].copy()
     gt_disp["ore_tonnes"] = gt_disp["ore_tonnes"].map(lambda x: f"{x:,.0f}")
     gt_disp["ore_grade"] = gt_disp["ore_grade"].map(lambda x: f"{x:.3f}%")
     gt_disp["waste_tonnes"] = gt_disp["waste_tonnes"].map(lambda x: f"{x:,.0f}")
@@ -287,12 +290,12 @@ def main():
     gt_disp["metal_recovery_pct"] = gt_disp["metal_recovery_pct"].map(lambda x: f"{x:.1f}%")
     print(gt_disp[["ore_tonnes", "ore_grade", "waste_tonnes", "strip_ratio", "ore_recovery_pct", "metal_recovery_pct"]].to_string())
 
-    # 9. Spatial Visualization
+    # 9. Spatial Visualization & Grade-Tonnage Executive Dashboard (2x3 Layout)
     if not args.no_plot:
         Path(args.save_plot).parent.mkdir(parents=True, exist_ok=True)
         xx, yy, inside_mask = grid_info
 
-        fig, axes = plt.subplots(1, 4, figsize=(24, 6), sharey=True)
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
         v_min, v_max = float(sample_grades.min()), float(sample_grades.max())
 
         b_poly = np.array(list(boundary) + [boundary[0]])
@@ -301,14 +304,16 @@ def main():
         hull = ConvexHull(samples_xy)
         hull_pts = np.vstack([samples_xy[hull.vertices], samples_xy[hull.vertices[0]]])
 
-        plot_configs = [
-            ("Ordinary Kriging (OK)", ok_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
-            ("OK Estimation Variance", ok_variances, "magma", 0.0, float(args.nugget + args.sill), "Variance (σ²)"),
-            ("Simple Kriging (SK)", sk_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
-            ("OK (Strict Interpolation)", ok_strict_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
+        # Grid of 5 spatial subplots + 1 Grade-Tonnage plot
+        spatial_configs = [
+            (axes[0, 0], "Ordinary Kriging (OK)", ok_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
+            (axes[0, 1], "Simple Kriging (SK)", sk_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
+            (axes[0, 2], "Inverse Distance Squared (IDW²)", idw_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
+            (axes[1, 0], "OK Estimation Variance (σ²)", ok_variances, "magma", 0.0, float(args.nugget + args.sill), "Variance (σ²)"),
+            (axes[1, 1], "OK (Strict Interpolation)", ok_strict_grades, "viridis", v_min, v_max, "Grade (% Cu)"),
         ]
 
-        for ax, (title, values, cmap, c_min, c_max, label) in zip(axes, plot_configs):
+        for ax, title, values, cmap, c_min, c_max, label in spatial_configs:
             img_flat = np.full(xx.size, np.nan)
             img_flat[inside_mask] = values
             img_grid = img_flat.reshape(xx.shape)
@@ -337,7 +342,7 @@ def main():
             )
 
             # Overlay drillhole collars
-            sc = ax.scatter(
+            ax.scatter(
                 samples_xy[:, 0],
                 samples_xy[:, 1],
                 c=sample_grades,
@@ -346,31 +351,52 @@ def main():
                 vmax=v_max,
                 edgecolors="white",
                 linewidth=1.2,
-                s=70,
+                s=55,
                 zorder=5,
                 label="Drillhole Collars",
             )
 
             ax.set_title(title, fontsize=12, fontweight="bold")
             ax.set_xlabel("Easting (m)", fontsize=10)
+            ax.set_ylabel("Northing (m)", fontsize=10)
             ax.grid(True, linestyle=":", alpha=0.5)
 
             cbar = fig.colorbar(im, ax=ax, orientation="horizontal", pad=0.10, shrink=0.8)
             cbar.set_label(label, fontsize=9)
 
-        axes[0].set_ylabel("Northing (m)", fontsize=10)
-        axes[0].legend(loc="upper left", fontsize=8)
+        axes[0, 0].legend(loc="upper left", fontsize=8)
+
+        # 6th Subplot: Comparative Grade-Tonnage Curves (Model Audit)
+        plot_grade_tonnage_curve(
+            gt_models,
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            title="Model Smoothing Audit (Grade–Tonnage)",
+            ax=axes[1, 2],
+        )
 
         plt.suptitle(
-            f"Geostatistical Kriging Comparison: Grade Estimates vs. Spatial Uncertainty (Variance)\n"
+            f"Geostatistical Resource Evaluation Dashboard: Estimators vs. Spatial Uncertainty (Variance)\n"
             f"Variogram: {args.variogram.title()} (c0={args.nugget:.2f}, c={args.sill:.2f}, a={args.range:.0f}m)",
             fontsize=14,
             fontweight="bold",
         )
         plt.tight_layout()
-        plt.savefig(args.save_plot, dpi=200, bbox_inches="tight")
-        plt.close()
-        print(f"\nComparison figure saved to: {args.save_plot}")
+        plt.savefig(args.save_plot, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        print(f"\nExecutive comparison dashboard saved to: {args.save_plot}")
+
+        # Also save dedicated high-resolution Grade-Tonnage audit figure
+        gt_plot_path = str(Path(args.save_plot).parent / "kriging_grade_tonnage_curves.png")
+        fig_gt, ax_gt = plot_grade_tonnage_curve(
+            gt_models,
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            title="Geostatistical Model Audit: OK vs. SK vs. IDW² Grade–Tonnage Curves",
+        )
+        fig_gt.savefig(gt_plot_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_gt)
+        print(f"Comparative Grade-Tonnage curve saved to: {gt_plot_path}")
 
     print("\n" + "=" * 70)
     print("                    ESTIMATION RUN COMPLETE")

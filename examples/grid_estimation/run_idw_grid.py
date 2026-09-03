@@ -28,6 +28,7 @@ from drs_mining.components.estimation import (
     nearest_neighbor_grid_estimation,
     is_within_convex_hull,
     grade_tonnage_table,
+    plot_grade_tonnage_curve,
 )
 
 
@@ -195,16 +196,18 @@ def main():
         })
     print(pd.DataFrame(stats_rows).to_string(index=False))
 
-    # 8. Cutoff Grade-Tonnage Sensitivity for IDW² (Standard)
-    block_df = pd.DataFrame({
-        "grade": idw2_grades[~np.isnan(idw2_grades)],
-        "tonnes": block_tonnes,
-    })
+    # 8. Cutoff Grade-Tonnage Sensitivity for All Models (Model Audit)
     cutoffs = [0.0, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5]
-    gt_table = grade_tonnage_table(block_df, cutoffs=cutoffs)
+    gt_models = {}
+    for name, g in models.items():
+        block_df = pd.DataFrame({
+            "grade": g[~np.isnan(g)],
+            "tonnes": block_tonnes,
+        })
+        gt_models[name] = grade_tonnage_table(block_df, cutoffs=cutoffs)
 
     print("\n--- IDW² Grade–Tonnage Sensitivity Curve ---")
-    gt_disp = gt_table.copy()
+    gt_disp = gt_models["IDW² (Full Extrapolation)"].copy()
     gt_disp["ore_tonnes"] = gt_disp["ore_tonnes"].map(lambda x: f"{x:,.0f}")
     gt_disp["ore_grade"] = gt_disp["ore_grade"].map(lambda x: f"{x:.3f}%")
     gt_disp["waste_tonnes"] = gt_disp["waste_tonnes"].map(lambda x: f"{x:,.0f}")
@@ -213,7 +216,7 @@ def main():
     gt_disp["metal_recovery_pct"] = gt_disp["metal_recovery_pct"].map(lambda x: f"{x:.1f}%")
     print(gt_disp[["ore_tonnes", "ore_grade", "waste_tonnes", "strip_ratio", "ore_recovery_pct", "metal_recovery_pct"]].to_string())
 
-    # 9. Spatial Visualization
+    # 9. Spatial Visualization & Comparative Grade-Tonnage Chart
     if not args.no_plot:
         Path(args.save_plot).parent.mkdir(parents=True, exist_ok=True)
         xx, yy, inside_mask = grid_info
@@ -293,7 +296,19 @@ def main():
 
         fig.savefig(args.save_plot, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"\nComparison figure saved to: {args.save_plot}")
+        print(f"\nSpatial comparison figure saved to: {args.save_plot}")
+
+        # Comparative Grade-Tonnage Audit Plot (NI 43-101 Model Smoothing Test)
+        gt_plot_path = str(Path(args.save_plot).parent / "idw_grade_tonnage_curves.png")
+        fig_gt, ax_gt = plot_grade_tonnage_curve(
+            gt_models,
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            title="Model Smoothing Audit: Nearest Neighbor vs. IDW Variants",
+        )
+        fig_gt.savefig(gt_plot_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_gt)
+        print(f"Comparative Grade-Tonnage curve saved to: {gt_plot_path}")
 
 
 if __name__ == "__main__":
