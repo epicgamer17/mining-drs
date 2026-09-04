@@ -33,6 +33,10 @@ import pandas as pd
 from drs_mining.components.estimation import (
     create_block_model,
     ordinary_kriging_block_estimation,
+    kriging_quality_metrics,
+    classify_resources_by_sor,
+    classify_mineral_resources,
+    plot_resource_classification_map,
     plot_block_model_orthogonal_slices,
     plot_block_model_bench_gallery,
     plot_block_model_3d_isometric,
@@ -155,7 +159,7 @@ def main():
     range_param = 90.0
     discretization = (4, 4, 2)  # 32 internal discretization sub-points per SMU
 
-    estimates, variances, dispersion_var = ordinary_kriging_block_estimation(
+    estimates, variances, dispersion_var, lagrange_multipliers = ordinary_kriging_block_estimation(
         samples_xyz=samples_xyz,
         sample_grades=sample_grades,
         block_model=block_model,
@@ -172,14 +176,61 @@ def main():
     block_model["estimated_grade"] = estimates
     block_model["kriging_variance"] = variances
 
+    # Kriging Neighborhood Analysis (KNA) Quality Metrics
+    kriging_eff, slope_regr = kriging_quality_metrics(
+        kriging_variances=variances,
+        block_dispersion_variance=dispersion_var,
+        lagrange_multipliers=lagrange_multipliers,
+    )
+    block_model["kriging_efficiency"] = kriging_eff
+    block_model["slope_of_regression"] = slope_regr
+
     # Support Effect Analysis
-    c_vv = total_sill - dispersion_var
-    smoothing_ratio = dispersion_var / total_sill
+    bv = dispersion_var  # Block Dispersion Variance BV = C_bar(V, V) = sigma^2(V|D)
+    within_block_var = total_sill - bv  # Within-block variance gamma_bar(V, V) = sigma^2(v|V)
+    variance_reduction = within_block_var / total_sill
     print(f"  • Theoretical Point Sill C(0): {total_sill:.4f}")
-    print(f"  • Block Self-Covariance C_bar(V, V): {c_vv:.4f}")
-    print(f"  • Block Dispersion Variance (BV): {dispersion_var:.4f}")
-    print(f"  • Support Volume Variance Reduction: {(1.0 - smoothing_ratio) * 100:.1f}%")
+    print(f"  • Block Dispersion Variance BV = C_bar(V, V): {bv:.4f}")
+    print(f"  • Within-Block Variance sigma^2(v|V): {within_block_var:.4f}")
+    print(f"  • Block Support Variance Retention: {(bv / total_sill) * 100:.1f}%")
+    print(f"  • Variance Reduction from Point to Block: {variance_reduction * 100:.1f}%")
     print(f"  • Estimated blocks: {np.sum(np.isfinite(estimates)):,} / {len(block_model):,} ({np.mean(np.isfinite(estimates))*100:.1f}%)")
+
+    # JORC / CIM Quality Diagnostics Summary
+    valid_blocks = np.isfinite(kriging_eff) & np.isfinite(slope_regr)
+    mean_ke = float(np.mean(kriging_eff[valid_blocks]))
+    mean_sor = float(np.mean(slope_regr[valid_blocks]))
+    sor_categories = classify_resources_by_sor(
+        slopes_of_regression=slope_regr,
+        kriging_efficiencies=kriging_eff,
+        threshold_measured=0.80,
+        threshold_indicated=0.50,
+        max_slope_measured=1.05,
+        min_kriging_efficiency=0.0,
+    )
+    pct_measured = float(np.mean(sor_categories[valid_blocks] == "Measured") * 100.0)
+    pct_indicated = float(np.mean(sor_categories[valid_blocks] == "Indicated") * 100.0)
+    print(f"  • Mean Kriging Efficiency (KE): {mean_ke * 100:.1f}%")
+    print(f"  • Mean Slope of Regression (SoR): {mean_sor:.3f}")
+    print(f"  • High Confidence Blocks (0.80 ≤ SoR ≤ 1.05, KE > 0, Measured candidate): {pct_measured:.1f}%")
+    print(f"  • Moderate Confidence Blocks (0.50 ≤ SoR < 0.80, KE > 0, Indicated candidate): {pct_indicated:.1f}%")
+
+    # Multi-criteria Resource Classification (Spacing + SoR + KE)
+    resource_categories = classify_mineral_resources(
+        grid_points=block_model[["x", "y", "z"]].values,
+        samples_xy=samples_xyz,
+        max_radius_measured=45.0,
+        max_radius_indicated=90.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        slopes_of_regression=slope_regr,
+        kriging_efficiencies=kriging_eff,
+        sor_threshold_measured=0.80,
+        sor_threshold_indicated=0.50,
+        max_slope_measured=1.05,
+        min_kriging_efficiency=0.0,
+    )
+    block_model["category"] = resource_categories
 
     # -------------------------------------------------------------------------
     # 4. Generate Grade-Tonnage Sensitivity Table
@@ -292,6 +343,20 @@ def main():
     fig5.savefig(fig5_path, dpi=200, bbox_inches="tight")
     plt.close(fig5)
     print(f"  -> Saved: {fig5_path}")
+
+    # Method 5: Mineral Resource Classification Map (Central Bench)
+    print("\n[Step 8b] Generating Mineral Resource Classification Map (Central Bench)...")
+    bench_blocks = block_model[block_model["z"] == 47.5].copy()
+    dh_df = pd.DataFrame({"x": samples_xyz[:, 0], "y": samples_xyz[:, 1]}).drop_duplicates()
+    fig_res_map, _ = plot_resource_classification_map(
+        bench_blocks,
+        drillholes=dh_df,
+        title="3D Block Kriging: CIM / JORC Mineral Resource Classification (Bench Z = 47.5m)",
+    )
+    fig_res_path = output_dir / "block_kriging_resource_classification_map.png"
+    fig_res_map.savefig(fig_res_path, dpi=200, bbox_inches="tight")
+    plt.close(fig_res_map)
+    print(f"  -> Saved: {fig_res_path}")
 
     # -------------------------------------------------------------------------
     # 9. Optional Interactive 3D Explorer

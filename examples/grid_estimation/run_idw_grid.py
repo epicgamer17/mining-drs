@@ -32,12 +32,14 @@ from drs_mining.components.estimation import (
     cell_declustering,
     plot_cell_declustering_curve,
     plot_swath_analysis,
+    classify_resources_by_drill_spacing,
     format_resource_statement,
     calculate_cut_off_grade,
     convert_resource_to_reserve,
     format_reserve_statement,
     plot_resource_to_reserve_waterfall,
     plot_reserve_classification_map,
+    plot_resource_classification_map,
     plot_in_situ_vs_diluted_curves,
 )
 
@@ -242,18 +244,15 @@ def main():
     print(gt_disp[["ore_tonnes", "ore_grade", "waste_tonnes", "strip_ratio", "ore_recovery_pct", "metal_recovery_pct"]].to_string())
 
     # 9. Official Mineral Resource Statement (NI 43-101 / JORC Code Compliant)
-    tree_samples = KDTree(samples_xy)
-    d_to_samples, _ = tree_samples.query(grid_points)
-
-    categories = np.empty(len(grid_points), dtype=object)
-    for i in range(len(grid_points)):
-        if is_interpolated[i]:
-            if d_to_samples[i] <= 60.0:
-                categories[i] = "Measured"
-            else:
-                categories[i] = "Indicated"
-        else:
-            categories[i] = "Inferred"
+    categories = classify_resources_by_drill_spacing(
+        grid_points=grid_points,
+        samples_xy=samples_xy,
+        max_radius_measured=60.0,
+        max_radius_indicated=1e9,
+        min_holes_measured=1,
+        min_holes_indicated=1,
+        is_interpolated=is_interpolated,
+    )
 
     block_class_df = pd.DataFrame(
         {
@@ -524,6 +523,25 @@ def main():
                 "status": status_arr,
             }
         )
+
+        # Resource Classification Map (In-Situ Confidence)
+        res_blocks_df = pd.DataFrame(
+            {
+                "x": grid_points[:, 0],
+                "y": grid_points[:, 1],
+                "category": categories,
+            }
+        )
+        res_map_file = str(plots_dir / "idw_resource_classification_map.png")
+        fig_res_map, _ = plot_resource_classification_map(
+            res_blocks_df,
+            boundary=boundary,
+            drillholes=drillholes,
+            title="IDW²: In-Situ Mineral Resource Classification Map (CIM / JORC)",
+        )
+        fig_res_map.savefig(res_map_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_res_map)
+        print(f"  • Resource Classification Map: saved to {res_map_file}")
 
         class_map_file = str(plots_dir / "idw_reserve_classification_map.png")
         fig_map, _ = plot_reserve_classification_map(

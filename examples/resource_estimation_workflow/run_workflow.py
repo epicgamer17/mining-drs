@@ -22,6 +22,7 @@ from drs_mining.components.estimation import (
     plot_contact_profile,
     ordinary_kriging_grid_estimation,
     calculate_cut_off_grade,
+    classify_resources_by_kriging_variance,
     convert_resource_to_reserve,
     format_resource_statement,
     format_reserve_statement,
@@ -230,7 +231,11 @@ def main():
     print(f"  • Economic Breakeven Cut-Off Grade: {cog:.3f}% Cu.")
 
     block_tonnes = 5000.0  # 5,000 t per block
-    block_cats = np.where(ok_vars < 0.12, "Measured", "Indicated")
+    block_cats = classify_resources_by_kriging_variance(
+        kriging_variances=ok_vars,
+        variance_threshold_measured=0.12,
+        variance_threshold_indicated=1e9,
+    )
 
     block_res_df = pd.DataFrame({
         "category": block_cats,

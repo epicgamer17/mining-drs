@@ -25,6 +25,16 @@ from scipy.spatial import KDTree, Delaunay
 from scipy import stats
 
 
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Current status: 2D planar Voronoi polygons of influence.
+# Guidelines from CONTRIBUTING.md to adhere to:
+# - Functional approach: transparent DataFrames and NumPy arrays (no custom config/wrapper classes).
+# - Domain segregation: must strictly respect domain boundaries (`domain_col`).
+# - Extrapolation control: provide `clip_to_convex_hull=True` and `max_radius`.
+# - Boundary vs Data Support: separate legal `boundary` from `is_within_convex_hull`.
+# - No backwards-compatibility fallbacks: provide direct functional 3D block model estimator
+#   (or update signature) assigning nearest composite to block centroids as the standard
+#   declustered validation benchmark for comparative grade-tonnage audits and swath plots.
 def polygonal_estimation(
     drillholes: pd.DataFrame,
     boundary: Optional[Sequence[Tuple[float, float]]] = None,
@@ -362,6 +372,14 @@ def grade_tonnage_table(
     return res_df.set_index("cutoff")
 
 
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Current status: 2D plan map of Voronoi polygons.
+# Guidelines from CONTRIBUTING.md to adhere to:
+# - Scope of this function: strictly 2D plan view mapping; add `bench_z: Optional[float] = None`
+#   to render single horizontal mining bench slices.
+# - Following codebase conventions, 3D visualizations are implemented as separate functions:
+#   1. `plot_polygonal_3d_isometric`: dedicated static 3D isometric visualization (projection="3d").
+#   2. `plot_polygonal_3d_interactive`: dedicated interactive 3D explorer with pan/zoom/rotation.
 def plot_polygonal_map(
     df: pd.DataFrame,
     boundary: Optional[Sequence[Tuple[float, float]]] = None,
@@ -513,6 +531,16 @@ def is_within_convex_hull(
     return delaunay.find_simplex(grid_points) >= 0
 
 
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Current status: Point-support interpolation (V -> 0) on coordinate arrays.
+# Guidelines from CONTRIBUTING.md to adhere to:
+# - Explicit Extrapolation Control: strictly enforce `mask_extrapolation=True` and `max_radius`.
+# - Domain Boundaries: must respect domain boundaries (`sample_domains`, `grid_domains`).
+# - Block Support: add 3D block model estimation with block dimensions (dx, dy, dz) and internal
+#   point discretization (Nx x Ny x Nz) for volume-averaged block grades (SME Handbook).
+# - Anisotropic search: 3D search ellipsoids with dip/azimuth/plunge without rigid config objects.
+# - Validation support: block outputs must feed directly into `plot_grade_tonnage_curve` for
+#   smoothing audits against NN and Kriging without indirection layers.
 def inverse_distance_weighting(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
@@ -668,6 +696,15 @@ def inverse_distance_weighting(
     return estimated_grades, dist_out
 
 
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Current status: 2D/3D point nearest neighbor.
+# Guidelines from CONTRIBUTING.md to adhere to:
+# - Core standard: 3D Nearest Neighbor on the block model is the mandatory declustered benchmark
+#   proxy for swath plot local bias audits (`plot_swath_analysis`) and comparative grade-tonnage
+#   audits (`plot_grade_tonnage_curve`) per JORC Table 1 and NI 43-101.
+# - Domain segregation: respect domain boundaries (`sample_domains`, `grid_domains`).
+# - Extrapolation control: enforce `mask_extrapolation` and `max_radius`.
+# - No fallback layers: direct functional block model routine accepting DataFrame and returning DataFrame.
 def nearest_neighbor_grid_estimation(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
@@ -1269,6 +1306,7 @@ def create_block_model(
     return df_blocks
 
 
+# TODO: potentially return internal_block_var
 def ordinary_kriging_block_estimation(
     samples_xyz: np.ndarray,
     sample_grades: np.ndarray,
@@ -1284,7 +1322,7 @@ def ordinary_kriging_block_estimation(
     domain_col: Optional[str] = None,
     sample_domains: Optional[Sequence[Any]] = None,
     sample_domain_col: Optional[Union[str, Sequence[Any]]] = None,
-) -> Tuple[np.ndarray, np.ndarray, float]:
+) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     """Estimates block grades using 3D Ordinary Block Kriging with internal discretization.
 
     Block Kriging (Journel & Huijbregts 1978; SME Handbook Section 4.5) accounts for the
@@ -1293,6 +1331,7 @@ def ordinary_kriging_block_estimation(
     1. Average sample-to-block covariance: C_bar(x_i, V)
     2. Block-to-block self-covariance: C_bar(V, V)
     3. Block dispersion variance: BV = C(0) - C_bar(V, V)
+    4. Lagrange multipliers mu from the unbiasedness condition sum(lambda_i) = 1
 
     Parameters
     ----------
@@ -1327,12 +1366,12 @@ def ordinary_kriging_block_estimation(
 
     Returns
     -------
-    Tuple[np.ndarray, np.ndarray, float]
-        (block_estimates, block_variances, block_dispersion_variance).
+    Tuple[np.ndarray, np.ndarray, float, np.ndarray]
+        (block_estimates, block_variances, block_dispersion_variance, lagrange_multipliers).
     """
     n_blocks = len(block_model)
     if n_blocks == 0:
-        return np.array([]), np.array([]), 0.0
+        return np.array([]), np.array([]), 0.0, np.array([])
 
     # Handle domain-segregated estimation
     s_dom = sample_domains if sample_domains is not None else sample_domain_col
@@ -1350,6 +1389,7 @@ def ordinary_kriging_block_estimation(
 
         block_estimates = np.full(n_blocks, np.nan, dtype=float)
         block_variances = np.full(n_blocks, np.nan, dtype=float)
+        lagrange_multipliers = np.full(n_blocks, np.nan, dtype=float)
         overall_disp_var = 0.0
 
         for dom in np.unique(b_dom_arr):
@@ -1365,7 +1405,7 @@ def ordinary_kriging_block_estimation(
                 continue
 
             sub_bm = block_model[b_mask].copy()
-            est_dom, var_dom, disp_dom = ordinary_kriging_block_estimation(
+            est_dom, var_dom, disp_dom, lag_dom = ordinary_kriging_block_estimation(
                 samples_xyz=samples_xyz[s_mask],
                 sample_grades=sample_grades[s_mask],
                 block_model=sub_bm,
@@ -1382,9 +1422,10 @@ def ordinary_kriging_block_estimation(
             )
             block_estimates[b_mask] = est_dom
             block_variances[b_mask] = var_dom
+            lagrange_multipliers[b_mask] = lag_dom
             overall_disp_var = disp_dom
 
-        return block_estimates, block_variances, overall_disp_var
+        return block_estimates, block_variances, overall_disp_var, lagrange_multipliers
 
     base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
     base_nugget = (
@@ -1426,8 +1467,7 @@ def ordinary_kriging_block_estimation(
         internal_dists, variogram_model, base_nugget, base_sill, base_range
     )
     c_vv = float(np.mean(internal_covs))
-    total_sill = float(base_nugget + base_sill)
-    block_dispersion_var = max(0.0, total_sill - c_vv)
+    block_dispersion_var = max(0.0, c_vv)
 
     # 5. Neighbor Search Setup & Spatial Query
     upper_bound = max_radius if max_radius is not None else float("inf")
@@ -1436,9 +1476,15 @@ def ordinary_kriging_block_estimation(
     # Initialize outputs: unestimated blocks remain NaN and receive maximum block uncertainty (c_vv)
     block_estimates = np.full(n_blocks, np.nan, dtype=float)
     block_variances = np.full(n_blocks, c_vv, dtype=float)
+    lagrange_multipliers = np.full(n_blocks, np.nan, dtype=float)
 
     if len(samples_xyz) == 0:
-        return block_estimates, block_variances, block_dispersion_var
+        return (
+            block_estimates,
+            block_variances,
+            block_dispersion_var,
+            lagrange_multipliers,
+        )
 
     tree = KDTree(samples_xyz)
     k_query = min(k_neighbors, len(samples_xyz))
@@ -1508,13 +1554,15 @@ def ordinary_kriging_block_estimation(
             # Block Kriging Variance: sigma_OK^2 = C_bar(V, V) - sum(lambda_i * C_bar(x_i, V)) - mu
             raw_variance = c_vv - np.sum(weights * k0_block) - mu
             block_variances[b] = max(0.0, float(raw_variance))
+            lagrange_multipliers[b] = float(mu)
         except np.linalg.LinAlgError:
             # Fallback for singular matrix
             continue
 
-    return block_estimates, block_variances, block_dispersion_var
+    return block_estimates, block_variances, block_dispersion_var, lagrange_multipliers
 
 
+# TODO: potentially return within_block_variance
 def simple_kriging_block_estimation(
     samples_xyz: np.ndarray,
     sample_grades: np.ndarray,
@@ -1665,8 +1713,7 @@ def simple_kriging_block_estimation(
         internal_dists, variogram_model, base_nugget, base_sill, base_range
     )
     c_vv = float(np.mean(internal_covs))
-    total_sill = float(base_nugget + base_sill)
-    block_dispersion_var = max(0.0, total_sill - c_vv)
+    block_dispersion_var = max(0.0, c_vv)
 
     upper_bound = max_radius if max_radius is not None else float("inf")
     block_coords = block_model[["x", "y", "z"]].to_numpy(dtype=float)
@@ -1703,9 +1750,7 @@ def simple_kriging_block_estimation(
 
         block_points = block_coords[b] + disc_offsets
 
-        sample_to_disc_diffs = (
-            coords_active[:, None, :] - block_points[None, :, :]
-        )
+        sample_to_disc_diffs = coords_active[:, None, :] - block_points[None, :, :]
         sample_to_disc_dists = np.linalg.norm(sample_to_disc_diffs, axis=2)
         sample_to_disc_covs = _theoretical_covariance(
             sample_to_disc_dists, variogram_model, base_nugget, base_sill, base_range
@@ -1860,6 +1905,15 @@ def plot_grade_tonnage_curve(
     return fig, ax1
 
 
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Current status: 2D cell declustering in (X, Y) plane.
+# Guidelines from CONTRIBUTING.md to adhere to:
+# - SME Handbook & Geostatistical Standards: 3D exploration drillholes have dense downhole
+#   sampling vs wide lateral spacing; requires 3D anisotropic cell sizing (Lx, Ly, Lz) with `z_col`.
+# - Domain boundaries: declustering weights must be calculated per geological domain (`domain_col`).
+# - Functional style & Simple over easy: transparent DataFrame inputs and array outputs; avoid
+#   rigid config classes, use inline constants and simple function arguments.
+# - No backwards-compatibility fallbacks: cleanly extend the signature rather than adding shim layers.
 def cell_declustering(
     drillholes: pd.DataFrame,
     cell_sizes: Optional[Union[float, Sequence[float]]] = None,
@@ -2114,6 +2168,7 @@ def plot_cell_declustering_curve(
     return fig, ax
 
 
+# TODO: is kriging_neighborhood_analysis a better name?
 def kriging_quality_metrics(
     kriging_variances: np.ndarray,
     block_dispersion_variance: float,
@@ -2131,9 +2186,11 @@ def kriging_quality_metrics(
        to the block dispersion variance (BV = sigma^2(V|D)).
 
     2. Slope of Regression (SoR):
-       SoR = (BV - sigma_OK^2 + |mu|) / (BV - sigma_OK^2 + 2 * |mu|)
+       SoR = Cov(Z_V, Z_V*) / Var(Z_V*) = (BV - sigma_OK^2 - mu) / (BV - sigma_OK^2 - 2 * mu)
        Estimates the linear regression slope of true block grades on kriged estimates.
        SoR >= 0.8 is often required for Measured Resources; SoR >= 0.5 for Indicated.
+       Note: The minus signs on mu correspond to the augmented matrix system [K 1; 1^T 0]
+       where K * lambda + mu * 1 = k0.
 
     Theoretical Support Constraint (Krige 1996; SME Handbook Section 4.5):
     ----------------------------------------------------------------------
@@ -2162,18 +2219,354 @@ def kriging_quality_metrics(
         (kriging_efficiency, slope_of_regression). If lagrange_multipliers is None,
         slope_of_regression is None.
     """
-    # TODO: Defer implementation until Block Kriging (with block discretization and
-    # block dispersion variance BV = C_bar(D,D) - C_bar(V,V)) is implemented.
-    # I want to implement the core functionality myself when block support is introduced.
-    raise NotImplementedError(
-        "TODO: Implement Kriging Efficiency (KE) and Slope of Regression (SoR) "
-        "alongside Block Kriging (requires block dispersion variance BV)."
+    vars_arr = np.asarray(kriging_variances, dtype=float)
+
+    if not isinstance(
+        block_dispersion_variance, (int, float, np.floating, np.integer)
+    ) or np.isnan(block_dispersion_variance):
+        raise ValueError("block_dispersion_variance must be a valid numeric scalar.")
+    if block_dispersion_variance <= 0.0:
+        raise ValueError(
+            f"block_dispersion_variance must be strictly positive (> 0), got {block_dispersion_variance}."
+        )
+
+    if vars_arr.size == 0:
+        empty_sor = (
+            np.array([], dtype=float) if lagrange_multipliers is not None else None
+        )
+        return np.array([], dtype=float), empty_sor
+
+    kriging_efficiency = (
+        block_dispersion_variance - vars_arr
+    ) / block_dispersion_variance
+
+    if lagrange_multipliers is None:
+        slope_of_regression = None
+    else:
+        mu_arr = np.asarray(lagrange_multipliers, dtype=float)
+        if mu_arr.shape != vars_arr.shape:
+            raise ValueError(
+                f"Shape mismatch: lagrange_multipliers shape {mu_arr.shape} must match "
+                f"kriging_variances shape {vars_arr.shape}."
+            )
+        # Cov(Z_V, Z_V*) = BV - sigma_OK^2 - mu
+        # Var(Z_V*) = BV - sigma_OK^2 - 2*mu
+        num = block_dispersion_variance - vars_arr - mu_arr
+        den = block_dispersion_variance - vars_arr - 2.0 * mu_arr
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            slope_of_regression = np.where(np.abs(den) > 1e-12, num / den, np.nan)
+
+    return kriging_efficiency, slope_of_regression
+
+
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Current status: Euclidean k-d tree point distance queries.
+# Guidelines from CONTRIBUTING.md to adhere to:
+# - Reporting Standards (CIM 2014/2019, JORC 2012, NI 43-101): multi-hole confidence criteria
+#   for Measured/Indicated must demonstrate continuity between INDEPENDENT drillholes.
+#   In 3D block models informed by downhole composites, multiple points along the same borehole
+#   must not falsely satisfy multi-hole requirements. Accept `hole_id_col` or collar locations.
+# - Domain boundaries: spacing classification must be segregated by geological domain.
+# - Data Support Separation: separate legal concession `boundary` from drillhole support envelope.
+# - Functional design: transparent DataFrame/array inputs and string category outputs.
+def classify_resources_by_drill_spacing(
+    grid_points: np.ndarray,
+    samples_xy: np.ndarray,
+    max_radius_measured: float = 30.0,
+    max_radius_indicated: float = 60.0,
+    min_holes_measured: int = 3,
+    min_holes_indicated: int = 2,
+    max_radius_inferred: Optional[float] = None,
+    is_interpolated: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Classifies resource blocks into confidence categories based on drillhole spacing and hole counts.
+
+    In accordance with CIM Definition Standards (2014) and JORC Code (2012) principles:
+    - Measured: Dense drillhole spacing where at least `min_holes_measured` informing
+      drillholes lie within `max_radius_measured`, demonstrating high geological and grade continuity.
+    - Indicated: Moderate drillhole spacing where at least `min_holes_indicated` informing
+      drillholes lie within `max_radius_indicated`, supporting reasonable assumptions of continuity.
+    - Inferred: Wider spacing or extrapolated blocks where geological continuity can be implied
+      (within `max_radius_inferred` if specified).
+    - Unclassified: Blocks beyond the maximum inferred search radius or lacking sufficient data.
+
+    Parameters
+    ----------
+    grid_points : np.ndarray
+        Array of block centers of shape (M, 2) or (M, 3).
+    samples_xy : np.ndarray
+        Array of informing drillhole coordinates of shape (N, 2) or (N, 3).
+    max_radius_measured : float, default 30.0
+        Maximum search radius to qualify for Measured classification.
+    max_radius_indicated : float, default 60.0
+        Maximum search radius to qualify for Indicated classification.
+    min_holes_measured : int, default 3
+        Minimum informing drillholes within `max_radius_measured` for Measured.
+    min_holes_indicated : int, default 2
+        Minimum informing drillholes within `max_radius_indicated` for Indicated.
+    max_radius_inferred : float, optional
+        Maximum search radius to qualify for Inferred classification. If None,
+        all blocks not meeting Measured or Indicated default to Inferred.
+    is_interpolated : np.ndarray of bool, optional
+        Boolean mask of shape (M,) indicating whether each block lies within the
+        convex hull / domain interpolation volume. Blocks where `is_interpolated`
+        is False cannot be classified as Measured or Indicated (capped at Inferred).
+
+    Returns
+    -------
+    np.ndarray
+        Array of category strings ("Measured", "Indicated", "Inferred", or "Unclassified") of shape (M,).
+    """
+    pts = np.asarray(grid_points, dtype=float)
+    if pts.size == 0:
+        return np.empty(0, dtype=object)
+    if pts.ndim != 2 or pts.shape[1] not in (2, 3):
+        raise ValueError(
+            f"grid_points must have shape (M, 2) or (M, 3), got shape {pts.shape}."
+        )
+
+    samples = np.asarray(samples_xy, dtype=float)
+    if samples.ndim != 2 or samples.shape[1] != pts.shape[1]:
+        raise ValueError(
+            f"samples_xy must have shape (N, {pts.shape[1]}) matching grid_points, got shape {samples.shape}."
+        )
+
+    if max_radius_measured <= 0.0 or max_radius_indicated <= 0.0:
+        raise ValueError("Search radii must be strictly positive.")
+    if max_radius_measured > max_radius_indicated:
+        raise ValueError(
+            f"max_radius_measured ({max_radius_measured}) must be <= max_radius_indicated ({max_radius_indicated})."
+        )
+    if max_radius_inferred is not None and max_radius_inferred < max_radius_indicated:
+        raise ValueError(
+            f"max_radius_inferred ({max_radius_inferred}) must be >= max_radius_indicated ({max_radius_indicated})."
+        )
+    if min_holes_measured < 1 or min_holes_indicated < 1:
+        raise ValueError("min_holes_measured and min_holes_indicated must be >= 1.")
+    if min_holes_measured < min_holes_indicated:
+        raise ValueError(
+            f"min_holes_measured ({min_holes_measured}) must be >= min_holes_indicated ({min_holes_indicated})."
+        )
+
+    M = len(pts)
+    N = len(samples)
+
+    if is_interpolated is not None:
+        interp_mask = np.asarray(is_interpolated, dtype=bool)
+        if len(interp_mask) != M:
+            raise ValueError(
+                f"is_interpolated length ({len(interp_mask)}) must match grid_points length ({M})."
+            )
+    else:
+        interp_mask = None
+
+    if N == 0:
+        return np.full(M, "Unclassified", dtype=object)
+
+    tree = KDTree(samples)
+
+    # Check Measured criteria
+    if N >= min_holes_measured:
+        d_meas, _ = tree.query(pts, k=min_holes_measured)
+        dist_meas = d_meas if min_holes_measured == 1 else d_meas[:, -1]
+        has_measured = dist_meas <= max_radius_measured
+    else:
+        has_measured = np.zeros(M, dtype=bool)
+
+    # Check Indicated criteria
+    if N >= min_holes_indicated:
+        d_ind, _ = tree.query(pts, k=min_holes_indicated)
+        dist_ind = d_ind if min_holes_indicated == 1 else d_ind[:, -1]
+        has_indicated = dist_ind <= max_radius_indicated
+    else:
+        has_indicated = np.zeros(M, dtype=bool)
+
+    # Check Inferred criteria
+    if max_radius_inferred is not None:
+        d_inf, _ = tree.query(pts, k=1)
+        has_inferred = d_inf <= max_radius_inferred
+    else:
+        has_inferred = np.ones(M, dtype=bool)
+
+    categories = np.full(M, "Unclassified", dtype=object)
+
+    if interp_mask is not None:
+        categories[interp_mask & has_measured] = "Measured"
+        categories[interp_mask & (~has_measured) & has_indicated] = "Indicated"
+        categories[interp_mask & (~has_measured) & (~has_indicated) & has_inferred] = (
+            "Inferred"
+        )
+        categories[(~interp_mask) & has_inferred] = "Inferred"
+    else:
+        categories[has_measured] = "Measured"
+        categories[(~has_measured) & has_indicated] = "Indicated"
+        categories[(~has_measured) & (~has_indicated) & has_inferred] = "Inferred"
+
+    return categories
+
+
+# TODO: possibly remove and inline in classify_mineral_resources
+def classify_resources_by_sor(
+    slopes_of_regression: np.ndarray,
+    kriging_efficiencies: Optional[np.ndarray] = None,
+    threshold_measured: float = 0.80,
+    threshold_indicated: float = 0.50,
+    max_slope_measured: float = 1.05,
+    min_kriging_efficiency: Optional[float] = 0.0,
+) -> np.ndarray:
+    """Classifies resource blocks based on Kriging Neighborhood Analysis (KNA) Slope of Regression (SoR).
+
+    In geostatistical best practice (Vann et al., 2003; Armstrong, 1998):
+    - Slope of Regression (SoR) gauges conditional unbiasedness of block estimates.
+    - Measured: High conditional unbiasedness (typically SoR >= 0.80 and <= 1.05, with positive KE).
+    - Indicated: Moderate conditional unbiasedness (typically 0.50 <= SoR < 0.80, with positive KE).
+    - Inferred: Low conditional unbiasedness (SoR < 0.50) or negative efficiency.
+    - Unclassified: Non-finite or unestimated blocks (NaN / Inf).
+
+    Parameters
+    ----------
+    slopes_of_regression : np.ndarray
+        Array of Slope of Regression values of shape (M,).
+    kriging_efficiencies : np.ndarray, optional
+        Array of Kriging Efficiency values of shape (M,). If provided, blocks
+        with KE < min_kriging_efficiency are disqualified from Measured/Indicated.
+    threshold_measured : float, default 0.80
+        Minimum Slope of Regression for Measured classification.
+    threshold_indicated : float, default 0.50
+        Minimum Slope of Regression for Indicated classification.
+    max_slope_measured : float, default 1.05
+        Maximum Slope of Regression for Measured classification (slopes > 1.05
+        frequently reflect numerical instability or severe conditional bias).
+    min_kriging_efficiency : float, optional, default 0.0
+        Minimum Kriging Efficiency required for Measured and Indicated.
+        If None, Kriging Efficiency is not evaluated.
+
+    Returns
+    -------
+    np.ndarray
+        Array of category strings ("Measured", "Indicated", "Inferred", or "Unclassified") of shape (M,).
+    """
+    sor = np.asarray(slopes_of_regression, dtype=float)
+    if sor.size == 0:
+        return np.empty(0, dtype=object)
+
+    if threshold_measured <= threshold_indicated:
+        raise ValueError(
+            f"threshold_measured ({threshold_measured}) must be > threshold_indicated ({threshold_indicated})."
+        )
+    if max_slope_measured < threshold_measured:
+        raise ValueError(
+            f"max_slope_measured ({max_slope_measured}) must be >= threshold_measured ({threshold_measured})."
+        )
+
+    if kriging_efficiencies is not None:
+        ke = np.asarray(kriging_efficiencies, dtype=float)
+        if ke.shape != sor.shape:
+            raise ValueError(
+                f"Shape mismatch: kriging_efficiencies shape {ke.shape} must match slopes_of_regression shape {sor.shape}."
+            )
+        if min_kriging_efficiency is not None:
+            ke_ok = np.isfinite(ke) & (ke >= min_kriging_efficiency)
+        else:
+            ke_ok = np.isfinite(ke)
+    else:
+        ke_ok = np.ones(len(sor), dtype=bool)
+
+    valid_sor = np.isfinite(sor)
+    categories = np.full(len(sor), "Unclassified", dtype=object)
+
+    is_meas = (
+        valid_sor & (sor >= threshold_measured) & (sor <= max_slope_measured) & ke_ok
     )
+    is_ind = (
+        valid_sor & (sor >= threshold_indicated) & (sor < threshold_measured) & ke_ok
+    )
+    is_inf = valid_sor & (~is_meas) & (~is_ind)
+
+    categories[is_meas] = "Measured"
+    categories[is_ind] = "Indicated"
+    categories[is_inf] = "Inferred"
+
+    return categories
+
+
+# TODO: possibly remove and inline in classify_mineral_resources
+def classify_resources_by_kriging_variance(
+    kriging_variances: np.ndarray,
+    variance_threshold_measured: float,
+    variance_threshold_indicated: float,
+    variance_threshold_inferred: Optional[float] = None,
+) -> np.ndarray:
+    """Classifies resource blocks based on Kriging estimation variance thresholds.
+
+    While automated Kriging variance cutoffs must be interpreted with caution
+    due to geometric bullseye ("spotted dog") effects, Kriging estimation variance
+    provides a direct measure of local data configuration and relative error.
+
+    Parameters
+    ----------
+    kriging_variances : np.ndarray
+        Array of Kriging estimation variances of shape (M,).
+    variance_threshold_measured : float
+        Maximum Kriging variance allowed for Measured classification.
+    variance_threshold_indicated : float
+        Maximum Kriging variance allowed for Indicated classification.
+    variance_threshold_inferred : float, optional
+        Maximum Kriging variance allowed for Inferred classification.
+        Variances exceeding this threshold are assigned "Unclassified".
+
+    Returns
+    -------
+    np.ndarray
+        Array of category strings ("Measured", "Indicated", "Inferred", or "Unclassified") of shape (M,).
+    """
+    vars_arr = np.asarray(kriging_variances, dtype=float)
+    if vars_arr.size == 0:
+        return np.empty(0, dtype=object)
+
+    if variance_threshold_measured <= 0.0 or variance_threshold_indicated <= 0.0:
+        raise ValueError("Variance thresholds must be strictly positive.")
+    if variance_threshold_measured >= variance_threshold_indicated:
+        raise ValueError(
+            f"variance_threshold_measured ({variance_threshold_measured}) must be < variance_threshold_indicated ({variance_threshold_indicated})."
+        )
+    if (
+        variance_threshold_inferred is not None
+        and variance_threshold_inferred <= variance_threshold_indicated
+    ):
+        raise ValueError(
+            f"variance_threshold_inferred ({variance_threshold_inferred}) must be > variance_threshold_indicated ({variance_threshold_indicated})."
+        )
+
+    valid_var = np.isfinite(vars_arr) & (vars_arr >= 0.0)
+    categories = np.full(len(vars_arr), "Unclassified", dtype=object)
+
+    is_meas = valid_var & (vars_arr <= variance_threshold_measured)
+    is_ind = (
+        valid_var
+        & (vars_arr > variance_threshold_measured)
+        & (vars_arr <= variance_threshold_indicated)
+    )
+    if variance_threshold_inferred is not None:
+        is_inf = (
+            valid_var
+            & (vars_arr > variance_threshold_indicated)
+            & (vars_arr <= variance_threshold_inferred)
+        )
+    else:
+        is_inf = valid_var & (vars_arr > variance_threshold_indicated)
+
+    categories[is_meas] = "Measured"
+    categories[is_ind] = "Indicated"
+    categories[is_inf] = "Inferred"
+
+    return categories
 
 
 def classify_mineral_resources(
     grid_points: np.ndarray,
-    samples_xy: np.ndarray,
+    samples_xy: Optional[np.ndarray] = None,
     kriging_variances: Optional[np.ndarray] = None,
     max_radius_measured: float = 30.0,
     max_radius_indicated: float = 60.0,
@@ -2181,8 +2574,17 @@ def classify_mineral_resources(
     min_holes_indicated: int = 2,
     variance_threshold_measured: Optional[float] = None,
     variance_threshold_indicated: Optional[float] = None,
+    variance_threshold_inferred: Optional[float] = None,
+    slopes_of_regression: Optional[np.ndarray] = None,
+    kriging_efficiencies: Optional[np.ndarray] = None,
+    sor_threshold_measured: float = 0.80,
+    sor_threshold_indicated: float = 0.50,
+    max_slope_measured: float = 1.05,
+    min_kriging_efficiency: Optional[float] = 0.0,
+    max_radius_inferred: Optional[float] = None,
+    is_interpolated: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Classifies mineral resources into Measured, Indicated, and Inferred.
+    """Classifies mineral resources into Measured, Indicated, and Inferred using multi-criteria standard practice.
 
     CIM Definition Standards (2014) and JORC Code (Clause 20-24) Regulatory Framework:
     ----------------------------------------------------------------------------------
@@ -2191,31 +2593,25 @@ def classify_mineral_resources(
     - Indicated: Reasonable confidence; sufficient drilling to assume geological/grade continuity.
     - Inferred: Low confidence; limited geological evidence; continuity implied but not verified.
 
-    The "Spotted Dog" Pitfall & Why Automated Kriging Variance Cutoffs are Discouraged:
-    ----------------------------------------------------------------------------------
-    Classifying blocks purely on automated block-by-block mathematical criteria (such as
-    raw kriging variance cutoffs or raw nearest-hole counts) is heavily scrutinized by
-    regulators (CIM Best Practice Guidelines; JORC Table 1; Stephenson et al.):
-    1. Concentric Bullseyes / Spotted Dog: Kriging variance forms concentric rings around
-       drillholes, producing isolated "speckles" of Measured blocks surrounded by Indicated,
-       or single Inferred holes inside Measured zones that cannot be practically mined.
-    2. Data Geometry vs. Geological Confidence: Kriging variance reflects sample geometry and
-       the variogram, but conveys zero information about structural faulting, lithology,
-       core recovery, or QA/QC assay integrity.
+    Multi-Criteria Best Practice & The Conservative Downgrade Principle:
+    -------------------------------------------------------------------
+    Rather than relying on a single simplistic metric, this function integrates:
+    1. Drill spacing and informing hole count (`classify_resources_by_drill_spacing`),
+    2. Kriging estimation variance thresholds (`classify_resources_by_kriging_variance`),
+    3. Kriging Neighborhood Analysis Slope of Regression / Efficiency (`classify_resources_by_sor`).
 
-    Industry Best Practice:
-    -----------------------
-    Geometric parameters (drill spacing, hole counts) serve only as an initial guide.
-    The Qualified Person (QP) constructs smoothed 3D continuous wireframe classification
-    envelopes (or applies morphological majority smoothing) to delineate contiguous,
-    practical mining zones alongside qualitative geological signoff.
+    When multiple criteria are provided, classification follows the conservative
+    minimum-confidence principle: a block only attains "Measured" status if it satisfies
+    all active criteria (spacing, estimation variance, and slope of regression). If any
+    criterion is not met, the block is downgraded accordingly.
 
     Parameters
     ----------
     grid_points : np.ndarray
         Array of block centers of shape (M, 2) or (M, 3).
-    samples_xy : np.ndarray
+    samples_xy : np.ndarray, optional
         Array of informing drillhole coordinates of shape (N, 2) or (N, 3).
+        If provided, drillhole spacing and hole count criteria are evaluated.
     kriging_variances : np.ndarray, optional
         Array of Kriging estimation variances of shape (M,).
     max_radius_measured : float, default 30.0
@@ -2230,20 +2626,124 @@ def classify_mineral_resources(
         Maximum Kriging variance allowed for Measured classification.
     variance_threshold_indicated : float, optional
         Maximum Kriging variance allowed for Indicated classification.
+    variance_threshold_inferred : float, optional
+        Maximum Kriging variance allowed for Inferred classification.
+    slopes_of_regression : np.ndarray, optional
+        Array of Slope of Regression values of shape (M,).
+    kriging_efficiencies : np.ndarray, optional
+        Array of Kriging Efficiency values of shape (M,).
+    sor_threshold_measured : float, default 0.80
+        Minimum Slope of Regression for Measured classification.
+    sor_threshold_indicated : float, default 0.50
+        Minimum Slope of Regression for Indicated classification.
+    max_slope_measured : float, default 1.05
+        Maximum Slope of Regression for Measured classification.
+    min_kriging_efficiency : float, optional, default 0.0
+        Minimum Kriging Efficiency required for Measured/Indicated.
+    max_radius_inferred : float, optional
+        Maximum search radius for Inferred classification.
+    is_interpolated : np.ndarray of bool, optional
+        Boolean mask indicating whether each block lies within the interpolation hull.
+        Blocks outside the hull are restricted to Inferred or Unclassified.
 
     Returns
     -------
     np.ndarray
         Array of category strings ("Measured", "Indicated", "Inferred", or "Unclassified") of shape (M,).
     """
-    # TODO: Defer implementation until 3D continuous wireframe envelopes or morphological
-    # majority smoothing are implemented to avoid the "spotted dog" artifact.
-    # Raw block-by-block variance cutoffs are non-compliant under CIM / JORC guidelines.
-    # I want to implement the core functionality myself when spatial domaining is introduced.
-    raise NotImplementedError(
-        "TODO: Implement Resource Classification using continuous spatial envelopes "
-        "or morphological smoothing (deferred to prevent the 'spotted dog' artifact)."
-    )
+    pts = np.asarray(grid_points)
+    if pts.size == 0:
+        return np.empty(0, dtype=object)
+
+    M = len(pts)
+    criteria_results = []
+
+    # 1. Drill spacing criterion
+    if samples_xy is not None:
+        cats_spacing = classify_resources_by_drill_spacing(
+            grid_points=pts,
+            samples_xy=samples_xy,
+            max_radius_measured=max_radius_measured,
+            max_radius_indicated=max_radius_indicated,
+            min_holes_measured=min_holes_measured,
+            min_holes_indicated=min_holes_indicated,
+            max_radius_inferred=max_radius_inferred,
+            is_interpolated=is_interpolated,
+        )
+        criteria_results.append(cats_spacing)
+
+    # 2. Kriging variance criterion
+    if kriging_variances is not None:
+        if len(kriging_variances) != M:
+            raise ValueError(
+                f"Shape mismatch: kriging_variances length ({len(kriging_variances)}) must match grid_points length ({M})."
+            )
+        if variance_threshold_measured is None or variance_threshold_indicated is None:
+            raise ValueError(
+                "variance_threshold_measured and variance_threshold_indicated must be specified when passing kriging_variances."
+            )
+        cats_var = classify_resources_by_kriging_variance(
+            kriging_variances=kriging_variances,
+            variance_threshold_measured=variance_threshold_measured,
+            variance_threshold_indicated=variance_threshold_indicated,
+            variance_threshold_inferred=variance_threshold_inferred,
+        )
+        criteria_results.append(cats_var)
+    elif (
+        variance_threshold_measured is not None
+        or variance_threshold_indicated is not None
+    ):
+        raise ValueError(
+            "kriging_variances must be provided when variance thresholds are passed."
+        )
+
+    # 3. Slope of regression criterion
+    if slopes_of_regression is not None:
+        if len(slopes_of_regression) != M:
+            raise ValueError(
+                f"Shape mismatch: slopes_of_regression length ({len(slopes_of_regression)}) must match grid_points length ({M})."
+            )
+        cats_sor = classify_resources_by_sor(
+            slopes_of_regression=slopes_of_regression,
+            kriging_efficiencies=kriging_efficiencies,
+            threshold_measured=sor_threshold_measured,
+            threshold_indicated=sor_threshold_indicated,
+            max_slope_measured=max_slope_measured,
+            min_kriging_efficiency=min_kriging_efficiency,
+        )
+        criteria_results.append(cats_sor)
+
+    if len(criteria_results) == 0:
+        raise ValueError(
+            "At least one classification criterion must be provided "
+            "(e.g. samples_xy for drill spacing, kriging_variances with thresholds, or slopes_of_regression)."
+        )
+
+    category_ranks = {
+        "Unclassified": 0,
+        "Inferred": 1,
+        "Indicated": 2,
+        "Measured": 3,
+    }
+    rank_to_category = {0: "Unclassified", 1: "Inferred", 2: "Indicated", 3: "Measured"}
+
+    ranks_matrix = np.zeros((len(criteria_results), M), dtype=int)
+    for idx, cats in enumerate(criteria_results):
+        ranks_matrix[idx] = [category_ranks.get(c, 0) for c in cats]
+
+    combined_ranks = np.min(ranks_matrix, axis=0)
+
+    if is_interpolated is not None:
+        interp_mask = np.asarray(is_interpolated, dtype=bool)
+        if len(interp_mask) != M:
+            raise ValueError(
+                f"is_interpolated length ({len(interp_mask)}) must match grid_points length ({M})."
+            )
+        combined_ranks = np.where(
+            interp_mask, combined_ranks, np.minimum(combined_ranks, 1)
+        )
+
+    return np.array([rank_to_category[r] for r in combined_ranks], dtype=object)
 
 
 def _round_sig_figs(value: float, sig_figs: int) -> float:
@@ -3335,6 +3835,17 @@ def plot_resource_to_reserve_waterfall(
     return fig, (ax_t, ax_m)
 
 
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Current status: 2D plan scatter plot of block centroids.
+# Guidelines from CONTRIBUTING.md to adhere to:
+# - Scope of this function: strictly 2D plan view mapping; add `bench_z: Optional[float] = None`
+#   and `elevation_tolerance` to render a single horizontal mining bench slice without overplotting.
+# - Keep property `boundary` distinct from drillhole data envelope (`is_within_convex_hull`).
+# - Transparent DataFrames: directly read block model DataFrame without custom wrapper objects.
+# - Following codebase conventions, 3D visualizations are implemented as separate functions:
+#   1. `plot_reserve_classification_3d_isometric`: dedicated static 3D isometric view.
+#   2. `plot_reserve_classification_3d_interactive`: dedicated interactive 3D explorer (sliders, HUD).
+#   3. `plot_reserve_classification_bench_gallery`: dedicated multi-bench elevation gallery.
 def plot_reserve_classification_map(
     block_model: pd.DataFrame,
     boundary: Optional[Sequence[tuple[float, float]]] = None,
@@ -3423,6 +3934,125 @@ def plot_reserve_classification_map(
         ax.scatter(
             drillholes["x"],
             drillholes["y"],
+            c="black",
+            s=50,
+            marker="^",
+            label=f"Drillholes (N={len(drillholes)})",
+            zorder=6,
+        )
+
+    ax.set_xlabel("Easting (m)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Northing (m)", fontsize=11, fontweight="bold")
+    ax.set_title(title, fontsize=13, fontweight="bold", pad=12)
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend(loc="upper right", framealpha=0.9, fontsize=9.5)
+    fig.tight_layout()
+    return fig, ax
+
+
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Current status: 2D plan scatter plot of block centroids.
+# Guidelines from CONTRIBUTING.md to adhere to:
+# - Scope of this function: strictly 2D plan view mapping; add `bench_z: Optional[float] = None`
+#   and `elevation_tolerance` to render a single horizontal mining bench slice without overplotting.
+# - Keep property `boundary` distinct from drillhole data envelope (`is_within_convex_hull`).
+# - Transparent DataFrames: directly read block model DataFrame without custom wrapper objects.
+# - Following codebase conventions, 3D visualizations are implemented as separate functions:
+#   1. `plot_resource_classification_3d_isometric`: dedicated static 3D isometric view (following `plot_block_model_3d_isometric`).
+#   2. `plot_resource_classification_3d_interactive`: dedicated interactive 3D explorer (following `plot_block_model_3d_interactive` with category toggles and bench sliders).
+#   3. `plot_resource_classification_bench_gallery`: dedicated multi-bench elevation gallery (following `plot_block_model_bench_gallery`).
+#   4. `plot_resource_classification_orthogonal_slices`: dedicated 3-view orthogonal slice viewer (following `plot_block_model_orthogonal_slices`).
+def plot_resource_classification_map(
+    block_model: pd.DataFrame,
+    category_col: str = "category",
+    boundary: Optional[Sequence[tuple[float, float]]] = None,
+    drillholes: Optional[pd.DataFrame] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    title: str = "CIM / JORC Mineral Resource Classification Map",
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (10, 8),
+) -> tuple[plt.Figure, plt.Axes]:
+    """Renders 2D spatial mine plan map colored by regulatory mineral resource category.
+
+    In accordance with CIM Definition Standards (2014) and JORC Code (2012):
+    - Measured Resource: Forest Green (#2ca02c)
+    - Indicated Resource: Royal Blue (#1f77b4)
+    - Inferred Resource: Amber / Orange (#ff7f0e)
+    - Unclassified: Light Grey (#d3d3d3)
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table with block coordinates and category column (e.g. 'category').
+    category_col : str, default "category"
+        Column containing resource classification string ("Measured", "Indicated", "Inferred", "Unclassified").
+    boundary : Sequence[tuple[float, float]], optional
+        Perimeter boundary polygon coordinates.
+    drillholes : pd.DataFrame, optional
+        Collar coordinates table with 'x' and 'y' columns.
+    x_col, y_col : str, default "x", "y"
+        Coordinate column names.
+    title : str, default "CIM / JORC Mineral Resource Classification Map"
+        Plot title.
+    ax : plt.Axes, optional
+        Existing axes to draw on.
+    figsize : tuple[float, float], default (10, 8)
+        Dimensions of figure.
+
+    Returns
+    -------
+    tuple[plt.Figure, plt.Axes]
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    color_palette = {
+        "Measured": "#2ca02c",      # Forest green
+        "Indicated": "#1f77b4",     # Royal Blue
+        "Inferred": "#ff7f0e",      # Amber / Orange
+        "Unclassified": "#d3d3d3",  # Light grey
+    }
+
+    # Normalize categories
+    cats_lower = block_model[category_col].astype(str).str.strip().str.lower()
+
+    # Draw blocks grouped by category
+    for cat_name, color in color_palette.items():
+        mask = cats_lower == cat_name.lower()
+        sub = block_model[mask]
+        if len(sub) > 0:
+            ax.scatter(
+                sub[x_col],
+                sub[y_col],
+                c=color,
+                label=f"{cat_name} ({len(sub):,} blocks)",
+                s=35,
+                marker="s",
+                alpha=0.85,
+                edgecolors="none",
+            )
+
+    # Draw boundary if provided
+    if boundary is not None:
+        b_pts = np.array(list(boundary) + [boundary[0]])
+        ax.plot(
+            b_pts[:, 0],
+            b_pts[:, 1],
+            "r--",
+            linewidth=2.0,
+            label="Concession Perimeter",
+        )
+
+    # Draw drillholes if provided
+    if drillholes is not None and not drillholes.empty:
+        dh_x = drillholes["x"] if "x" in drillholes else (drillholes[x_col] if x_col in drillholes else drillholes.iloc[:, 0])
+        dh_y = drillholes["y"] if "y" in drillholes else (drillholes[y_col] if y_col in drillholes else drillholes.iloc[:, 1])
+        ax.scatter(
+            dh_x,
+            dh_y,
             c="black",
             s=50,
             marker="^",
@@ -5262,6 +5892,16 @@ def plot_production_reconciliation(
 # =============================================================================
 
 
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Current status: 2D conditioning data and 2D grid nodes.
+# Guidelines from CONTRIBUTING.md to adhere to:
+# - Respect Domain Boundaries: conditional simulation must be executed independently per domain.
+# - Explicit Extrapolation Control: confine simulation paths and conditioning to data envelopes.
+# - 3D Anisotropic Covariance: support 3D variogram structures (major, semi-major, minor ranges).
+# - Functional approach: transparent NumPy arrays/DataFrames without dataclass configuration wrappers.
+# - Following codebase conventions, 3D visualizations are implemented as separate functions:
+#   1. `plot_simulation_3d_isometric`: dedicated 3D isometric view of simulation realizations / exceedance.
+#   2. `plot_simulation_3d_interactive`: dedicated interactive 3D realization explorer.
 def sequential_gaussian_simulation(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
@@ -5473,6 +6113,16 @@ def plot_simulation_realizations_dashboard(
 # =============================================================================
 # 3D BLOCK MODEL VISUALIZATION SUITE (SLICES, GALLERIES, ISOMETRIC, UNCERTAINTY)
 # =============================================================================
+# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
+# Maintain clean separation of concerns by adding dedicated functions to this suite:
+# - `plot_resource_classification_3d_isometric`: Static 3D isometric projection of CIM/JORC resource categories.
+# - `plot_resource_classification_3d_interactive`: Interactive 3D explorer with category toggles, bench slider, and HUD.
+# - `plot_resource_classification_bench_gallery`: Multi-panel elevation gallery of classification slices.
+# - `plot_resource_classification_orthogonal_slices`: 3-view orthogonal slices (XY plan, XZ cross, YZ long).
+# - `plot_reserve_classification_3d_isometric` & `plot_reserve_classification_3d_interactive`: Reserve status 3D viewers.
+# - `plot_polygonal_3d_isometric` & `plot_polygonal_3d_interactive`: 3D polygonal/NN domain viewers.
+# - `plot_simulation_3d_isometric` & `plot_simulation_3d_interactive`: 3D conditional simulation realization viewers.
+
 
 
 def _get_block_grade_norm_and_cmap(
@@ -5634,9 +6284,21 @@ def plot_block_model_orthogonal_slices(
     unique_y = np.sort(block_model["y"].unique())
     unique_x = np.sort(block_model["x"].unique())
 
-    target_z = unique_z[np.argmin(np.abs(unique_z - bench_z))] if bench_z is not None else unique_z[len(unique_z) // 2]
-    target_y = unique_y[np.argmin(np.abs(unique_y - section_y))] if section_y is not None else unique_y[len(unique_y) // 2]
-    target_x = unique_x[np.argmin(np.abs(unique_x - section_x))] if section_x is not None else unique_x[len(unique_x) // 2]
+    target_z = (
+        unique_z[np.argmin(np.abs(unique_z - bench_z))]
+        if bench_z is not None
+        else unique_z[len(unique_z) // 2]
+    )
+    target_y = (
+        unique_y[np.argmin(np.abs(unique_y - section_y))]
+        if section_y is not None
+        else unique_y[len(unique_y) // 2]
+    )
+    target_x = (
+        unique_x[np.argmin(np.abs(unique_x - section_x))]
+        if section_x is not None
+        else unique_x[len(unique_x) // 2]
+    )
 
     # Shared normalization and colormap ensuring IDENTICAL scaling between blocks and drillholes
     norm, color_map = _get_block_grade_norm_and_cmap(
@@ -5651,8 +6313,14 @@ def plot_block_model_orthogonal_slices(
     # 1. Bench Plan (X-Y at target_z)
     slice_bench = block_model[np.isclose(block_model["z"], target_z)]
     dz_val = float(slice_bench["dz"].iloc[0]) if len(slice_bench) > 0 else 5.0
-    pc1 = _render_2d_block_patches(axes[0], slice_bench, "x", "y", "dx", "dy", grade_col, norm, color_map)
-    axes[0].set_title(f"Bench Plan (Z = {target_z:.1f} m) [Looking Down]", fontsize=11, fontweight="bold")
+    pc1 = _render_2d_block_patches(
+        axes[0], slice_bench, "x", "y", "dx", "dy", grade_col, norm, color_map
+    )
+    axes[0].set_title(
+        f"Bench Plan (Z = {target_z:.1f} m) [Looking Down]",
+        fontsize=11,
+        fontweight="bold",
+    )
     axes[0].set_xlabel("Easting (X) [m]")
     axes[0].set_ylabel("Northing (Y) [m]")
     axes[0].set_aspect("equal")
@@ -5660,10 +6328,22 @@ def plot_block_model_orthogonal_slices(
     # 2. Cross-Section (X-Z at target_y)
     slice_sec = block_model[np.isclose(block_model["y"], target_y)]
     dy_val = float(slice_sec["dy"].iloc[0]) if len(slice_sec) > 0 else 10.0
-    _render_2d_block_patches(axes[1], slice_sec, "x", "z", "dx", "dz", grade_col, norm, color_map)
-    view_cs_label = "Looking North" if cross_section_view == "north" else "Looking South"
-    x_dir_label = "Easting (X) [m] (← West | East →)" if cross_section_view == "north" else "Easting (X) [m] (← East | West →)"
-    axes[1].set_title(f"Cross-Section (Y = {target_y:.1f} m) [{view_cs_label}]", fontsize=11, fontweight="bold")
+    _render_2d_block_patches(
+        axes[1], slice_sec, "x", "z", "dx", "dz", grade_col, norm, color_map
+    )
+    view_cs_label = (
+        "Looking North" if cross_section_view == "north" else "Looking South"
+    )
+    x_dir_label = (
+        "Easting (X) [m] (← West | East →)"
+        if cross_section_view == "north"
+        else "Easting (X) [m] (← East | West →)"
+    )
+    axes[1].set_title(
+        f"Cross-Section (Y = {target_y:.1f} m) [{view_cs_label}]",
+        fontsize=11,
+        fontweight="bold",
+    )
     axes[1].set_xlabel(x_dir_label)
     axes[1].set_ylabel("Elevation (Z) [m]")
     axes[1].set_aspect("equal")
@@ -5673,10 +6353,20 @@ def plot_block_model_orthogonal_slices(
     # 3. Longitudinal Section (Y-Z at target_x)
     slice_long = block_model[np.isclose(block_model["x"], target_x)]
     dx_val = float(slice_long["dx"].iloc[0]) if len(slice_long) > 0 else 10.0
-    _render_2d_block_patches(axes[2], slice_long, "y", "z", "dy", "dz", grade_col, norm, color_map)
+    _render_2d_block_patches(
+        axes[2], slice_long, "y", "z", "dy", "dz", grade_col, norm, color_map
+    )
     view_ls_label = "Looking West" if long_section_view == "west" else "Looking East"
-    y_dir_label = "Northing (Y) [m] (← South | North →)" if long_section_view == "west" else "Northing (Y) [m] (← North | South →)"
-    axes[2].set_title(f"Longitudinal Section (X = {target_x:.1f} m) [{view_ls_label}]", fontsize=11, fontweight="bold")
+    y_dir_label = (
+        "Northing (Y) [m] (← South | North →)"
+        if long_section_view == "west"
+        else "Northing (Y) [m] (← North | South →)"
+    )
+    axes[2].set_title(
+        f"Longitudinal Section (X = {target_x:.1f} m) [{view_ls_label}]",
+        fontsize=11,
+        fontweight="bold",
+    )
     axes[2].set_xlabel(y_dir_label)
     axes[2].set_ylabel("Elevation (Z) [m]")
     axes[2].set_aspect("equal")
@@ -5773,14 +6463,18 @@ def plot_block_model_bench_gallery(
             indices = np.linspace(0, len(unique_z) - 1, 6, dtype=int)
             chosen_z = unique_z[indices]
     else:
-        chosen_z = [unique_z[np.argmin(np.abs(unique_z - bz))] for bz in bench_elevations]
+        chosen_z = [
+            unique_z[np.argmin(np.abs(unique_z - bz))] for bz in bench_elevations
+        ]
 
     n_plots = len(chosen_z)
     n_cols = max(1, min(n_cols, n_plots))
     n_rows = int(np.ceil(n_plots / n_cols))
 
     fig_size = figsize or (5.5 * n_cols + 1.5, 4.8 * n_rows)
-    fig, axes_flat = plt.subplots(n_rows, n_cols, figsize=fig_size, constrained_layout=True, squeeze=False)
+    fig, axes_flat = plt.subplots(
+        n_rows, n_cols, figsize=fig_size, constrained_layout=True, squeeze=False
+    )
     axes = axes_flat.ravel()
 
     norm, color_map = _get_block_grade_norm_and_cmap(
@@ -5795,7 +6489,9 @@ def plot_block_model_bench_gallery(
         ax = axes[i]
         df_bench = block_model[np.isclose(block_model["z"], bz)]
         dz_val = float(df_bench["dz"].iloc[0]) if len(df_bench) > 0 else 5.0
-        last_pc = _render_2d_block_patches(ax, df_bench, "x", "y", "dx", "dy", grade_col, norm, color_map)
+        last_pc = _render_2d_block_patches(
+            ax, df_bench, "x", "y", "dx", "dy", grade_col, norm, color_map
+        )
         ax.set_title(f"Level Z = {bz:.1f} m", fontsize=10, fontweight="bold")
         ax.set_xlabel("Easting (X) [m]")
         ax.set_ylabel("Northing (Y) [m]")
@@ -5822,7 +6518,9 @@ def plot_block_model_bench_gallery(
         axes[j].set_visible(False)
 
     if last_pc is not None:
-        cbar = fig.colorbar(last_pc, ax=axes[:n_plots], orientation="vertical", shrink=0.85, pad=0.015)
+        cbar = fig.colorbar(
+            last_pc, ax=axes[:n_plots], orientation="vertical", shrink=0.85, pad=0.015
+        )
         cbar.set_label(f"Block Grade ({grade_unit})", fontsize=10, fontweight="bold")
 
     fig_title = title or "3D Block Model Bench Depth Gallery (Elevation Slices)"
@@ -5852,7 +6550,7 @@ def plot_block_model_3d_isometric(
     # Filter by cutoff grade to avoid waste block occlusion
     valid_mask = np.isfinite(block_model[grade_col])
     if cutoff_grade is not None:
-        valid_mask &= (block_model[grade_col] >= cutoff_grade)
+        valid_mask &= block_model[grade_col] >= cutoff_grade
     df_plot = block_model[valid_mask]
 
     fig = plt.figure(figsize=figsize, constrained_layout=True)
@@ -5877,7 +6575,11 @@ def plot_block_model_3d_isometric(
             s=45,
             alpha=0.75,
             edgecolors="none",
-            label=f"Ore Blocks (≥ {cutoff_grade:.2f} {grade_unit})" if cutoff_grade else "Blocks",
+            label=(
+                f"Ore Blocks (≥ {cutoff_grade:.2f} {grade_unit})"
+                if cutoff_grade
+                else "Blocks"
+            ),
         )
         cbar = fig.colorbar(p, ax=ax, shrink=0.7, pad=0.08)
         cbar.set_label(f"Grade ({grade_unit})", fontsize=10, fontweight="bold")
@@ -5912,7 +6614,11 @@ def plot_block_model_3d_isometric(
     span_z = max(1.0, z_max - z_min)
     ax.set_box_aspect((span_x, span_y, span_z))
 
-    cutoff_str = f" [Cut-off ≥ {cutoff_grade:.2f} {grade_unit}]" if cutoff_grade is not None else ""
+    cutoff_str = (
+        f" [Cut-off ≥ {cutoff_grade:.2f} {grade_unit}]"
+        if cutoff_grade is not None
+        else ""
+    )
     fig_title = title or f"3D Block Model Isometric View{cutoff_str}"
     ax.set_title(fig_title, fontsize=12, fontweight="bold", pad=12)
     ax.legend(loc="upper left", framealpha=0.8)
@@ -5999,7 +6705,9 @@ def plot_block_model_3d_interactive(
     min_g = float(np.min(valid_grades)) if len(valid_grades) > 0 else 0.0
     max_g = float(np.max(valid_grades)) if len(valid_grades) > 0 else 1.0
     if initial_cutoff is None:
-        init_c = float(np.percentile(valid_grades, 25)) if len(valid_grades) > 0 else min_g
+        init_c = (
+            float(np.percentile(valid_grades, 25)) if len(valid_grades) > 0 else min_g
+        )
     else:
         init_c = float(initial_cutoff)
 
@@ -6132,7 +6840,9 @@ def plot_block_model_3d_interactive(
         else:
             p._offsets3d = (np.array([]), np.array([]), np.array([]))
             p.set_array(np.array([]))
-            info_box.set_text(f"Visible: 0 / {n_tot:,} (0.0%)\n[No blocks above cut-off]")
+            info_box.set_text(
+                f"Visible: 0 / {n_tot:,} (0.0%)\n[No blocks above cut-off]"
+            )
 
         fig.canvas.draw_idle()
 
@@ -6230,7 +6940,11 @@ def plot_block_model_grade_uncertainty(
     du_col, dv_col = f"d{u_col}", f"d{v_col}"
 
     unique_s = np.sort(block_model[slice_axis].unique())
-    target_coord = unique_s[np.argmin(np.abs(unique_s - slice_coord))] if slice_coord is not None else unique_s[len(unique_s) // 2]
+    target_coord = (
+        unique_s[np.argmin(np.abs(unique_s - slice_coord))]
+        if slice_coord is not None
+        else unique_s[len(unique_s) // 2]
+    )
     df_slice = block_model[np.isclose(block_model[slice_axis], target_coord)]
     d_slice = float(df_slice[f"d{slice_axis}"].iloc[0]) if len(df_slice) > 0 else 5.0
 
@@ -6243,13 +6957,29 @@ def plot_block_model_grade_uncertainty(
         grade_bins=grade_bins,
         cmap_name=grade_cmap,
     )
-    pc_grade = _render_2d_block_patches(axes[0], df_slice, u_col, v_col, du_col, dv_col, grade_col, norm_grade, cmap_grade)
-    axes[0].set_title(f"Estimated Grade Z*(V) [{slice_axis.upper()} = {target_coord:.1f} m]", fontsize=11, fontweight="bold")
+    pc_grade = _render_2d_block_patches(
+        axes[0],
+        df_slice,
+        u_col,
+        v_col,
+        du_col,
+        dv_col,
+        grade_col,
+        norm_grade,
+        cmap_grade,
+    )
+    axes[0].set_title(
+        f"Estimated Grade Z*(V) [{slice_axis.upper()} = {target_coord:.1f} m]",
+        fontsize=11,
+        fontweight="bold",
+    )
     axes[0].set_xlabel(f"{u_col.upper()} Coordinate [m]")
     axes[0].set_ylabel(f"{v_col.upper()} Coordinate [m]")
     axes[0].set_aspect("equal")
     axes[0].grid(True, linestyle=":", alpha=0.5, zorder=1)
-    cb_g = fig.colorbar(pc_grade, ax=axes[0], orientation="vertical", shrink=0.85, pad=0.02)
+    cb_g = fig.colorbar(
+        pc_grade, ax=axes[0], orientation="vertical", shrink=0.85, pad=0.02
+    )
     cb_g.set_label(f"Grade ({grade_unit})", fontsize=10, fontweight="bold")
 
     # 2. Variance Panel with theoretical scale anchoring
@@ -6263,13 +6993,21 @@ def plot_block_model_grade_uncertainty(
     cmap_v = plt.get_cmap(var_cmap).copy()
     cmap_v.set_bad(color="#e0e0e0")
 
-    pc_var = _render_2d_block_patches(axes[1], df_slice, u_col, v_col, du_col, dv_col, var_col, norm_var, cmap_v)
-    axes[1].set_title(f"Kriging Estimation Variance σ_OK^2 [{slice_axis.upper()} = {target_coord:.1f} m]", fontsize=11, fontweight="bold")
+    pc_var = _render_2d_block_patches(
+        axes[1], df_slice, u_col, v_col, du_col, dv_col, var_col, norm_var, cmap_v
+    )
+    axes[1].set_title(
+        f"Kriging Estimation Variance σ_OK^2 [{slice_axis.upper()} = {target_coord:.1f} m]",
+        fontsize=11,
+        fontweight="bold",
+    )
     axes[1].set_xlabel(f"{u_col.upper()} Coordinate [m]")
     axes[1].set_ylabel(f"{v_col.upper()} Coordinate [m]")
     axes[1].set_aspect("equal")
     axes[1].grid(True, linestyle=":", alpha=0.5, zorder=1)
-    cb_v = fig.colorbar(pc_var, ax=axes[1], orientation="vertical", shrink=0.85, pad=0.02)
+    cb_v = fig.colorbar(
+        pc_var, ax=axes[1], orientation="vertical", shrink=0.85, pad=0.02
+    )
     cb_v.set_label("Estimation Variance (σ²)", fontsize=10, fontweight="bold")
 
     # Drillhole pierce point overlay
@@ -6308,7 +7046,9 @@ def plot_block_model_grade_uncertainty(
             )
             axes[1].legend(loc="upper right", framealpha=0.8, fontsize=8)
 
-    fig_title = title or f"Block Model Grade vs. Geostatistical Estimation Uncertainty [{slice_axis.upper()} Slice]"
+    fig_title = (
+        title
+        or f"Block Model Grade vs. Geostatistical Estimation Uncertainty [{slice_axis.upper()} Slice]"
+    )
     fig.suptitle(fig_title, fontsize=13, fontweight="bold")
     return fig, axes
-

@@ -19,6 +19,9 @@ from drs_mining.components.estimation import (
     plot_grade_tonnage_curve,
     cell_declustering,
     kriging_quality_metrics,
+    classify_resources_by_drill_spacing,
+    classify_resources_by_sor,
+    classify_resources_by_kriging_variance,
     classify_mineral_resources,
     format_resource_statement,
     plot_swath_analysis,
@@ -28,6 +31,7 @@ from drs_mining.components.estimation import (
     format_reserve_statement,
     plot_resource_to_reserve_waterfall,
     plot_reserve_classification_map,
+    plot_resource_classification_map,
     plot_in_situ_vs_diluted_curves,
     composite_drillhole_intervals,
     apply_grade_capping,
@@ -482,15 +486,322 @@ def test_plot_grade_tonnage_curve_multi_model():
         plt.close(fig)
 
 
-def test_sme_jorc_stubs():
-    pts = np.array([[15.0, 35.0]])
-    samples = np.array([[10.0, 30.0], [20.0, 40.0]])
+def test_classify_resources_by_drill_spacing():
+    # 3 samples in 2D
+    samples = np.array([[10.0, 10.0], [10.0, 30.0], [30.0, 20.0]])
+    # Points:
+    # pt0: close to all 3 samples (at (15, 20), dists to all <= 20)
+    # pt1: close to 1 sample within 25m, but 3 samples within 50m (at (10, 50))
+    # pt2: far from all samples (at (100, 100))
+    pts = np.array([
+        [15.0, 20.0],
+        [10.0, 50.0],
+        [100.0, 100.0],
+    ])
 
-    with pytest.raises(NotImplementedError):
-        kriging_quality_metrics(np.array([0.1]), block_dispersion_variance=0.25)
+    # 1. Standard classification with min_holes_measured=3, min_holes_indicated=2
+    cats = classify_resources_by_drill_spacing(
+        grid_points=pts,
+        samples_xy=samples,
+        max_radius_measured=25.0,
+        max_radius_indicated=50.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        max_radius_inferred=80.0,
+    )
+    assert cats[0] == "Measured"     # 3 samples within 25m
+    assert cats[1] == "Indicated"    # 2 samples within 50m (samples 0 and 1)
+    assert cats[2] == "Unclassified" # >80m from all samples
 
-    with pytest.raises(NotImplementedError):
-        classify_mineral_resources(pts, samples)
+    # 2. When max_radius_inferred is None, pt2 defaults to Inferred
+    cats_inf = classify_resources_by_drill_spacing(
+        grid_points=pts,
+        samples_xy=samples,
+        max_radius_measured=25.0,
+        max_radius_indicated=50.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        max_radius_inferred=None,
+    )
+    assert cats_inf[2] == "Inferred"
+
+    # 3. is_interpolated mask constraint
+    cats_masked = classify_resources_by_drill_spacing(
+        grid_points=pts,
+        samples_xy=samples,
+        max_radius_measured=25.0,
+        max_radius_indicated=50.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        is_interpolated=np.array([False, True, False]),
+    )
+    assert cats_masked[0] == "Inferred"  # Even though close to 3 holes, not interpolated -> capped at Inferred
+    assert cats_masked[1] == "Indicated" # Interpolated and satisfies Indicated
+
+    # 4. 3D grid points support
+    pts_3d = np.array([[10.0, 10.0, 5.0], [50.0, 50.0, 5.0]])
+    samples_3d = np.array([[10.0, 10.0, 5.0], [10.0, 10.0, 10.0], [10.0, 10.0, 0.0]])
+    cats_3d = classify_resources_by_drill_spacing(
+        grid_points=pts_3d,
+        samples_xy=samples_3d,
+        max_radius_measured=10.0,
+        max_radius_indicated=20.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+    )
+    assert cats_3d[0] == "Measured"
+    assert cats_3d[1] == "Inferred"
+
+    # 5. Empty inputs and edge cases
+    empty_cats = classify_resources_by_drill_spacing(np.empty((0, 2)), samples)
+    assert len(empty_cats) == 0
+
+    no_samples_cats = classify_resources_by_drill_spacing(pts, np.empty((0, 2)))
+    assert np.all(no_samples_cats == "Unclassified")
+
+    # 6. Validations
+    with pytest.raises(ValueError, match="must have shape"):
+        classify_resources_by_drill_spacing(pts, np.array([[10.0, 10.0, 10.0]]))
+    with pytest.raises(ValueError, match="Search radii"):
+        classify_resources_by_drill_spacing(pts, samples, max_radius_measured=-5.0)
+    with pytest.raises(ValueError, match=r"max_radius_measured .* must be <="):
+        classify_resources_by_drill_spacing(pts, samples, max_radius_measured=50.0, max_radius_indicated=20.0)
+    with pytest.raises(ValueError, match=r"min_holes_measured .* must be >="):
+        classify_resources_by_drill_spacing(pts, samples, min_holes_measured=1, min_holes_indicated=3)
+
+
+def test_classify_resources_by_sor():
+    sor = np.array([0.95, 0.65, 0.35, 1.20, np.nan])
+    ke = np.array([0.70, 0.40, -0.10, 0.85, 0.0])
+
+    cats = classify_resources_by_sor(
+        slopes_of_regression=sor,
+        kriging_efficiencies=ke,
+        threshold_measured=0.80,
+        threshold_indicated=0.50,
+        max_slope_measured=1.05,
+        min_kriging_efficiency=0.0,
+    )
+
+    assert cats[0] == "Measured"      # SoR 0.95, KE 0.70
+    assert cats[1] == "Indicated"     # SoR 0.65, KE 0.40
+    assert cats[2] == "Inferred"      # SoR 0.35
+    assert cats[3] == "Inferred"      # SoR 1.20 > max_slope_measured -> not Measured
+    assert cats[4] == "Unclassified"  # NaN SoR
+
+    # KE disqualification: high SoR but negative KE
+    sor_high = np.array([0.90])
+    ke_neg = np.array([-0.20])
+    cats_ke_disqual = classify_resources_by_sor(
+        slopes_of_regression=sor_high,
+        kriging_efficiencies=ke_neg,
+        min_kriging_efficiency=0.0,
+    )
+    assert cats_ke_disqual[0] == "Inferred"
+
+    # Validations
+    assert len(classify_resources_by_sor(np.array([]))) == 0
+    with pytest.raises(ValueError, match=r"threshold_measured .* must be >"):
+        classify_resources_by_sor(sor, threshold_measured=0.40, threshold_indicated=0.60)
+    with pytest.raises(ValueError, match=r"max_slope_measured .* must be >="):
+        classify_resources_by_sor(sor, threshold_measured=0.80, max_slope_measured=0.75)
+    with pytest.raises(ValueError, match="Shape mismatch"):
+        classify_resources_by_sor(sor, kriging_efficiencies=np.array([0.5, 0.5]))
+
+
+def test_classify_resources_by_kriging_variance():
+    variances = np.array([0.05, 0.15, 0.45, 0.85, -0.01, np.nan])
+
+    cats = classify_resources_by_kriging_variance(
+        kriging_variances=variances,
+        variance_threshold_measured=0.10,
+        variance_threshold_indicated=0.30,
+        variance_threshold_inferred=0.70,
+    )
+
+    assert cats[0] == "Measured"     # 0.05 <= 0.10
+    assert cats[1] == "Indicated"    # 0.10 < 0.15 <= 0.30
+    assert cats[2] == "Inferred"     # 0.30 < 0.45 <= 0.70
+    assert cats[3] == "Unclassified" # 0.85 > 0.70
+    assert cats[4] == "Unclassified" # Negative variance
+    assert cats[5] == "Unclassified" # NaN variance
+
+    # Without inferred threshold, 0.85 defaults to Inferred
+    cats_no_inf = classify_resources_by_kriging_variance(
+        kriging_variances=variances,
+        variance_threshold_measured=0.10,
+        variance_threshold_indicated=0.30,
+        variance_threshold_inferred=None,
+    )
+    assert cats_no_inf[3] == "Inferred"
+
+    # Validations
+    assert len(classify_resources_by_kriging_variance(np.array([]), 0.1, 0.2)) == 0
+    with pytest.raises(ValueError, match="Variance thresholds must be strictly positive"):
+        classify_resources_by_kriging_variance(variances, -0.1, 0.2)
+    with pytest.raises(ValueError, match=r"variance_threshold_measured .* must be <"):
+        classify_resources_by_kriging_variance(variances, 0.3, 0.2)
+    with pytest.raises(ValueError, match=r"variance_threshold_inferred .* must be >"):
+        classify_resources_by_kriging_variance(variances, 0.1, 0.3, variance_threshold_inferred=0.25)
+
+
+def test_classify_mineral_resources_unified():
+    # Grid points and samples
+    samples = np.array([[10.0, 10.0], [10.0, 30.0], [30.0, 20.0]])
+    pts = np.array([
+        [15.0, 20.0],  # Close to 3 samples -> Spacing: Measured (3)
+        [10.0, 50.0],  # Close to 1 sample within 25m, 3 samples within 50m -> Spacing: Indicated (2)
+        [80.0, 80.0],  # Extrapolated (>50m from all samples) -> Spacing: Inferred (1)
+    ])
+
+    # 1. Pure drill spacing mode
+    cats_spacing = classify_mineral_resources(
+        grid_points=pts,
+        samples_xy=samples,
+        max_radius_measured=25.0,
+        max_radius_indicated=50.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+    )
+    assert cats_spacing[0] == "Measured"
+    assert cats_spacing[1] == "Indicated"
+    assert cats_spacing[2] == "Inferred"
+
+    # 2. Multi-criteria mode: Spacing + Kriging Variance (conservative downgrade rule)
+    # Block 0: Spacing is Measured, but high variance (0.25) -> downgraded to Indicated
+    # Block 1: Spacing is Indicated, low variance (0.05) -> still Indicated (cannot exceed spacing)
+    # Block 2: Spacing is Inferred, low variance (0.05) -> still Inferred
+    ok_vars = np.array([0.25, 0.05, 0.05])
+    cats_multi = classify_mineral_resources(
+        grid_points=pts,
+        samples_xy=samples,
+        kriging_variances=ok_vars,
+        max_radius_measured=25.0,
+        max_radius_indicated=50.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        variance_threshold_measured=0.10,
+        variance_threshold_indicated=0.30,
+    )
+    assert cats_multi[0] == "Indicated"  # Downgraded from Measured due to high variance
+    assert cats_multi[1] == "Indicated"
+    assert cats_multi[2] == "Inferred"
+
+    # 3. Triple-criteria mode: Spacing + Variance + Slope of Regression
+    # Block 0 with perfect variance and perfect SoR -> Measured
+    # Block 1 with low SoR (0.30) -> downgraded to Inferred
+    ok_vars_ideal = np.array([0.05, 0.05, 0.05])
+    sor = np.array([0.95, 0.30, 0.95])
+    ke = np.array([0.80, 0.20, 0.80])
+    cats_triple = classify_mineral_resources(
+        grid_points=pts,
+        samples_xy=samples,
+        kriging_variances=ok_vars_ideal,
+        variance_threshold_measured=0.10,
+        variance_threshold_indicated=0.30,
+        slopes_of_regression=sor,
+        kriging_efficiencies=ke,
+    )
+    assert cats_triple[0] == "Measured"
+    assert cats_triple[1] == "Inferred"  # Downgraded from Indicated to Inferred because SoR < 0.50
+
+    # 4. Extrapolation mask
+    cats_interp = classify_mineral_resources(
+        grid_points=pts,
+        samples_xy=samples,
+        max_radius_measured=25.0,
+        max_radius_indicated=50.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        is_interpolated=np.array([False, True, True]),
+    )
+    assert cats_interp[0] == "Inferred"  # Outside interpolation mask -> capped at Inferred
+
+    # 5. Error handling and validations
+    with pytest.raises(ValueError, match="At least one classification criterion"):
+        classify_mineral_resources(grid_points=pts)
+    with pytest.raises(ValueError, match="variance_threshold_measured and variance_threshold_indicated must be specified"):
+        classify_mineral_resources(grid_points=pts, kriging_variances=ok_vars)
+    with pytest.raises(ValueError, match="kriging_variances must be provided when variance thresholds"):
+        classify_mineral_resources(grid_points=pts, variance_threshold_measured=0.10)
+    with pytest.raises(ValueError, match="Shape mismatch"):
+        classify_mineral_resources(
+            grid_points=pts,
+            kriging_variances=np.array([0.1, 0.2]),
+            variance_threshold_measured=0.1,
+            variance_threshold_indicated=0.2,
+        )
+
+    # Empty inputs
+    assert len(classify_mineral_resources(np.empty((0, 2)), samples_xy=samples)) == 0
+
+
+def test_kriging_quality_metrics():
+    # 1. Standard calculation without lagrange multipliers
+    bv = 0.5
+    variances = np.array([0.0, 0.1, 0.25, 0.5, 0.6])
+    ke, sor = kriging_quality_metrics(variances, block_dispersion_variance=bv)
+
+    assert sor is None
+    expected_ke = (bv - variances) / bv
+    np.testing.assert_allclose(ke, expected_ke)
+    assert ke[0] == 1.0  # Zero variance -> 100% efficiency
+    assert ke[3] == 0.0  # Estimation variance = block variance -> 0% efficiency
+    assert ke[4] < 0.0  # Poorly estimated -> negative efficiency
+
+    # 2. Calculation with lagrange multipliers (SoR)
+    mus = np.array([0.0, 0.02, -0.05, 0.1, 0.1])
+    ke, sor = kriging_quality_metrics(
+        variances, block_dispersion_variance=bv, lagrange_multipliers=mus
+    )
+    assert sor is not None
+    assert len(sor) == len(variances)
+    # Block 0: bv=0.5, var=0.0, mu=0.0 -> SoR = 0.5 / 0.5 = 1.0
+    assert np.isclose(sor[0], 1.0)
+    # Block 1: bv=0.5, var=0.1, mu=0.02 -> (0.4 - 0.02) / (0.4 - 0.04) = 0.38 / 0.36
+    assert np.isclose(sor[1], 0.38 / 0.36)
+    # Block 2: bv=0.5, var=0.25, mu=-0.05 -> (0.25 - (-0.05)) / (0.25 - 2*(-0.05)) = 0.30 / 0.35
+    assert np.isclose(sor[2], 0.30 / 0.35)
+
+    # 3. Edge case: empty input arrays
+    ke_empty, sor_empty = kriging_quality_metrics(
+        [], block_dispersion_variance=0.5
+    )
+    assert len(ke_empty) == 0
+    assert sor_empty is None
+
+    ke_empty2, sor_empty2 = kriging_quality_metrics(
+        [], block_dispersion_variance=0.5, lagrange_multipliers=[]
+    )
+    assert len(ke_empty2) == 0
+    assert len(sor_empty2) == 0
+
+    # 4. Edge case: non-positive or invalid dispersion variance
+    with pytest.raises(ValueError, match="strictly positive"):
+        kriging_quality_metrics(variances, block_dispersion_variance=0.0)
+
+    with pytest.raises(ValueError, match="strictly positive"):
+        kriging_quality_metrics(variances, block_dispersion_variance=-0.2)
+
+    with pytest.raises(ValueError, match="valid numeric scalar"):
+        kriging_quality_metrics(variances, block_dispersion_variance=np.nan)
+
+    # 5. Edge case: shape mismatch
+    with pytest.raises(ValueError, match="Shape mismatch"):
+        kriging_quality_metrics(
+            variances,
+            block_dispersion_variance=bv,
+            lagrange_multipliers=np.array([0.01, 0.02]),
+        )
+
+    # 6. Edge case: zero denominator in SoR guarded with NaN
+    # Denominator: bv - var - 2*mu = 0.5 - 0.7 - 2*(-0.1) = 0.0
+    _, sor_div_zero = kriging_quality_metrics(
+        np.array([0.7]),
+        block_dispersion_variance=0.5,
+        lagrange_multipliers=np.array([-0.1]),
+    )
+    assert np.isnan(sor_div_zero[0])
 
 
 def test_plot_swath_analysis_dual_axis():
@@ -853,6 +1164,26 @@ def test_plot_reserve_classification_map():
     )
     assert fig is not None
     assert ax.get_title() == "Test Classification Map"
+    plt.close(fig)
+
+
+def test_plot_resource_classification_map():
+    block_model = pd.DataFrame({
+        "x": [10.0, 20.0, 30.0, 40.0],
+        "y": [10.0, 20.0, 30.0, 40.0],
+        "category": ["Measured", "Indicated", "Inferred", "Unclassified"],
+    })
+    boundary = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0), (0.0, 50.0)]
+    drillholes = pd.DataFrame({"x": [15.0, 35.0], "y": [15.0, 35.0]})
+
+    fig, ax = plot_resource_classification_map(
+        block_model,
+        boundary=boundary,
+        drillholes=drillholes,
+        title="Test Resource Classification Map",
+    )
+    assert fig is not None
+    assert ax.get_title() == "Test Resource Classification Map"
     plt.close(fig)
 
 
@@ -1267,7 +1598,7 @@ def test_create_block_model():
     ])
     sample_grades = np.array([1.5, 2.0, 1.2, 0.8, 1.8])
 
-    est, var, disp_var = ordinary_kriging_block_estimation(
+    est, var, disp_var, lagrange = ordinary_kriging_block_estimation(
         samples_xyz=samples_xyz,
         sample_grades=sample_grades,
         block_model=bm,
@@ -1279,12 +1610,25 @@ def test_create_block_model():
 
     assert len(est) == 60
     assert len(var) == 60
+    assert len(lagrange) == 60
     assert np.all(np.isfinite(est))
     assert np.all(var >= 0.0)
+    assert np.all(np.isfinite(lagrange))
     # Support effect: Block dispersion variance must be strictly positive and less than total sill (1.1)
     assert 0.0 < disp_var < 1.1
     # Block kriging variance should not exceed the total sill
     assert np.all(var <= 1.1)
+
+    # Verify kriging_quality_metrics on actual block kriging outputs
+    ke, sor = kriging_quality_metrics(
+        kriging_variances=var,
+        block_dispersion_variance=disp_var,
+        lagrange_multipliers=lagrange,
+    )
+    assert len(ke) == 60
+    assert len(sor) == 60
+    assert np.all(np.isfinite(ke))
+    assert np.all(np.isfinite(sor))
 
 
 def test_domain_constrained_estimation_all_methods():
@@ -1383,7 +1727,7 @@ def test_domain_constrained_estimation_all_methods():
         "domain": ["DomainA", "DomainB"],
     })
     samples_xyz = np.column_stack([samples_xy, np.zeros(len(samples_xy))])
-    blk_est, blk_var, blk_disp = ordinary_kriging_block_estimation(
+    blk_est, blk_var, blk_disp, blk_lag = ordinary_kriging_block_estimation(
         samples_xyz=samples_xyz,
         sample_grades=sample_grades,
         block_model=bm_domains,
@@ -1394,6 +1738,7 @@ def test_domain_constrained_estimation_all_methods():
     )
     assert np.isclose(blk_est[0], 10.0)
     assert np.isclose(blk_est[1], 1.0)
+    assert len(blk_lag) == 2
 
 
 def test_simple_kriging_block_estimation():
