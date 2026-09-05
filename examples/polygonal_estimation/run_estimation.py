@@ -1,4 +1,4 @@
-"""Example: Polygonal Mineral Reserve Estimation & Grade-Tonnage Analysis.
+"""Example: Polygonal Mineral Resource Estimation & Grade-Tonnage Analysis.
 
 Demonstrates practical resource estimation for an exploration bench using the
 method of polygons of influence (Voronoi tessellation):
@@ -6,7 +6,7 @@ method of polygons of influence (Voronoi tessellation):
 2. Defines concession / pit perimeter boundary.
 3. Computes bounded polygons of influence, volumes, and in-situ tonnages.
 4. Evaluates extrapolation limits using maximum radius of influence.
-5. Generates global reserve summary and cutoff grade-tonnage sensitivity curve.
+5. Generates global in-situ resource summary and cutoff grade-tonnage sensitivity curve.
 6. Renders 2D spatial plan map colored by assay grade.
 """
 
@@ -19,8 +19,8 @@ import pandas as pd
 
 from drs_mining.components.estimation import (
     polygonal_estimation,
-    polygonal_reserve_summary,
-    format_reserve_summary,
+    polygonal_resource_summary,
+    format_polygonal_summary,
     grade_tonnage_table,
     plot_polygonal_map,
     plot_grade_tonnage_curve,
@@ -119,12 +119,12 @@ def main():
         clip_to_convex_hull=args.clip_to_convex_hull,
     )
 
-    # 3. Print global reserve summary
-    summary = polygonal_reserve_summary(polygons_df)
-    print("\n" + format_reserve_summary(summary, grade_unit="% Cu", metal_unit="tonnes Cu"))
+    # 3. Print global in-situ resource summary
+    summary = polygonal_resource_summary(polygons_df)
+    print("\n" + format_polygonal_summary(summary, grade_unit="% Cu", metal_unit="tonnes Cu"))
 
     # 4. Detailed polygon breakdown
-    print("\n--- Individual Polygon Reserves ---")
+    print("\n--- Individual Polygon In-Situ Resources ---")
     display_cols = ["hole_id", "grade", "area_m2", "volume_m3", "tonnes", "contained_metal"]
     formatted_df = polygons_df[display_cols].copy()
     formatted_df["area_m2"] = formatted_df["area_m2"].map(lambda x: f"{x:,.0f}")
@@ -141,9 +141,9 @@ def main():
     gt_display = gt_curve.copy()
     gt_display["ore_tonnes"] = gt_display["ore_tonnes"].map(lambda x: f"{x:,.0f}")
     gt_display["ore_grade"] = gt_display["ore_grade"].map(lambda x: f"{x:.3f}%")
-    gt_display["waste_tonnes"] = gt_display["waste_tonnes"].map(lambda x: f"{x:,.0f}")
+    gt_display["internal_waste_tonnes"] = gt_display["internal_waste_tonnes"].map(lambda x: f"{x:,.0f}")
     gt_display["contained_metal"] = gt_display["contained_metal"].map(lambda x: f"{x:,.1f}")
-    gt_display["strip_ratio"] = gt_display["strip_ratio"].map(lambda x: f"{x:.2f}")
+    gt_display["internal_waste_ratio"] = gt_display["internal_waste_ratio"].map(lambda x: f"{x:.2f}")
     gt_display["ore_recovery_pct"] = gt_display["ore_recovery_pct"].map(lambda x: f"{x:.1f}%")
     gt_display["metal_recovery_pct"] = gt_display["metal_recovery_pct"].map(lambda x: f"{x:.1f}%")
     print(gt_display.to_string())

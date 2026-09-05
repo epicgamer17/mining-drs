@@ -18,6 +18,7 @@
 *.png
 *.html
 *.md
+!CONTRIBUTING.md
 
 # Directories
 site/

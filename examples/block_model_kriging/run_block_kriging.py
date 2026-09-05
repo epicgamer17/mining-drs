@@ -47,7 +47,9 @@ from drs_mining.components.estimation import (
 )
 
 
-def generate_3d_porphyry_drillholes(seed: int = 42) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+def generate_3d_porphyry_drillholes(
+    seed: int = 42,
+) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """Generates synthetic 3D exploration drillhole composites for a copper-gold deposit.
 
     Creates 20 drillholes on an irregular 60m-80m grid with 5m down-hole composites
@@ -57,12 +59,27 @@ def generate_3d_porphyry_drillholes(seed: int = 42) -> Tuple[np.ndarray, np.ndar
 
     # Drillhole collars across 400m x 400m exploration area
     collar_coords = [
-        (80.0, 80.0), (160.0, 70.0), (240.0, 90.0), (320.0, 80.0),
-        (70.0, 150.0), (150.0, 160.0), (230.0, 150.0), (310.0, 170.0),
-        (90.0, 230.0), (170.0, 240.0), (250.0, 230.0), (330.0, 250.0),
-        (80.0, 310.0), (160.0, 320.0), (240.0, 310.0), (320.0, 330.0),
+        (80.0, 80.0),
+        (160.0, 70.0),
+        (240.0, 90.0),
+        (320.0, 80.0),
+        (70.0, 150.0),
+        (150.0, 160.0),
+        (230.0, 150.0),
+        (310.0, 170.0),
+        (90.0, 230.0),
+        (170.0, 240.0),
+        (250.0, 230.0),
+        (330.0, 250.0),
+        (80.0, 310.0),
+        (160.0, 320.0),
+        (240.0, 310.0),
+        (320.0, 330.0),
         # Infill holes in high-grade central area
-        (190.0, 190.0), (210.0, 210.0), (180.0, 220.0), (220.0, 180.0),
+        (190.0, 190.0),
+        (210.0, 210.0),
+        (180.0, 220.0),
+        (220.0, 180.0),
     ]
 
     records = []
@@ -84,18 +101,20 @@ def generate_3d_porphyry_drillholes(seed: int = 42) -> Tuple[np.ndarray, np.ndar
             )
 
             # High grade core (~2.2% Cu) decaying to background halo (~0.2% Cu)
-            base_grade = 0.20 + 2.0 * np.exp(-0.5 * (dist_core ** 2))
+            base_grade = 0.20 + 2.0 * np.exp(-0.5 * (dist_core**2))
             # Geostatistical log-normal assay noise
             noise = rng.lognormal(mean=0.0, sigma=0.22)
             grade = float(np.clip(base_grade * noise, 0.05, 4.50))
 
-            records.append({
-                "hole_id": hole_id,
-                "x": cx,
-                "y": cy,
-                "z": z,
-                "grade": round(grade, 3),
-            })
+            records.append(
+                {
+                    "hole_id": hole_id,
+                    "x": cx,
+                    "y": cy,
+                    "z": z,
+                    "grade": round(grade, 3),
+                }
+            )
 
     df_dh = pd.DataFrame(records)
     samples_xyz = df_dh[["x", "y", "z"]].to_numpy()
@@ -111,6 +130,11 @@ def main():
         action="store_true",
         help="Launch interactive 3D deposit explorer with cut-off and elevation sliders",
     )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Disable plot generation and file saving",
+    )
     args = parser.parse_args()
 
     print("=" * 80)
@@ -125,9 +149,15 @@ def main():
     # -------------------------------------------------------------------------
     print("\n[Step 1] Generating 3D exploration drillholes...")
     samples_xyz, sample_grades, df_dh = generate_3d_porphyry_drillholes(seed=42)
-    print(f"  • Total composite assays: {len(df_dh)} from {df_dh['hole_id'].nunique()} drillholes")
-    print(f"  • Elevation range: Z = {df_dh['z'].min():.1f}m to {df_dh['z'].max():.1f}m")
-    print(f"  • Raw composite grade: mean={sample_grades.mean():.3f}%, std={sample_grades.std():.3f}%, max={sample_grades.max():.3f}%")
+    print(
+        f"  • Total composite assays: {len(df_dh)} from {df_dh['hole_id'].nunique()} drillholes"
+    )
+    print(
+        f"  • Elevation range: Z = {df_dh['z'].min():.1f}m to {df_dh['z'].max():.1f}m"
+    )
+    print(
+        f"  • Raw composite grade: mean={sample_grades.mean():.3f}%, std={sample_grades.std():.3f}%, max={sample_grades.max():.3f}%"
+    )
 
     # -------------------------------------------------------------------------
     # 2. Construct 3D Block Model Grid (SMUs)
@@ -135,7 +165,7 @@ def main():
     print("\n[Step 2] Constructing 3D Block Model Selective Mining Units (SMUs)...")
     origin = (20.0, 20.0, 10.0)
     block_size = (10.0, 10.0, 5.0)  # dx=10m, dy=10m, dz=5m bench height
-    n_blocks = (36, 36, 18)         # 36 x 36 x 18 = 23,328 blocks spanning 360m x 360m x 90m
+    n_blocks = (36, 36, 18)  # 36 x 36 x 18 = 23,328 blocks spanning 360m x 360m x 90m
 
     block_model = create_block_model(
         origin=origin,
@@ -145,7 +175,9 @@ def main():
         default_domain="Porphyry",
     )
     total_tonnes = block_model["tonnes"].sum() / 1e6
-    print(f"  • Block dimensions: {block_size[0]}m (E) x {block_size[1]}m (N) x {block_size[2]}m (bench)")
+    print(
+        f"  • Block dimensions: {block_size[0]}m (E) x {block_size[1]}m (N) x {block_size[2]}m (bench)"
+    )
     print(f"  • Total SMU blocks: {len(block_model):,}")
     print(f"  • Deposit in-situ tonnage: {total_tonnes:.2f} Mt @ 2.70 t/m³")
 
@@ -159,18 +191,20 @@ def main():
     range_param = 90.0
     discretization = (4, 4, 2)  # 32 internal discretization sub-points per SMU
 
-    estimates, variances, dispersion_var, lagrange_multipliers = ordinary_kriging_block_estimation(
-        samples_xyz=samples_xyz,
-        sample_grades=sample_grades,
-        block_model=block_model,
-        sill=sill,
-        range_param=range_param,
-        nugget=nugget,
-        discretization=discretization,
-        variogram_model="spherical",
-        k_neighbors=16,
-        max_radius=110.0,
-        min_samples=2,
+    estimates, variances, dispersion_var, lagrange_multipliers = (
+        ordinary_kriging_block_estimation(
+            samples_xyz=samples_xyz,
+            sample_grades=sample_grades,
+            block_model=block_model,
+            sill=sill,
+            range_param=range_param,
+            nugget=nugget,
+            discretization=discretization,
+            variogram_model="spherical",
+            k_neighbors=16,
+            max_radius=110.0,
+            min_samples=2,
+        )
     )
 
     block_model["estimated_grade"] = estimates
@@ -187,14 +221,20 @@ def main():
 
     # Support Effect Analysis
     bv = dispersion_var  # Block Dispersion Variance BV = C_bar(V, V) = sigma^2(V|D)
-    within_block_var = total_sill - bv  # Within-block variance gamma_bar(V, V) = sigma^2(v|V)
+    within_block_var = (
+        total_sill - bv
+    )  # Within-block variance gamma_bar(V, V) = sigma^2(v|V)
     variance_reduction = within_block_var / total_sill
     print(f"  • Theoretical Point Sill C(0): {total_sill:.4f}")
     print(f"  • Block Dispersion Variance BV = C_bar(V, V): {bv:.4f}")
     print(f"  • Within-Block Variance sigma^2(v|V): {within_block_var:.4f}")
     print(f"  • Block Support Variance Retention: {(bv / total_sill) * 100:.1f}%")
-    print(f"  • Variance Reduction from Point to Block: {variance_reduction * 100:.1f}%")
-    print(f"  • Estimated blocks: {np.sum(np.isfinite(estimates)):,} / {len(block_model):,} ({np.mean(np.isfinite(estimates))*100:.1f}%)")
+    print(
+        f"  • Variance Reduction from Point to Block: {variance_reduction * 100:.1f}%"
+    )
+    print(
+        f"  • Estimated blocks: {np.sum(np.isfinite(estimates)):,} / {len(block_model):,} ({np.mean(np.isfinite(estimates))*100:.1f}%)"
+    )
 
     # JORC / CIM Quality Diagnostics Summary
     valid_blocks = np.isfinite(kriging_eff) & np.isfinite(slope_regr)
@@ -212,8 +252,12 @@ def main():
     pct_indicated = float(np.mean(sor_categories[valid_blocks] == "Indicated") * 100.0)
     print(f"  • Mean Kriging Efficiency (KE): {mean_ke * 100:.1f}%")
     print(f"  • Mean Slope of Regression (SoR): {mean_sor:.3f}")
-    print(f"  • High Confidence Blocks (0.80 ≤ SoR ≤ 1.05, KE > 0, Measured candidate): {pct_measured:.1f}%")
-    print(f"  • Moderate Confidence Blocks (0.50 ≤ SoR < 0.80, KE > 0, Indicated candidate): {pct_indicated:.1f}%")
+    print(
+        f"  • High Confidence Blocks (0.80 ≤ SoR ≤ 1.05, KE > 0, Measured candidate): {pct_measured:.1f}%"
+    )
+    print(
+        f"  • Moderate Confidence Blocks (0.50 ≤ SoR < 0.80, KE > 0, Indicated candidate): {pct_indicated:.1f}%"
+    )
 
     # Multi-criteria Resource Classification (Spacing + SoR + KE)
     resource_categories = classify_mineral_resources(
@@ -242,121 +286,121 @@ def main():
         tonnes_col="tonnes",
         cutoffs=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5],
     )
-    print(gt_df[["ore_tonnes", "ore_grade", "contained_metal", "ore_recovery_pct"]].to_string())
+    print(
+        gt_df[
+            ["ore_tonnes", "ore_grade", "contained_metal", "ore_recovery_pct"]
+        ].to_string()
+    )
 
     # Discrete reporting cut-off intervals matching mining standards
     grade_bins = [0.0, 0.4, 0.8, 1.2, 1.6, 2.2, 3.5]
 
     # -------------------------------------------------------------------------
-    # 5. Method 1: Orthogonal Slices (Bench Plan, Cross-Section, Long-Section)
+    # 5. Visualizations (Method 1 to 4 & Resource Map)
     # -------------------------------------------------------------------------
-    print("\n[Step 5] Generating Method 1: Orthogonal Slices...")
-    fig1, _ = plot_block_model_orthogonal_slices(
-        block_model=block_model,
-        grade_col="estimated_grade",
-        bench_z=47.5,      # Central mining bench
-        section_y=205.0,    # Central E-W cross section
-        section_x=205.0,    # Central N-S longitudinal section
-        samples_xyz=samples_xyz,
-        sample_grades=sample_grades,
-        grade_bins=grade_bins,
-        grade_unit="% Cu",
-        title="Method 1: 3D Block Model Orthogonal Slices & Drillhole Reconciliation",
-    )
-    fig1_path = output_dir / "block_kriging_orthogonal_slices.png"
-    fig1.savefig(fig1_path, dpi=200, bbox_inches="tight")
-    plt.close(fig1)
-    print(f"  -> Saved: {fig1_path}")
+    if not args.no_plot:
+        print("\n[Step 5] Generating Method 1: Orthogonal Slices...")
+        fig1, _ = plot_block_model_orthogonal_slices(
+            block_model=block_model,
+            grade_col="estimated_grade",
+            bench_z=47.5,  # Central mining bench
+            section_y=205.0,  # Central E-W cross section
+            section_x=205.0,  # Central N-S longitudinal section
+            samples_xyz=samples_xyz,
+            sample_grades=sample_grades,
+            grade_bins=grade_bins,
+            grade_unit="% Cu",
+            title="Method 1: 3D Block Model Orthogonal Slices & Drillhole Reconciliation",
+        )
+        fig1_path = output_dir / "block_kriging_orthogonal_slices.png"
+        fig1.savefig(fig1_path, dpi=200, bbox_inches="tight")
+        plt.close(fig1)
+        print(f"  -> Saved: {fig1_path}")
 
-    # -------------------------------------------------------------------------
-    # 6. Method 2: Multi-Bench Elevation Gallery (Depth Slices)
-    # -------------------------------------------------------------------------
-    print("\n[Step 6] Generating Method 2: Multi-Bench Depth Gallery...")
-    bench_levels = [77.5, 62.5, 47.5, 32.5]  # Descending elevation benches
-    fig2, _ = plot_block_model_bench_gallery(
-        block_model=block_model,
-        grade_col="estimated_grade",
-        bench_elevations=bench_levels,
-        n_cols=2,
-        samples_xyz=samples_xyz,
-        sample_grades=sample_grades,
-        grade_bins=grade_bins,
-        grade_unit="% Cu",
-        title="Method 2: Multi-Bench Elevation Gallery (Z = 77.5m down to 32.5m)",
-        figsize=(12.0, 10.0),
-    )
-    fig2_path = output_dir / "block_kriging_bench_gallery.png"
-    fig2.savefig(fig2_path, dpi=200, bbox_inches="tight")
-    plt.close(fig2)
-    print(f"  -> Saved: {fig2_path}")
+        print("\n[Step 6] Generating Method 2: Multi-Bench Depth Gallery...")
+        bench_levels = [77.5, 62.5, 47.5, 32.5]  # Descending elevation benches
+        fig2, _ = plot_block_model_bench_gallery(
+            block_model=block_model,
+            grade_col="estimated_grade",
+            bench_elevations=bench_levels,
+            n_cols=2,
+            samples_xyz=samples_xyz,
+            sample_grades=sample_grades,
+            grade_bins=grade_bins,
+            grade_unit="% Cu",
+            title="Method 2: Multi-Bench Elevation Gallery (Z = 77.5m down to 32.5m)",
+            figsize=(12.0, 10.0),
+        )
+        fig2_path = output_dir / "block_kriging_bench_gallery.png"
+        fig2.savefig(fig2_path, dpi=200, bbox_inches="tight")
+        plt.close(fig2)
+        print(f"  -> Saved: {fig2_path}")
 
-    # -------------------------------------------------------------------------
-    # 7. Method 3: 3D Isometric View (Cut-off Thresholded Ore Envelope)
-    # -------------------------------------------------------------------------
-    print("\n[Step 7] Generating Method 3: 3D Isometric View...")
-    fig3, _ = plot_block_model_3d_isometric(
-        block_model=block_model,
-        grade_col="estimated_grade",
-        cutoff_grade=0.80,  # Filter out low-grade waste to reveal high-grade core
-        samples_xyz=samples_xyz,
-        sample_grades=sample_grades,
-        grade_bins=grade_bins,
-        grade_unit="% Cu",
-        title="Method 3: 3D Isometric Mineralized Envelope (Cut-off ≥ 0.80% Cu)",
-    )
-    fig3_path = output_dir / "block_kriging_3d_isometric.png"
-    fig3.savefig(fig3_path, dpi=200, bbox_inches="tight")
-    plt.close(fig3)
-    print(f"  -> Saved: {fig3_path}")
+        print("\n[Step 7] Generating Method 3: 3D Isometric View...")
+        fig3, _ = plot_block_model_3d_isometric(
+            block_model=block_model,
+            grade_col="estimated_grade",
+            cutoff_grade=0.80,  # Filter out low-grade waste to reveal high-grade core
+            samples_xyz=samples_xyz,
+            sample_grades=sample_grades,
+            grade_bins=grade_bins,
+            grade_unit="% Cu",
+            title="Method 3: 3D Isometric Mineralized Envelope (Cut-off ≥ 0.80% Cu)",
+        )
+        fig3_path = output_dir / "block_kriging_3d_isometric.png"
+        fig3.savefig(fig3_path, dpi=200, bbox_inches="tight")
+        plt.close(fig3)
+        print(f"  -> Saved: {fig3_path}")
 
-    # -------------------------------------------------------------------------
-    # 8. Method 4: Dual Grade vs. Estimation Uncertainty Audit
-    # -------------------------------------------------------------------------
-    print("\n[Step 8] Generating Method 4: Grade vs. Kriging Variance Audit...")
-    fig4, _ = plot_block_model_grade_uncertainty(
-        block_model=block_model,
-        grade_col="estimated_grade",
-        var_col="kriging_variance",
-        slice_axis="z",
-        slice_coord=47.5,
-        samples_xyz=samples_xyz,
-        sample_grades=sample_grades,
-        grade_bins=grade_bins,
-        vmax_var=total_sill,  # Anchors colorbar to theoretical point sill C(0) = 1.0
-        vmin_var=0.0,
-        grade_unit="% Cu",
-        title="Method 4: Geostatistical Audit (Block Grade vs. Kriging Variance at Z=47.5m)",
-    )
-    fig4_path = output_dir / "block_kriging_grade_uncertainty.png"
-    fig4.savefig(fig4_path, dpi=200, bbox_inches="tight")
-    plt.close(fig4)
-    print(f"  -> Saved: {fig4_path}")
+        print("\n[Step 8] Generating Method 4: Grade vs. Kriging Variance Audit...")
+        fig4, _ = plot_block_model_grade_uncertainty(
+            block_model=block_model,
+            grade_col="estimated_grade",
+            var_col="kriging_variance",
+            slice_axis="z",
+            slice_coord=47.5,
+            samples_xyz=samples_xyz,
+            sample_grades=sample_grades,
+            grade_bins=grade_bins,
+            vmax_var=total_sill,  # Anchors colorbar to theoretical point sill C(0) = 1.0
+            vmin_var=0.0,
+            grade_unit="% Cu",
+            title="Method 4: Geostatistical Audit (Block Grade vs. Kriging Variance at Z=47.5m)",
+        )
+        fig4_path = output_dir / "block_kriging_grade_uncertainty.png"
+        fig4.savefig(fig4_path, dpi=200, bbox_inches="tight")
+        plt.close(fig4)
+        print(f"  -> Saved: {fig4_path}")
 
-    # Grade-Tonnage Curve Plot
-    fig5, _ = plot_grade_tonnage_curve(
-        gt_data=gt_df,
-        grade_unit="% Cu",
-        tonnage_unit="t",
-        title="SMU Block Model Grade-Tonnage Curve",
-    )
-    fig5_path = output_dir / "block_kriging_grade_tonnage_curve.png"
-    fig5.savefig(fig5_path, dpi=200, bbox_inches="tight")
-    plt.close(fig5)
-    print(f"  -> Saved: {fig5_path}")
+        fig5, _ = plot_grade_tonnage_curve(
+            gt_data=gt_df,
+            grade_unit="% Cu",
+            tonnage_unit="t",
+            title="SMU Block Model Grade-Tonnage Curve",
+        )
+        fig5_path = output_dir / "block_kriging_grade_tonnage_curve.png"
+        fig5.savefig(fig5_path, dpi=200, bbox_inches="tight")
+        plt.close(fig5)
+        print(f"  -> Saved: {fig5_path}")
 
-    # Method 5: Mineral Resource Classification Map (Central Bench)
-    print("\n[Step 8b] Generating Mineral Resource Classification Map (Central Bench)...")
-    bench_blocks = block_model[block_model["z"] == 47.5].copy()
-    dh_df = pd.DataFrame({"x": samples_xyz[:, 0], "y": samples_xyz[:, 1]}).drop_duplicates()
-    fig_res_map, _ = plot_resource_classification_map(
-        bench_blocks,
-        drillholes=dh_df,
-        title="3D Block Kriging: CIM / JORC Mineral Resource Classification (Bench Z = 47.5m)",
-    )
-    fig_res_path = output_dir / "block_kriging_resource_classification_map.png"
-    fig_res_map.savefig(fig_res_path, dpi=200, bbox_inches="tight")
-    plt.close(fig_res_map)
-    print(f"  -> Saved: {fig_res_path}")
+        print(
+            "\n[Step 8b] Generating Mineral Resource Classification Map (Central Bench)..."
+        )
+        bench_blocks = block_model[block_model["z"] == 47.5].copy()
+        dh_df = pd.DataFrame(
+            {"x": samples_xyz[:, 0], "y": samples_xyz[:, 1]}
+        ).drop_duplicates()
+        fig_res_map, _ = plot_resource_classification_map(
+            bench_blocks,
+            drillholes=dh_df,
+            title="3D Block Kriging: CIM / JORC Mineral Resource Classification (Bench Z = 47.5m)",
+        )
+        fig_res_path = output_dir / "block_kriging_resource_classification_map.png"
+        fig_res_map.savefig(fig_res_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_res_map)
+        print(f"  -> Saved: {fig_res_path}")
+    else:
+        print("\n[Plotting skipped via --no-plot]")
 
     # -------------------------------------------------------------------------
     # 9. Optional Interactive 3D Explorer

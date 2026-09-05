@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+import warnings
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon as MplPolygon, Rectangle as MplRectangle
 from matplotlib.widgets import Slider, Button
@@ -21,7 +22,9 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import MultiPoint, Point, Polygon, box
 from shapely.ops import voronoi_diagram
-from scipy.spatial import KDTree, Delaunay
+from scipy.spatial import KDTree, cKDTree, Delaunay
+from scipy.sparse import lil_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy import stats
 
 
@@ -37,8 +40,8 @@ from scipy import stats
 #   declustered validation benchmark for comparative grade-tonnage audits and swath plots.
 def polygonal_estimation(
     drillholes: pd.DataFrame,
+    bulk_density: float,
     boundary: Optional[Sequence[Tuple[float, float]]] = None,
-    bulk_density: float = 2.7,
     max_radius: Optional[float] = None,
     clip_to_convex_hull: bool = False,
     grade_col: str = "grade",
@@ -48,8 +51,9 @@ def polygonal_estimation(
     hole_id_col: str = "hole_id",
     domain_col: Optional[str] = None,
     domain_boundaries: Optional[Mapping[Any, Sequence[Tuple[float, float]]]] = None,
+    metal_factor: float = 0.01,
 ) -> pd.DataFrame:
-    """Estimates mineral reserves using the method of polygons of influence (Voronoi tessellation).
+    """Estimates in-situ mineral resources and volumes using the method of polygons of influence (Voronoi tessellation).
 
     Supports geological domain boundaries: when `domain_col` is provided, Voronoi tessellations
     are constructed strictly within each domain, ensuring polygons never cross geological contacts.
@@ -58,10 +62,11 @@ def polygonal_estimation(
     ----------
     drillholes : pd.DataFrame
         DataFrame of exploration drill holes or blast holes with coordinates, assays, and intercept thicknesses.
+    bulk_density : float
+        Specific gravity / bulk density in tonnes per cubic meter (t/m^3).
+        Site-specific parameter required without default.
     boundary : Sequence[Tuple[float, float]], optional
         Closed polygon coordinates [(x1, y1), (x2, y2), ...] defining concession or pit perimeter.
-    bulk_density : float, default 2.7
-        Specific gravity / bulk density in tonnes per cubic meter (t/m^3).
     max_radius : float, optional
         Maximum radius of influence (meters) to restrict spatial extrapolation around each drillhole.
     clip_to_convex_hull : bool, default False
@@ -82,6 +87,9 @@ def polygonal_estimation(
         by domain, honoring hard geological boundaries.
     domain_boundaries : Mapping[Any, Sequence[Tuple[float, float]]], optional
         Mapping from domain identifier to boundary polygon coordinates for that specific domain.
+    metal_factor : float, default 0.01
+        Multiplier converting (grade * tonnes) to raw metal quantity (e.g., tonnes of metal).
+        Default is 0.01 for percentage grades (% Cu). For g/t or ppm, use 1e-6 (or 1.0 for grams).
 
     Returns
     -------
@@ -91,10 +99,13 @@ def polygonal_estimation(
         - area_m2: Plan area of polygon of influence (m^2)
         - volume_m3: In-situ rock volume (area * thickness)
         - tonnes: Mineral mass (volume * bulk_density)
-        - contained_metal: Quantity of metal (tonnes * grade)
+        - contained_metal: Quantity of metal (tonnes * grade * metal_factor)
         - vertices: List of (x, y) coordinates forming the polygon perimeter
         - domain: Geological domain identifier (if domain_col provided)
     """
+    if bulk_density <= 0:
+        raise ValueError("bulk_density must be positive.")
+
     output_cols = [
         hole_id_col,
         x_col,
@@ -129,6 +140,7 @@ def polygonal_estimation(
                 y_col=y_col,
                 hole_id_col=hole_id_col,
                 domain_col=None,
+                metal_factor=metal_factor,
             )
             dom_df[domain_col] = dom
             dfs.append(dom_df)
@@ -200,7 +212,7 @@ def polygonal_estimation(
         grade = float(hole[grade_col])
         volume = area * thickness
         tonnes = volume * bulk_density
-        metal = tonnes * grade
+        metal = tonnes * grade * metal_factor
 
         # Extract exterior vertices [(x1, y1), (x2, y2), ...]
         if not clipped.is_empty and hasattr(clipped, "exterior"):
@@ -229,14 +241,15 @@ def polygonal_estimation(
     return pd.DataFrame(rows)
 
 
-def polygonal_reserve_summary(
+def polygonal_resource_summary(
     df: pd.DataFrame,
     tonnes_col: str = "tonnes",
     grade_col: str = "grade",
     area_col: str = "area_m2",
     volume_col: str = "volume_m3",
+    metal_factor: float = 0.01,
 ) -> dict[str, float]:
-    """Calculates global in-situ reserve metrics from an estimated polygon table.
+    """Calculates global in-situ resource metrics from an estimated polygon table.
 
     Parameters
     ----------
@@ -250,6 +263,9 @@ def polygonal_reserve_summary(
         Column name for polygon surface area.
     volume_col : str, default "volume_m3"
         Column name for in-situ rock volume.
+    metal_factor : float, default 0.01
+        Multiplier converting (grade * tonnes) to contained metal quantity.
+        Default is 0.01 for percentage grades (% Cu).
 
     Returns
     -------
@@ -272,8 +288,16 @@ def polygonal_reserve_summary(
     total_area = float(df[area_col].sum()) if area_col in df.columns else 0.0
     total_volume = float(df[volume_col].sum()) if volume_col in df.columns else 0.0
 
-    contained_metal = float((df[tonnes_col] * df[grade_col]).sum())
-    mean_grade = (contained_metal / total_tonnes) if total_tonnes > 0.0 else 0.0
+    if "contained_metal" in df.columns:
+        contained_metal = float(df["contained_metal"].sum())
+    else:
+        contained_metal = float((df[tonnes_col] * df[grade_col] * metal_factor).sum())
+
+    mean_grade = (
+        float((df[tonnes_col] * df[grade_col]).sum() / total_tonnes)
+        if total_tonnes > 0.0
+        else 0.0
+    )
 
     return {
         "total_tonnes": total_tonnes,
@@ -286,15 +310,15 @@ def polygonal_reserve_summary(
     }
 
 
-def format_reserve_summary(
+def format_polygonal_summary(
     summary: Mapping[str, float],
     grade_unit: str = "%",
     metal_unit: str = "units",
 ) -> str:
-    """Formats the reserve summary dictionary into an executive text table."""
+    """Formats the polygonal in-situ resource summary dictionary into an executive text table."""
     lines = [
         "=" * 64,
-        "             POLYGONAL MINERAL RESERVE SUMMARY",
+        "             POLYGONAL IN-SITU RESOURCE SUMMARY",
         "=" * 64,
         f"Total Mineral Tonnage  : {summary.get('total_tonnes', 0.0):>15,.1f} tonnes",
         f"Mean Weighted Grade    : {summary.get('mean_grade', 0.0):>15.4f} {grade_unit}",
@@ -313,19 +337,34 @@ def grade_tonnage_table(
     cutoffs: Sequence[float],
     grade_col: str = "grade",
     tonnes_col: str = "tonnes",
+    metal_factor: float = 0.01,
+    external_waste_tonnes: Optional[float] = None,
 ) -> pd.DataFrame:
-    """Computes ore-waste distribution and recovery across varying cutoff grades.
+    """Computes ore-waste distribution, internal subgrade ratio, and recovery across cutoff grades.
+
+    In open-pit and underground mining (SME Mining Engineering Handbook Ch. 6.1 and
+    CIM MRMR Best Practice Guidelines (Section 7 on Mineral Reserve Estimation and Internal Waste) (TODO: Manually Verify), sub-economic material located within the mineralized wireframe
+    is internal sub-grade waste (internal_waste_ratio = internal_waste_tonnes / ore_tonnes).
+    If external wall-rock or overburden tonnage (external_waste_tonnes) is provided,
+    the true open-pit stripping ratio is calculated:
+    strip_ratio = (external_waste_tonnes + internal_waste_tonnes) / ore_tonnes.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Polygonal or block reserve table containing tonnage and grade columns.
+        Polygonal or block model table containing tonnage and grade columns.
     cutoffs : Sequence[float]
         List of cutoff grades to evaluate (e.g. [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]).
     grade_col : str, default "grade"
         Grade column name.
     tonnes_col : str, default "tonnes"
         Tonnage column name.
+    metal_factor : float, default 0.01
+        Multiplier converting (grade * tonnes) to contained metal quantity.
+        Default is 0.01 for percentage grades (% Cu).
+    external_waste_tonnes : float, optional
+        External pit wall-rock, overburden, or interburden tonnage from pit optimization.
+        If provided, computes overall open-pit strip_ratio.
 
     Returns
     -------
@@ -333,40 +372,63 @@ def grade_tonnage_table(
         Summary table indexed by cutoff grade with columns:
         - ore_tonnes: Tonnage of mineral exceeding cutoff
         - ore_grade: Weighted average grade of ore
-        - waste_tonnes: Tonnage of sub-economic material
+        - internal_waste_tonnes: Sub-grade material within wireframe
         - contained_metal: Metal quantity in ore
-        - strip_ratio: Waste-to-ore tonnage ratio
+        - internal_waste_ratio: Internal sub-grade to ore tonnage ratio
         - ore_recovery_pct: Percentage of total deposit tonnage retained as ore
         - metal_recovery_pct: Percentage of total contained metal recovered in ore
+        - strip_ratio: Overall open-pit stripping ratio (included if external_waste_tonnes is provided)
     """
     total_tonnes = float(df[tonnes_col].sum()) if not df.empty else 0.0
-    total_metal = float((df[tonnes_col] * df[grade_col]).sum()) if not df.empty else 0.0
+    total_metal = (
+        float((df[tonnes_col] * df[grade_col] * metal_factor).sum())
+        if not df.empty
+        else 0.0
+    )
 
     rows = []
     for c in sorted(cutoffs):
         ore_mask = df[grade_col] >= c
         ore_tonnes = float(df.loc[ore_mask, tonnes_col].sum())
         ore_metal = float(
-            (df.loc[ore_mask, tonnes_col] * df.loc[ore_mask, grade_col]).sum()
+            (
+                df.loc[ore_mask, tonnes_col]
+                * df.loc[ore_mask, grade_col]
+                * metal_factor
+            ).sum()
         )
-        ore_grade = (ore_metal / ore_tonnes) if ore_tonnes > 0.0 else 0.0
-        waste_tonnes = max(0.0, total_tonnes - ore_tonnes)
-        strip_ratio = (waste_tonnes / ore_tonnes) if ore_tonnes > 0.0 else float("inf")
+        ore_grade = (
+            float(
+                (df.loc[ore_mask, tonnes_col] * df.loc[ore_mask, grade_col]).sum()
+                / ore_tonnes
+            )
+            if ore_tonnes > 0.0
+            else 0.0
+        )
+        int_waste_tonnes = max(0.0, total_tonnes - ore_tonnes)
+        int_waste_ratio = (
+            (int_waste_tonnes / ore_tonnes) if ore_tonnes > 0.0 else float("inf")
+        )
         ore_rec = (ore_tonnes / total_tonnes * 100.0) if total_tonnes > 0.0 else 0.0
         metal_rec = (ore_metal / total_metal * 100.0) if total_metal > 0.0 else 0.0
 
-        rows.append(
-            {
-                "cutoff": c,
-                "ore_tonnes": ore_tonnes,
-                "ore_grade": ore_grade,
-                "waste_tonnes": waste_tonnes,
-                "contained_metal": ore_metal,
-                "strip_ratio": strip_ratio,
-                "ore_recovery_pct": ore_rec,
-                "metal_recovery_pct": metal_rec,
-            }
-        )
+        row_dict = {
+            "cutoff": c,
+            "ore_tonnes": ore_tonnes,
+            "ore_grade": ore_grade,
+            "internal_waste_tonnes": int_waste_tonnes,
+            "contained_metal": ore_metal,
+            "internal_waste_ratio": int_waste_ratio,
+            "ore_recovery_pct": ore_rec,
+            "metal_recovery_pct": metal_rec,
+        }
+        if external_waste_tonnes is not None:
+            tot_waste = float(external_waste_tonnes) + int_waste_tonnes
+            row_dict["strip_ratio"] = (
+                (tot_waste / ore_tonnes) if ore_tonnes > 0.0 else float("inf")
+            )
+
+        rows.append(row_dict)
 
     res_df = pd.DataFrame(rows)
     return res_df.set_index("cutoff")
@@ -531,6 +593,246 @@ def is_within_convex_hull(
     return delaunay.find_simplex(grid_points) >= 0
 
 
+def compute_anisotropy_rotation_matrix(
+    dim: int = 3,
+    angles: Optional[Union[float, Sequence[float], Mapping[str, float]]] = None,
+) -> np.ndarray:
+    """Computes an orthonormal rotation matrix for 2D or 3D spatial anisotropy.
+
+    Following international geostatistical standards (CIM MRMR §6.8/§6.9, SME Handbook,
+    Deutsch & Journel 1998, SGeMS) (TODO: Manually Verify):
+    - In 2D:
+      `azimuth` (degrees clockwise from North / +Y axis) or standard strike angle.
+      Major axis is oriented along strike; minor axis is across strike.
+      R = [[sin(a), cos(a)], [cos(a), -sin(a)]]
+    - In 3D:
+      1. `azimuth` (alpha): Strike angle clockwise from North (+Y) in horizontal plane.
+      2. `dip` (beta): Downward inclination from horizontal (-90 to +90 deg).
+      3. `plunge` (theta): Pitch/rake angle in the plane of structure (-90 to +90 deg).
+      Basis vectors:
+      - u1 (major): along strike (or plunging within strike plane)
+      - u2 (semi-major): down-dip
+      - u3 (minor): normal to structure (across thickness)
+      R has rows [u1, u2, u3], so R @ x projects x onto [major, semi-major, minor].
+
+    Parameters
+    ----------
+    dim : int, default 3
+        Spatial dimension (2 or 3).
+    angles : float, Sequence[float], or Mapping[str, float], optional
+        In 2D: azimuth angle (float or dict with "azimuth"/"strike").
+        In 3D: (azimuth, dip, plunge) tuple or dict with keys "azimuth", "dip", "plunge".
+        Defaults to None (azimuth=0, dip=0, plunge=0).
+
+    Returns
+    -------
+    np.ndarray
+        Orthonormal rotation matrix of shape (dim, dim).
+    """
+    if dim == 2:
+        if angles is None:
+            azimuth = 0.0
+        elif isinstance(angles, (int, float)):
+            azimuth = float(angles)
+        elif isinstance(angles, Mapping):
+            azimuth = float(angles.get("azimuth", angles.get("strike", 0.0)))
+        else:
+            azimuth = float(angles[0]) if len(angles) > 0 else 0.0
+
+        a = np.radians(azimuth)
+        return np.array(
+            [
+                [np.sin(a), np.cos(a)],
+                [np.cos(a), -np.sin(a)],
+            ],
+            dtype=float,
+        )
+
+    elif dim == 3:
+        if angles is None:
+            azimuth, dip, plunge = 0.0, 0.0, 0.0
+        elif isinstance(angles, (int, float)):
+            azimuth, dip, plunge = float(angles), 0.0, 0.0
+        elif isinstance(angles, Mapping):
+            azimuth = float(angles.get("azimuth", angles.get("strike", 0.0)))
+            dip = float(angles.get("dip", 0.0))
+            plunge = float(angles.get("plunge", angles.get("rake", 0.0)))
+        else:
+            ang = list(angles)
+            azimuth = float(ang[0]) if len(ang) > 0 else 0.0
+            dip = float(ang[1]) if len(ang) > 1 else 0.0
+            plunge = float(ang[2]) if len(ang) > 2 else 0.0
+
+        a = np.radians(azimuth)
+        b = np.radians(dip)
+        th = np.radians(plunge)
+
+        # Strike vector (along azimuth in horizontal plane):
+        u1 = np.array([np.sin(a), np.cos(a), 0.0], dtype=float)
+        # Dip vector (perpendicular to strike, dipping downward by angle b):
+        u2 = np.array(
+            [np.cos(a) * np.cos(b), -np.sin(a) * np.cos(b), -np.sin(b)],
+            dtype=float,
+        )
+        # Normal vector (minor axis, normal to the dipping plane):
+        u3 = np.array(
+            [np.cos(a) * np.sin(b), -np.sin(a) * np.sin(b), np.cos(b)],
+            dtype=float,
+        )
+
+        # Plunge rotation in the (u1, u2) plane:
+        if abs(th) > 1e-9:
+            u1_p = np.cos(th) * u1 + np.sin(th) * u2
+            u2_p = -np.sin(th) * u1 + np.cos(th) * u2
+            u1, u2 = u1_p, u2_p
+
+        return np.vstack([u1, u2, u3])
+    else:
+        raise ValueError(f"dim must be 2 or 3, got {dim}")
+
+
+def transform_anisotropic_coordinates(
+    coords: np.ndarray,
+    ranges: Optional[Union[float, Sequence[float], Mapping[str, float]]] = None,
+    angles: Optional[Union[float, Sequence[float], Mapping[str, float]]] = None,
+) -> tuple[np.ndarray, float]:
+    """Transforms spatial coordinates into an isotropic equivalent space.
+
+    Maps physical coordinates through rotation R and aspect-ratio scaling S such that
+    Euclidean distances in the transformed space equal the anisotropic lag distance h_aniso:
+    h_aniso = a_major * sqrt( (u_major / a_major)^2 + (u_semi / a_semi)^2 + (u_minor / a_minor)^2 )
+
+    Parameters
+    ----------
+    coords : np.ndarray
+        Coordinate array of shape (..., 2) or (..., 3).
+    ranges : float, Sequence[float], or Mapping[str, float], optional
+        Directional correlation / search ranges:
+        - 2D: (range_major, range_minor) or dict with "major", "minor".
+        - 3D: (range_major, range_semi_major, range_minor) or dict with "major", "semi_major", "minor".
+        If a single scalar float or None is provided, coordinates are treated as isotropic.
+    angles : float, Sequence[float], or Mapping[str, float], optional
+        Rotation angles:
+        - 2D: azimuth angle (degrees clockwise from North).
+        - 3D: (azimuth, dip, plunge) in degrees.
+
+    Returns
+    -------
+    transformed_coords : np.ndarray
+        Coordinates in isotropic equivalent metric space of same shape as coords.
+    major_range : float
+        The reference major range a_major.
+    """
+    coords_arr = np.asarray(coords, dtype=float)
+    if coords_arr.size == 0:
+        def_range = (
+            100.0
+            if ranges is None
+            else (float(ranges) if isinstance(ranges, (int, float)) else 100.0)
+        )
+        return coords_arr, def_range
+
+    dim = coords_arr.shape[-1]
+    if dim not in (2, 3):
+        raise ValueError(f"Coordinates must have last dimension 2 or 3, got {dim}")
+
+    # 1. Parse ranges
+    if ranges is None:
+        return coords_arr, 100.0
+    if isinstance(ranges, (int, float)):
+        return coords_arr, float(ranges)
+
+    if isinstance(ranges, Mapping):
+        if dim == 2:
+            r_major = float(ranges.get("major", ranges.get("range_major", 100.0)))
+            r_minor = float(ranges.get("minor", ranges.get("range_minor", r_major)))
+            r_list = [r_major, r_minor]
+        else:
+            r_major = float(ranges.get("major", ranges.get("range_major", 100.0)))
+            r_semi = float(
+                ranges.get("semi_major", ranges.get("range_semi_major", r_major))
+            )
+            r_minor = float(ranges.get("minor", ranges.get("range_minor", r_semi)))
+            r_list = [r_major, r_semi, r_minor]
+    else:
+        r_list = [float(r) for r in ranges]
+        if dim == 2 and len(r_list) < 2:
+            raise ValueError(
+                f"2D anisotropy requires 2 ranges (major, minor), got {len(r_list)}"
+            )
+        if dim == 3 and len(r_list) < 3:
+            raise ValueError(
+                f"3D anisotropy requires 3 ranges (major, semi_major, minor), got {len(r_list)}"
+            )
+        r_major = r_list[0]
+
+    # Check if isotropic
+    is_iso = all(abs(r - r_major) < 1e-9 for r in r_list)
+    if is_iso:
+        return coords_arr, r_major
+
+    # 2. Get rotation matrix R
+    R = compute_anisotropy_rotation_matrix(dim, angles=angles)
+
+    # 3. Scaling factors relative to r_major
+    if dim == 2:
+        r_minor = max(r_list[1], 1e-6)
+        scale = np.array([1.0, r_major / r_minor], dtype=float)
+    else:
+        r_semi = max(r_list[1], 1e-6)
+        r_minor = max(r_list[2], 1e-6)
+        scale = np.array([1.0, r_major / r_semi, r_major / r_minor], dtype=float)
+
+    # 4. Transform: (coords @ R.T) * scale
+    transformed = (coords_arr @ R.T) * scale
+    return transformed, r_major
+
+
+def compute_anisotropic_distance(
+    coords1: np.ndarray,
+    coords2: Optional[np.ndarray] = None,
+    ranges: Optional[Union[float, Sequence[float], Mapping[str, float]]] = None,
+    angles: Optional[Union[float, Sequence[float], Mapping[str, float]]] = None,
+) -> np.ndarray:
+    """Computes anisotropic distance between points or coordinate lag vectors.
+
+    Parameters
+    ----------
+    coords1 : np.ndarray
+        Either coordinate differences of shape (..., dim) or point coordinates of shape (N, dim).
+    coords2 : np.ndarray, optional
+        Target coordinates of shape (M, dim) or (dim,). If None, coords1 is treated as
+        coordinate difference vectors or self-distance coordinates.
+    ranges : float, Sequence[float], or Mapping[str, float], optional
+        Directional ranges (major, semi-major, minor) or (major, minor).
+    angles : float, Sequence[float], or Mapping[str, float], optional
+        Rotation angles (azimuth, dip, plunge) or azimuth.
+
+    Returns
+    -------
+    np.ndarray
+        Array of anisotropic distances.
+    """
+    c1 = np.asarray(coords1, dtype=float)
+    if coords2 is not None:
+        c2 = np.asarray(coords2, dtype=float)
+        c1_t, _ = transform_anisotropic_coordinates(c1, ranges=ranges, angles=angles)
+        c2_t, _ = transform_anisotropic_coordinates(c2, ranges=ranges, angles=angles)
+        if c1_t.ndim == 2 and c2_t.ndim == 2:
+            diffs = c1_t[:, None, :] - c2_t[None, :, :]
+            return np.linalg.norm(diffs, axis=-1)
+        elif c1_t.ndim == 2 and c2_t.ndim == 1:
+            diffs = c1_t - c2_t[None, :]
+            return np.linalg.norm(diffs, axis=-1)
+        else:
+            diffs = c1_t - c2_t
+            return np.linalg.norm(diffs, axis=-1)
+    else:
+        # coords1 is already difference vectors
+        c1_t, _ = transform_anisotropic_coordinates(c1, ranges=ranges, angles=angles)
+        return np.linalg.norm(c1_t, axis=-1)
+
+
 # TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
 # Current status: Point-support interpolation (V -> 0) on coordinate arrays.
 # Guidelines from CONTRIBUTING.md to adhere to:
@@ -551,12 +853,18 @@ def inverse_distance_weighting(
     mask_extrapolation: bool = False,
     sample_domains: Optional[Sequence[Any]] = None,
     grid_domains: Optional[Sequence[Any]] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Inverse Distance Weighting (IDW) interpolation using a k-d tree.
 
-    Supports geological domain boundaries: when `sample_domains` and `grid_domains` are
-    provided, estimation is strictly segregated so that grid nodes are only informed
-    by samples sharing the same geological domain.
+    Supports geological domain boundaries and 2D/3D spatial anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
+    when `sample_domains` and `grid_domains` are provided, estimation is strictly segregated
+    so that grid nodes are only informed by samples sharing the same geological domain.
+    When `anisotropy_ranges` and/or `anisotropy_angles` are supplied, search neighborhoods
+    and distance weights are computed using an anisotropic search ellipsoid.
 
     Parameters
     ----------
@@ -578,6 +886,12 @@ def inverse_distance_weighting(
         Geological domain identifiers for conditioning samples of shape (N,).
     grid_domains : Sequence[Any], optional
         Geological domain identifiers for target grid points of shape (M,).
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional search ranges (major, minor) in 2D or (major, semi-major, minor) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to ranges.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles: azimuth in 2D or (azimuth, dip, plunge) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to angles.
 
     Returns
     -------
@@ -615,6 +929,16 @@ def inverse_distance_weighting(
             s_mask = s_dom == dom
             if not np.any(s_mask):
                 continue
+            dom_aniso_ranges = (
+                anisotropy_ranges[dom]
+                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
+                else anisotropy_ranges
+            )
+            dom_aniso_angles = (
+                anisotropy_angles[dom]
+                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
+                else anisotropy_angles
+            )
             est_dom, dist_dom = inverse_distance_weighting(
                 samples_xy[s_mask],
                 sample_grades[s_mask],
@@ -625,19 +949,27 @@ def inverse_distance_weighting(
                 mask_extrapolation=mask_extrapolation,
                 sample_domains=None,
                 grid_domains=None,
+                anisotropy_ranges=dom_aniso_ranges,
+                anisotropy_angles=dom_aniso_angles,
             )
             estimated_grades[g_mask] = est_dom
             distances[g_mask] = dist_dom
 
         return estimated_grades, distances
 
-    # Step 1: Build spatial index
-    tree = KDTree(samples_xy)
+    # Step 1: Transform coordinates to anisotropic equivalent space if specified
+    samples_t, _ = transform_anisotropic_coordinates(
+        samples_xy, ranges=anisotropy_ranges, angles=anisotropy_angles
+    )
+    grid_t, _ = transform_anisotropic_coordinates(
+        grid_points, ranges=anisotropy_ranges, angles=anisotropy_angles
+    )
 
-    # Step 2: Query k-nearest neighbors within search radius
+    # Step 2: Build spatial index and query k-nearest neighbors
+    tree = KDTree(samples_t)
     upper_bound = max_radius if max_radius is not None else float("inf")
     distances, indices = tree.query(
-        grid_points, k=k_neighbors, distance_upper_bound=upper_bound
+        grid_t, k=k_neighbors, distance_upper_bound=upper_bound
     )
 
     # Ensure uniform 2D shape (M, k) even when k_neighbors == 1
@@ -701,7 +1033,7 @@ def inverse_distance_weighting(
 # Guidelines from CONTRIBUTING.md to adhere to:
 # - Core standard: 3D Nearest Neighbor on the block model is the mandatory declustered benchmark
 #   proxy for swath plot local bias audits (`plot_swath_analysis`) and comparative grade-tonnage
-#   audits (`plot_grade_tonnage_curve`) per JORC Table 1 and NI 43-101.
+#   audits (`plot_grade_tonnage_curve`) per JORC Table 1 and NI 43-101 (TODO: Manually Verify).
 # - Domain segregation: respect domain boundaries (`sample_domains`, `grid_domains`).
 # - Extrapolation control: enforce `mask_extrapolation` and `max_radius`.
 # - No fallback layers: direct functional block model routine accepting DataFrame and returning DataFrame.
@@ -713,17 +1045,24 @@ def nearest_neighbor_grid_estimation(
     mask_extrapolation: bool = False,
     sample_domains: Optional[Sequence[Any]] = None,
     grid_domains: Optional[Sequence[Any]] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Nearest neighbor estimation (IDW with k=1) with optional domain segregation."""
+    """Nearest neighbor estimation (IDW with k=1) with optional domain segregation and anisotropy."""
     return inverse_distance_weighting(
         samples_xy,
         sample_grades,
         grid_points,
+        power=1.0,
         k_neighbors=1,
         max_radius=max_radius,
         mask_extrapolation=mask_extrapolation,
         sample_domains=sample_domains,
         grid_domains=grid_domains,
+        anisotropy_ranges=anisotropy_ranges,
+        anisotropy_angles=anisotropy_angles,
     )
 
 
@@ -732,34 +1071,72 @@ def _theoretical_covariance(
     model: str = "spherical",
     nugget: float = 0.0,
     sill: float = 1.0,
-    range_param: float = 100.0,
+    range_param: Union[float, Sequence[float], Mapping[str, float]] = 100.0,
+    anisotropy_ranges: Optional[
+        Union[float, Sequence[float], Mapping[str, float]]
+    ] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[str, float]]
+    ] = None,
 ) -> np.ndarray:
     """Evaluates theoretical spatial covariance C(h) = (c0 + c) - gamma(h).
+
+    Supports 2D and 3D geometric anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify): if separation vectors
+    or anisotropic ranges are provided, lag distances are computed using the anisotropic metric.
 
     Parameters
     ----------
     h : np.ndarray
-        Separation lag distance array.
+        Separation lag distance array, or separation coordinate difference array of shape (..., dim).
     model : str, default "spherical"
         Variogram model ("spherical", "exponential", "gaussian").
     nugget : float, default 0.0
         Nugget variance c0 (micro-scale variance / noise at h=0).
     sill : float, default 1.0
         Partial sill variance c (total sill is c0 + c).
-    range_param : float, default 100.0
-        Practical correlation range a.
+    range_param : float, Sequence[float], or Mapping, default 100.0
+        Practical correlation range a (or directional ranges).
+    anisotropy_ranges : float, Sequence[float], or Mapping, optional
+        Directional ranges (major, semi-major, minor) or (major, minor).
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth, dip, plunge) or azimuth.
 
     Returns
     -------
     np.ndarray
-        Covariance values C(h) of identical shape to h.
+        Covariance values C(h) of identical shape to h (or leading shape if h was coordinates).
     """
     c0 = float(nugget)
     c = float(sill)
-    a = max(float(range_param), 1e-6)
     total_sill = c0 + c
 
     h_arr = np.asarray(h, dtype=float)
+
+    eff_ranges = (
+        anisotropy_ranges
+        if anisotropy_ranges is not None
+        else (range_param if isinstance(range_param, (Sequence, Mapping)) else None)
+    )
+    if eff_ranges is not None and h_arr.ndim >= 1 and h_arr.shape[-1] in (2, 3):
+        h_arr = compute_anisotropic_distance(
+            h_arr, ranges=eff_ranges, angles=anisotropy_angles
+        )
+        a = (
+            float(eff_ranges["major"])
+            if isinstance(eff_ranges, Mapping) and "major" in eff_ranges
+            else (
+                float(eff_ranges[0])
+                if isinstance(eff_ranges, Sequence)
+                else float(eff_ranges)
+            )
+        )
+    elif isinstance(range_param, Mapping):
+        a = float(range_param.get("major", list(range_param.values())[0]))
+    elif isinstance(range_param, Sequence):
+        a = float(range_param[0])
+    else:
+        a = max(float(range_param), 1e-6)
+
     gamma = np.zeros_like(h_arr)
 
     # Positive lag mask (at h=0, gamma=0, C(0) = total_sill)
@@ -799,7 +1176,7 @@ def simple_kriging_grid_estimation(
     grid_points: np.ndarray,
     mean: Union[float, Mapping[Any, float]],
     sill: Union[float, Mapping[Any, float]],
-    range_param: Union[float, Mapping[Any, float]],
+    range_param: Union[float, Mapping[Any, float]] = 100.0,
     variogram_model: str = "spherical",
     nugget: Union[float, Mapping[Any, float]] = 0.0,
     k_neighbors: int = 16,
@@ -807,13 +1184,17 @@ def simple_kriging_grid_estimation(
     mask_extrapolation: bool = False,
     sample_domains: Optional[Sequence[Any]] = None,
     grid_domains: Optional[Sequence[Any]] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Simple Kriging (SK) grid interpolation with known stationary mean.
 
-    Supports geological domain boundaries: when `sample_domains` and `grid_domains` are
-    provided, estimation is strictly segregated so that grid nodes are only informed
-    by samples sharing the same geological domain. Parameter mappings (mean, sill, range,
-    nugget) can be supplied per-domain.
+    Supports geological domain boundaries and 2D/3D spatial anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
+    when `sample_domains` and `grid_domains` are provided, estimation is strictly segregated
+    so that grid nodes are only informed by samples sharing the same geological domain.
+    Parameter mappings (mean, sill, range, nugget, anisotropy) can be supplied per-domain.
 
     Parameters
     ----------
@@ -825,14 +1206,14 @@ def simple_kriging_grid_estimation(
         Target estimation coordinates of shape (M, 2) or (M, 3).
     mean : float or Mapping
         Known stationary global mean of the domain (or dict mapping domain to mean).
-    variogram_model : str, default "spherical"
-        Theoretical variogram model ("spherical", "exponential", "gaussian").
-    nugget : float or Mapping, default 0.0
-        Nugget variance c0 (or dict mapping domain to nugget).
     sill : float or Mapping, default 1.0
         Partial sill variance c (or dict mapping domain to sill).
     range_param : float or Mapping, default 100.0
         Spatial correlation range a (or dict mapping domain to range).
+    variogram_model : str, default "spherical"
+        Theoretical variogram model ("spherical", "exponential", "gaussian").
+    nugget : float or Mapping, default 0.0
+        Nugget variance c0 (or dict mapping domain to nugget).
     k_neighbors : int, default 16
         Maximum conditioning samples to query per target grid node.
     max_radius : float, optional
@@ -843,6 +1224,12 @@ def simple_kriging_grid_estimation(
         Geological domain identifiers for conditioning samples of shape (N,).
     grid_domains : Sequence[Any], optional
         Geological domain identifiers for target grid points of shape (M,).
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional ranges (major, minor) in 2D or (major, semi-major, minor) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to ranges.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles: azimuth in 2D or (azimuth, dip, plunge) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to angles.
 
     Returns
     -------
@@ -881,6 +1268,16 @@ def simple_kriging_grid_estimation(
                 range_param[dom] if isinstance(range_param, Mapping) else range_param
             )
             dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
+            dom_aniso_ranges = (
+                anisotropy_ranges[dom]
+                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
+                else anisotropy_ranges
+            )
+            dom_aniso_angles = (
+                anisotropy_angles[dom]
+                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
+                else anisotropy_angles
+            )
 
             if not np.any(s_mask):
                 estimates[g_mask] = dom_mean
@@ -901,6 +1298,8 @@ def simple_kriging_grid_estimation(
                 mask_extrapolation=mask_extrapolation,
                 sample_domains=None,
                 grid_domains=None,
+                anisotropy_ranges=dom_aniso_ranges,
+                anisotropy_angles=dom_aniso_angles,
             )
             estimates[g_mask] = est_dom
             variances[g_mask] = var_dom
@@ -914,6 +1313,11 @@ def simple_kriging_grid_estimation(
     base_nugget = (
         nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
     )
+    base_range = (
+        range_param
+        if not isinstance(range_param, Mapping)
+        else list(range_param.values())[0]
+    )
     total_sill = base_nugget + base_sill
 
     # Initialize with the prior mean and maximum uncertainty (total sill)
@@ -923,14 +1327,26 @@ def simple_kriging_grid_estimation(
     if len(samples_xy) == 0 or n_targets == 0:
         return estimates, variances
 
-    # 1. Query k nearest neighbors using KDTree
-    # A kriging system cannot have more conditioning samples than total available samples
-    k_query = min(k_neighbors, len(samples_xy))
-    tree = KDTree(samples_xy)
-    upper_bound = max_radius if max_radius is not None else float("inf")
-    distances, indices = tree.query(
-        grid_points, k=k_query, distance_upper_bound=upper_bound
+    # Transform coordinates to anisotropic equivalent space if specified
+    eff_ranges = (
+        anisotropy_ranges
+        if anisotropy_ranges is not None
+        else (
+            range_param if isinstance(range_param, (Sequence, Mapping)) else base_range
+        )
     )
+    samples_t, eff_range = transform_anisotropic_coordinates(
+        samples_xy, ranges=eff_ranges, angles=anisotropy_angles
+    )
+    grid_t, _ = transform_anisotropic_coordinates(
+        grid_points, ranges=eff_ranges, angles=anisotropy_angles
+    )
+
+    # 1. Query k nearest neighbors using KDTree in transformed space
+    k_query = min(k_neighbors, len(samples_xy))
+    tree = KDTree(samples_t)
+    upper_bound = max_radius if max_radius is not None else float("inf")
+    distances, indices = tree.query(grid_t, k=k_query, distance_upper_bound=upper_bound)
 
     if k_query == 1:
         distances = distances[:, None]
@@ -954,7 +1370,7 @@ def simple_kriging_grid_estimation(
             continue
 
         # Build sample-to-sample covariance matrix K_m of shape (k_m, k_m)
-        coords_m = samples_xy[idx_m]
+        coords_m = samples_t[idx_m]
         grades_m = sample_grades[idx_m]
 
         # Deduplicate identical sample coordinates (e.g. twin drillholes or duplicate assays)
@@ -972,7 +1388,7 @@ def simple_kriging_grid_estimation(
                         new_grades[u_idx] = grades_m[inverse_indices == u_idx].mean()
                     coords_m = unique_coords
                     grades_m = new_grades
-                    d_m = np.linalg.norm(coords_m - grid_points[m], axis=1)
+                    d_m = np.linalg.norm(coords_m - grid_t[m], axis=1)
                     k_m = len(coords_m)
                     diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
                     h_matrix = np.linalg.norm(diff_matrix, axis=2)
@@ -982,19 +1398,21 @@ def simple_kriging_grid_estimation(
             h_matrix = np.linalg.norm(diff_matrix, axis=2)
 
         K_m = _theoretical_covariance(
-            h_matrix, variogram_model, nugget, sill, range_param
+            h_matrix, variogram_model, base_nugget, base_sill, eff_range
         )
         # Regularize diagonal to prevent singular matrices from collinear samples
         K_m[np.diag_indices(k_m)] += 1e-9
 
         # Build sample-to-target covariance vector k_0_m of shape (k_m,)
-        k0_m = _theoretical_covariance(d_m, variogram_model, nugget, sill, range_param)
+        k0_m = _theoretical_covariance(
+            d_m, variogram_model, base_nugget, base_sill, eff_range
+        )
 
         # Solve linear system K_m * lambda_m = k0_m
         weights_m = np.linalg.solve(K_m, k0_m)
 
         # Simple Kriging estimate: Z*_SK = mean + sum_i lambda_i * (Z_i - mean)
-        estimates[m] = mean + np.sum(weights_m * (grades_m - mean))
+        estimates[m] = base_mean + np.sum(weights_m * (grades_m - base_mean))
 
         # Simple Kriging variance: sigma_SK^2 = C(0) - sum_i lambda_i * k0_i
         var_val = total_sill - np.sum(weights_m * k0_m)
@@ -1014,7 +1432,7 @@ def ordinary_kriging_grid_estimation(
     sample_grades: np.ndarray,
     grid_points: np.ndarray,
     sill: Union[float, Mapping[Any, float]],
-    range_param: Union[float, Mapping[Any, float]],
+    range_param: Union[float, Mapping[Any, float]] = 100.0,
     variogram_model: str = "spherical",
     nugget: Union[float, Mapping[Any, float]] = 0.0,
     k_neighbors: int = 16,
@@ -1022,13 +1440,17 @@ def ordinary_kriging_grid_estimation(
     mask_extrapolation: bool = False,
     sample_domains: Optional[Sequence[Any]] = None,
     grid_domains: Optional[Sequence[Any]] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Ordinary Kriging (OK) grid interpolation with unknown local mean.
 
-    Supports geological domain boundaries: when `sample_domains` and `grid_domains` are
-    provided, estimation is strictly segregated so that grid nodes are only informed
-    by samples sharing the same geological domain. Parameter mappings (sill, range,
-    nugget) can be supplied per-domain.
+    Supports geological domain boundaries and 2D/3D spatial anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
+    when `sample_domains` and `grid_domains` are provided, estimation is strictly segregated
+    so that grid nodes are only informed by samples sharing the same geological domain.
+    Parameter mappings (sill, range, nugget, anisotropy) can be supplied per-domain.
 
     Parameters
     ----------
@@ -1038,14 +1460,14 @@ def ordinary_kriging_grid_estimation(
         Assay grades of shape (N,).
     grid_points : np.ndarray
         Target estimation coordinates of shape (M, 2) or (M, 3).
-    variogram_model : str, default "spherical"
-        Theoretical variogram model ("spherical", "exponential", "gaussian").
-    nugget : float or Mapping, default 0.0
-        Nugget variance c0 (or dict mapping domain to nugget).
     sill : float or Mapping, default 1.0
         Partial sill variance c (or dict mapping domain to sill).
     range_param : float or Mapping, default 100.0
         Spatial correlation range a (or dict mapping domain to range).
+    variogram_model : str, default "spherical"
+        Theoretical variogram model ("spherical", "exponential", "gaussian").
+    nugget : float or Mapping, default 0.0
+        Nugget variance c0 (or dict mapping domain to nugget).
     k_neighbors : int, default 16
         Maximum conditioning samples to query per target point.
     max_radius : float, optional
@@ -1056,6 +1478,12 @@ def ordinary_kriging_grid_estimation(
         Geological domain identifiers for conditioning samples of shape (N,).
     grid_domains : Sequence[Any], optional
         Geological domain identifiers for target grid points of shape (M,).
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional ranges (major, minor) in 2D or (major, semi-major, minor) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to ranges.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles: azimuth in 2D or (azimuth, dip, plunge) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to angles.
 
     Returns
     -------
@@ -1093,6 +1521,16 @@ def ordinary_kriging_grid_estimation(
                 range_param[dom] if isinstance(range_param, Mapping) else range_param
             )
             dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
+            dom_aniso_ranges = (
+                anisotropy_ranges[dom]
+                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
+                else anisotropy_ranges
+            )
+            dom_aniso_angles = (
+                anisotropy_angles[dom]
+                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
+                else anisotropy_angles
+            )
 
             if not np.any(s_mask):
                 continue
@@ -1110,6 +1548,8 @@ def ordinary_kriging_grid_estimation(
                 mask_extrapolation=mask_extrapolation,
                 sample_domains=None,
                 grid_domains=None,
+                anisotropy_ranges=dom_aniso_ranges,
+                anisotropy_angles=dom_aniso_angles,
             )
             estimates[g_mask] = est_dom
             variances[g_mask] = var_dom
@@ -1117,11 +1557,15 @@ def ordinary_kriging_grid_estimation(
         return estimates, variances
 
     # -------------------------------------------------------------------------
-    # 1. Query k nearest neighbors for each grid point using KDTree(samples_xy).
     n_targets = len(grid_points)
     base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
     base_nugget = (
         nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
+    )
+    base_range = (
+        range_param
+        if not isinstance(range_param, Mapping)
+        else list(range_param.values())[0]
     )
     total_sill = base_nugget + base_sill
 
@@ -1132,14 +1576,26 @@ def ordinary_kriging_grid_estimation(
     if len(samples_xy) == 0 or n_targets == 0:
         return estimates, variances
 
-    # 1. Query k nearest neighbors using KDTree
-    # A kriging system cannot have more conditioning samples than total available samples
-    k_query = min(k_neighbors, len(samples_xy))
-    tree = KDTree(samples_xy)
-    upper_bound = max_radius if max_radius is not None else float("inf")
-    distances, indices = tree.query(
-        grid_points, k=k_query, distance_upper_bound=upper_bound
+    # Transform coordinates to anisotropic equivalent space if specified
+    eff_ranges = (
+        anisotropy_ranges
+        if anisotropy_ranges is not None
+        else (
+            range_param if isinstance(range_param, (Sequence, Mapping)) else base_range
+        )
     )
+    samples_t, eff_range = transform_anisotropic_coordinates(
+        samples_xy, ranges=eff_ranges, angles=anisotropy_angles
+    )
+    grid_t, _ = transform_anisotropic_coordinates(
+        grid_points, ranges=eff_ranges, angles=anisotropy_angles
+    )
+
+    # 1. Query k nearest neighbors using KDTree in transformed space
+    k_query = min(k_neighbors, len(samples_xy))
+    tree = KDTree(samples_t)
+    upper_bound = max_radius if max_radius is not None else float("inf")
+    distances, indices = tree.query(grid_t, k=k_query, distance_upper_bound=upper_bound)
 
     if k_query == 1:
         distances = distances[:, None]
@@ -1163,7 +1619,7 @@ def ordinary_kriging_grid_estimation(
             continue
 
         # Build sample-to-sample covariance matrix K_m of shape (k_m, k_m)
-        coords_m = samples_xy[idx_m]
+        coords_m = samples_t[idx_m]
         grades_m = sample_grades[idx_m]
 
         # Deduplicate identical sample coordinates (e.g. twin drillholes or duplicate assays)
@@ -1181,7 +1637,7 @@ def ordinary_kriging_grid_estimation(
                         new_grades[u_idx] = grades_m[inverse_indices == u_idx].mean()
                     coords_m = unique_coords
                     grades_m = new_grades
-                    d_m = np.linalg.norm(coords_m - grid_points[m], axis=1)
+                    d_m = np.linalg.norm(coords_m - grid_t[m], axis=1)
                     k_m = len(coords_m)
                     diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
                     h_matrix = np.linalg.norm(diff_matrix, axis=2)
@@ -1191,12 +1647,14 @@ def ordinary_kriging_grid_estimation(
             h_matrix = np.linalg.norm(diff_matrix, axis=2)
 
         K_m = _theoretical_covariance(
-            h_matrix, variogram_model, nugget, sill, range_param
+            h_matrix, variogram_model, base_nugget, base_sill, eff_range
         )
         K_m[np.diag_indices(k_m)] += 1e-9  # Regularizer to guarantee invertibility
 
         # Build sample-to-target covariance vector k0_m of shape (k_m,)
-        k0_m = _theoretical_covariance(d_m, variogram_model, nugget, sill, range_param)
+        k0_m = _theoretical_covariance(
+            d_m, variogram_model, base_nugget, base_sill, eff_range
+        )
 
         # Build augmented Ordinary Kriging matrix K_aug of shape (k_m + 1, k_m + 1):
         # [ K_m   1 ]
@@ -1242,7 +1700,7 @@ def create_block_model(
     origin: Tuple[float, float, float],
     block_size: Tuple[float, float, float],
     n_blocks: Tuple[int, int, int],
-    default_density: float = 2.70,
+    default_density: float,
     default_domain: str = "Default",
 ) -> pd.DataFrame:
     """Constructs a regular 3D Block Model DataFrame for resource estimation.
@@ -1255,8 +1713,9 @@ def create_block_model(
         (dx, dy, dz) block dimensions in meters (SMU size).
     n_blocks : tuple of (int, int, int)
         (nx, ny, nz) number of blocks along X, Y, and Z axes.
-    default_density : float, default 2.70
+    default_density : float
         Bulk density / specific gravity (t/m^3).
+        Site-specific parameter required without default.
     default_domain : str, default "Default"
         Initial geological domain identifier.
 
@@ -1274,6 +1733,8 @@ def create_block_model(
         raise ValueError("Number of blocks in each dimension must be positive.")
     if dx <= 0 or dy <= 0 or dz <= 0:
         raise ValueError("Block dimensions must be positive.")
+    if default_density <= 0:
+        raise ValueError("default_density must be positive.")
 
     # Block centroids: origin + (i + 0.5) * d
     xc = x0 + (np.arange(nx) + 0.5) * dx
@@ -1312,7 +1773,7 @@ def ordinary_kriging_block_estimation(
     sample_grades: np.ndarray,
     block_model: pd.DataFrame,
     sill: Union[float, Mapping[Any, float]],
-    range_param: Union[float, Mapping[Any, float]],
+    range_param: Union[float, Mapping[Any, float]] = 100.0,
     discretization: Tuple[int, int, int] = (4, 4, 2),
     variogram_model: str = "spherical",
     nugget: Union[float, Mapping[Any, float]] = 0.0,
@@ -1322,16 +1783,16 @@ def ordinary_kriging_block_estimation(
     domain_col: Optional[str] = None,
     sample_domains: Optional[Sequence[Any]] = None,
     sample_domain_col: Optional[Union[str, Sequence[Any]]] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     """Estimates block grades using 3D Ordinary Block Kriging with internal discretization.
 
-    Block Kriging (Journel & Huijbregts 1978; SME Handbook Section 4.5) accounts for the
-    Support Effect by discretizing each mining block into an internal grid of
-    (nx_disc * ny_disc * nz_disc) points. It calculates:
-    1. Average sample-to-block covariance: C_bar(x_i, V)
-    2. Block-to-block self-covariance: C_bar(V, V)
-    3. Block dispersion variance: BV = C(0) - C_bar(V, V)
-    4. Lagrange multipliers mu from the unbiasedness condition sum(lambda_i) = 1
+    Supports geological domain boundaries and 3D spatial anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
+    when `anisotropy_ranges` and/or `anisotropy_angles` are supplied, block discretization
+    points, sample points, and search ellipsoids are evaluated in the rotated anisotropic metric.
 
     Parameters
     ----------
@@ -1343,7 +1804,7 @@ def ordinary_kriging_block_estimation(
         Table of blocks containing centroid coordinates (x, y, z) and dimensions (dx, dy, dz).
     sill : float or Mapping
         Partial sill variance (or dict mapping domain to sill).
-    range_param : float or Mapping
+    range_param : float or Mapping, default 100.0
         Spatial correlation range (or dict mapping domain to range).
     discretization : tuple of (int, int, int), default (4, 4, 2)
         Number of internal discretization points (nx_disc, ny_disc, nz_disc) per block.
@@ -1363,6 +1824,12 @@ def ordinary_kriging_block_estimation(
         Geological domain identifiers for conditioning samples.
     sample_domain_col : str or Sequence[Any], optional
         Geological domain identifiers or column for conditioning samples.
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional ranges (major, semi-major, minor) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to ranges.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth, dip, plunge) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to angles.
 
     Returns
     -------
@@ -1400,6 +1867,16 @@ def ordinary_kriging_block_estimation(
                 range_param[dom] if isinstance(range_param, Mapping) else range_param
             )
             dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
+            dom_aniso_ranges = (
+                anisotropy_ranges[dom]
+                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
+                else anisotropy_ranges
+            )
+            dom_aniso_angles = (
+                anisotropy_angles[dom]
+                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
+                else anisotropy_angles
+            )
 
             if not np.any(s_mask):
                 continue
@@ -1419,6 +1896,8 @@ def ordinary_kriging_block_estimation(
                 min_samples=min_samples,
                 domain_col=None,
                 sample_domains=None,
+                anisotropy_ranges=dom_aniso_ranges,
+                anisotropy_angles=dom_aniso_angles,
             )
             block_estimates[b_mask] = est_dom
             block_variances[b_mask] = var_dom
@@ -1446,30 +1925,36 @@ def ordinary_kriging_block_estimation(
     dz = float(block_model["dz"].iloc[0])
 
     # 1. Compute 1D offset positions centered at 0 within [-dx/2, +dx/2]
-    # Formula: (i + 0.5) / n - 0.5 places points at cell centers of the discretization grid
     x_offsets = ((np.arange(nx) + 0.5) / nx - 0.5) * dx
     y_offsets = ((np.arange(ny) + 0.5) / ny - 0.5) * dy
     z_offsets = ((np.arange(nz) + 0.5) / nz - 0.5) * dz
 
     # 2. Meshgrid to create all 3D relative coordinate combinations
     xx, yy, zz = np.meshgrid(x_offsets, y_offsets, z_offsets, indexing="ij")
-
-    # 3. Flatten into an (M, 3) relative offset matrix, where M = nx * ny * nz  e.g. shape (32, 3)
     disc_offsets = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
 
-    # 4. Compute Block Self-Covariance $\bar{C}(V, V)$ & Dispersion Variance
-    # OPTIMIZATION: For regular blocks of identical dimensions (dx, dy, dz),
-    # the internal distances and C_bar(V, V) depend ONLY on the relative offsets.
-    # Computing it once upfront saves O(N_blocks * M^2) operations.
-    internal_diffs = disc_offsets[:, None, :] - disc_offsets[None, :, :]
+    # 3. Anisotropy Transformation
+    eff_ranges = (
+        anisotropy_ranges
+        if anisotropy_ranges is not None
+        else (
+            range_param if isinstance(range_param, (Sequence, Mapping)) else base_range
+        )
+    )
+    disc_offsets_t, eff_range = transform_anisotropic_coordinates(
+        disc_offsets, ranges=eff_ranges, angles=anisotropy_angles
+    )
+
+    # 4. Compute Block Self-Covariance C_bar(V, V) in transformed space
+    internal_diffs = disc_offsets_t[:, None, :] - disc_offsets_t[None, :, :]
     internal_dists = np.linalg.norm(internal_diffs, axis=2)
     internal_covs = _theoretical_covariance(
-        internal_dists, variogram_model, base_nugget, base_sill, base_range
+        internal_dists, variogram_model, base_nugget, base_sill, eff_range
     )
     c_vv = float(np.mean(internal_covs))
     block_dispersion_var = max(0.0, c_vv)
 
-    # 5. Neighbor Search Setup & Spatial Query
+    # 5. Neighbor Search Setup & Spatial Query in transformed space
     upper_bound = max_radius if max_radius is not None else float("inf")
     block_coords = block_model[["x", "y", "z"]].to_numpy(dtype=float)
 
@@ -1486,11 +1971,18 @@ def ordinary_kriging_block_estimation(
             lagrange_multipliers,
         )
 
-    tree = KDTree(samples_xyz)
+    samples_xyz_t, _ = transform_anisotropic_coordinates(
+        samples_xyz, ranges=eff_ranges, angles=anisotropy_angles
+    )
+    block_coords_t, _ = transform_anisotropic_coordinates(
+        block_coords, ranges=eff_ranges, angles=anisotropy_angles
+    )
+
+    tree = KDTree(samples_xyz_t)
     k_query = min(k_neighbors, len(samples_xyz))
 
     distances, indices = tree.query(
-        block_coords,
+        block_coords_t,
         k=k_query,
         distance_upper_bound=upper_bound,
     )
@@ -1507,21 +1999,20 @@ def ordinary_kriging_block_estimation(
             continue  # Insufficient sample support: remains NaN and c_vv
 
         active_indices = indices[b][valid_mask]
-        coords_active = samples_xyz[active_indices]  # shape (k, 3)
+        coords_active = samples_xyz_t[active_indices]  # shape (k, 3)
         grades_active = sample_grades[active_indices]  # shape (k,)
         k_active = len(active_indices)
 
-        # b. Get absolute coordinates of the M discretization points for block b
-        block_points = block_coords[b] + disc_offsets  # shape (M, 3)
+        # b. Get absolute coordinates of the M discretization points for block b in transformed space
+        block_points = block_coords_t[b] + disc_offsets_t  # shape (M, 3)
 
         # c. Compute Sample-to-Block covariance vector k_0 of shape (k,)
-        # Distances between each active sample i and each internal sub-point j:
         sample_to_disc_diffs = (
             coords_active[:, None, :] - block_points[None, :, :]
         )  # (k, M, 3)
         sample_to_disc_dists = np.linalg.norm(sample_to_disc_diffs, axis=2)  # (k, M)
         sample_to_disc_covs = _theoretical_covariance(
-            sample_to_disc_dists, variogram_model, base_nugget, base_sill, base_range
+            sample_to_disc_dists, variogram_model, base_nugget, base_sill, eff_range
         )
         # Average across the M sub-points: C_bar(x_i, V)
         k0_block = np.mean(sample_to_disc_covs, axis=1)  # shape (k,)
@@ -1530,14 +2021,12 @@ def ordinary_kriging_block_estimation(
         sample_diffs = coords_active[:, None, :] - coords_active[None, :, :]
         sample_dists = np.linalg.norm(sample_diffs, axis=2)
         K_mat = _theoretical_covariance(
-            sample_dists, variogram_model, base_nugget, base_sill, base_range
+            sample_dists, variogram_model, base_nugget, base_sill, eff_range
         )
         # Regularize diagonal to avoid singularity from collocated/close samples
         K_mat[np.diag_indices(k_active)] += 1e-9
 
         # e. Assemble (k+1) x (k+1) Ordinary Kriging system:
-        # [ K   1 ] [ lambda ] = [ k0_block ]
-        # [ 1^T 0 ] [   mu   ]   [    1     ]
         A = np.ones((k_active + 1, k_active + 1), dtype=float)
         A[:k_active, :k_active] = K_mat
         A[k_active, k_active] = 0.0
@@ -1562,14 +2051,13 @@ def ordinary_kriging_block_estimation(
     return block_estimates, block_variances, block_dispersion_var, lagrange_multipliers
 
 
-# TODO: potentially return within_block_variance
 def simple_kriging_block_estimation(
     samples_xyz: np.ndarray,
     sample_grades: np.ndarray,
     block_model: pd.DataFrame,
     mean: Union[float, Mapping[Any, float]],
     sill: Union[float, Mapping[Any, float]],
-    range_param: Union[float, Mapping[Any, float]],
+    range_param: Union[float, Mapping[Any, float]] = 100.0,
     discretization: Tuple[int, int, int] = (4, 4, 2),
     variogram_model: str = "spherical",
     nugget: Union[float, Mapping[Any, float]] = 0.0,
@@ -1579,12 +2067,16 @@ def simple_kriging_block_estimation(
     domain_col: Optional[str] = None,
     sample_domains: Optional[Sequence[Any]] = None,
     sample_domain_col: Optional[Union[str, Sequence[Any]]] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Estimates block grades using 3D Simple Block Kriging with a known stationary mean.
 
-    In Simple Kriging, the mean is assumed known and stationary across the domain.
-    When sample conditioning data is distant or sparse, the block estimate smoothly
-    reverts to the global prior mean m, and block kriging variance reaches C_bar(V, V).
+    Supports geological domain boundaries and 3D spatial anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
+    when `anisotropy_ranges` and/or `anisotropy_angles` are supplied, block discretization
+    points, sample points, and search ellipsoids are evaluated in the rotated anisotropic metric.
 
     Parameters
     ----------
@@ -1598,7 +2090,7 @@ def simple_kriging_block_estimation(
         Known stationary mean grade m (or dict mapping domain to mean).
     sill : float or Mapping
         Partial sill variance (or dict mapping domain to sill).
-    range_param : float or Mapping
+    range_param : float or Mapping, default 100.0
         Spatial correlation range (or dict mapping domain to range).
     discretization : tuple of (int, int, int), default (4, 4, 2)
         Number of internal discretization points (nx_disc, ny_disc, nz_disc) per block.
@@ -1618,6 +2110,12 @@ def simple_kriging_block_estimation(
         Geological domain identifiers for conditioning samples.
     sample_domain_col : str or Sequence[Any], optional
         Geological domain identifiers or column for conditioning samples.
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional ranges (major, semi-major, minor) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to ranges.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth, dip, plunge) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to angles.
 
     Returns
     -------
@@ -1655,6 +2153,16 @@ def simple_kriging_block_estimation(
                 range_param[dom] if isinstance(range_param, Mapping) else range_param
             )
             dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
+            dom_aniso_ranges = (
+                anisotropy_ranges[dom]
+                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
+                else anisotropy_ranges
+            )
+            dom_aniso_angles = (
+                anisotropy_angles[dom]
+                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
+                else anisotropy_angles
+            )
 
             if not np.any(s_mask):
                 continue
@@ -1675,6 +2183,8 @@ def simple_kriging_block_estimation(
                 min_samples=min_samples,
                 domain_col=None,
                 sample_domains=None,
+                anisotropy_ranges=dom_aniso_ranges,
+                anisotropy_angles=dom_aniso_angles,
             )
             block_estimates[b_mask] = est_dom
             block_variances[b_mask] = var_dom
@@ -1707,10 +2217,21 @@ def simple_kriging_block_estimation(
     xx, yy, zz = np.meshgrid(x_offsets, y_offsets, z_offsets, indexing="ij")
     disc_offsets = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
 
-    internal_diffs = disc_offsets[:, None, :] - disc_offsets[None, :, :]
+    eff_ranges = (
+        anisotropy_ranges
+        if anisotropy_ranges is not None
+        else (
+            range_param if isinstance(range_param, (Sequence, Mapping)) else base_range
+        )
+    )
+    disc_offsets_t, eff_range = transform_anisotropic_coordinates(
+        disc_offsets, ranges=eff_ranges, angles=anisotropy_angles
+    )
+
+    internal_diffs = disc_offsets_t[:, None, :] - disc_offsets_t[None, :, :]
     internal_dists = np.linalg.norm(internal_diffs, axis=2)
     internal_covs = _theoretical_covariance(
-        internal_dists, variogram_model, base_nugget, base_sill, base_range
+        internal_dists, variogram_model, base_nugget, base_sill, eff_range
     )
     c_vv = float(np.mean(internal_covs))
     block_dispersion_var = max(0.0, c_vv)
@@ -1725,11 +2246,18 @@ def simple_kriging_block_estimation(
     if len(samples_xyz) == 0:
         return block_estimates, block_variances, block_dispersion_var
 
-    tree = KDTree(samples_xyz)
+    samples_xyz_t, _ = transform_anisotropic_coordinates(
+        samples_xyz, ranges=eff_ranges, angles=anisotropy_angles
+    )
+    block_coords_t, _ = transform_anisotropic_coordinates(
+        block_coords, ranges=eff_ranges, angles=anisotropy_angles
+    )
+
+    tree = KDTree(samples_xyz_t)
     k_query = min(k_neighbors, len(samples_xyz))
 
     distances, indices = tree.query(
-        block_coords,
+        block_coords_t,
         k=k_query,
         distance_upper_bound=upper_bound,
     )
@@ -1744,23 +2272,23 @@ def simple_kriging_block_estimation(
             continue
 
         active_indices = indices[b][valid_mask]
-        coords_active = samples_xyz[active_indices]
+        coords_active = samples_xyz_t[active_indices]
         grades_active = sample_grades[active_indices]
         k_active = len(active_indices)
 
-        block_points = block_coords[b] + disc_offsets
+        block_points = block_coords_t[b] + disc_offsets_t
 
         sample_to_disc_diffs = coords_active[:, None, :] - block_points[None, :, :]
         sample_to_disc_dists = np.linalg.norm(sample_to_disc_diffs, axis=2)
         sample_to_disc_covs = _theoretical_covariance(
-            sample_to_disc_dists, variogram_model, base_nugget, base_sill, base_range
+            sample_to_disc_dists, variogram_model, base_nugget, base_sill, eff_range
         )
         k0_block = np.mean(sample_to_disc_covs, axis=1)
 
         sample_diffs = coords_active[:, None, :] - coords_active[None, :, :]
         sample_dists = np.linalg.norm(sample_diffs, axis=2)
         K_mat = _theoretical_covariance(
-            sample_dists, variogram_model, base_nugget, base_sill, base_range
+            sample_dists, variogram_model, base_nugget, base_sill, eff_range
         )
         K_mat[np.diag_indices(k_active)] += 1e-9
 
@@ -1789,7 +2317,7 @@ def plot_grade_tonnage_curve(
 ) -> Union[Tuple[plt.Figure, plt.Axes], Dict[str, Tuple[plt.Figure, plt.Axes]]]:
     """Plots standard dual-axis Grade–Tonnage sensitivity curves.
 
-    Conforms to NI 43-101 (Item 14) and JORC Table 1 mineral reporting standards:
+    Conforms to NI 43-101 (Item 14) and JORC Table 1 mineral reporting standards (TODO: Manually Verify):
     - Primary Y-axis (left): Ore Tonnage above cutoff (monotonically decreasing).
     - Secondary Y-axis (right): Average Grade above cutoff (monotonically increasing).
     - If a dictionary of models is provided, generates an individual, clean dual-axis
@@ -1927,7 +2455,7 @@ def cell_declustering(
 
     In exploration drilling, geologists cluster drillholes preferentially in high-grade
     zones, causing naive sample averages to overestimate global deposit grade.
-    Cell declustering (Journel 1983; Deutsch & Journel 1998; SME Handbook Section 4.3)
+    Cell declustering (Journel 1983; Deutsch & Journel 1998; SME Handbook Section 4.3) (TODO: Manually Verify)
     superimposes a regular grid over the data and assigns weights inversely proportional
     to the number of samples sharing each cell.
 
@@ -2060,7 +2588,7 @@ def plot_cell_declustering_curve(
 ) -> Tuple[plt.Figure, plt.Axes]:
     """Plots the Declustered Mean vs. Cell Size optimization curve.
 
-    Standard NI 43-101 and JORC reporting chart justifying the selected
+    Standard NI 43-101 and JORC reporting chart (TODO: Manually Verify) justifying the selected
     declustering cell size and displaying the removal of high-grade spatial bias.
 
     Parameters
@@ -2178,7 +2706,7 @@ def kriging_quality_metrics(
 
     Standard conditional bias diagnostics introduced by Danie Krige (1996) and
     Isobel Clark (1983) for Kriging Neighborhood Analysis (KNA), widely used under
-    JORC and SAMREC to optimize search parameters and assess geological confidence:
+    JORC and SAMREC (TODO: Manually Verify) to optimize search parameters and assess geological confidence:
 
     1. Kriging Efficiency (KE):
        KE = (BV - sigma_OK^2) / BV
@@ -2192,7 +2720,7 @@ def kriging_quality_metrics(
        Note: The minus signs on mu correspond to the augmented matrix system [K 1; 1^T 0]
        where K * lambda + mu * 1 = k0.
 
-    Theoretical Support Constraint (Krige 1996; SME Handbook Section 4.5):
+    Theoretical Support Constraint (Krige 1996; SME Handbook Section 4.5) (TODO: Manually Verify):
     ----------------------------------------------------------------------
     These metrics evaluate conditional bias for mining blocks of finite volume (V)
     informed by drill core samples of point volume (v). They are strictly invalid for
@@ -2263,7 +2791,7 @@ def kriging_quality_metrics(
 # TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
 # Current status: Euclidean k-d tree point distance queries.
 # Guidelines from CONTRIBUTING.md to adhere to:
-# - Reporting Standards (CIM 2014/2019, JORC 2012, NI 43-101): multi-hole confidence criteria
+# - Reporting Standards (CIM 2014/2019, JORC 2012, NI 43-101) (TODO: Manually Verify): multi-hole confidence criteria
 #   for Measured/Indicated must demonstrate continuity between INDEPENDENT drillholes.
 #   In 3D block models informed by downhole composites, multiple points along the same borehole
 #   must not falsely satisfy multi-hole requirements. Accept `hole_id_col` or collar locations.
@@ -2273,16 +2801,18 @@ def kriging_quality_metrics(
 def classify_resources_by_drill_spacing(
     grid_points: np.ndarray,
     samples_xy: np.ndarray,
-    max_radius_measured: float = 30.0,
-    max_radius_indicated: float = 60.0,
+    max_radius_measured: float,
+    max_radius_indicated: float,
     min_holes_measured: int = 3,
     min_holes_indicated: int = 2,
     max_radius_inferred: Optional[float] = None,
     is_interpolated: Optional[np.ndarray] = None,
+    anisotropy_ranges: Optional[Union[float, Sequence[float], Mapping[str, float]]] = None,
+    anisotropy_angles: Optional[Union[float, Sequence[float], Mapping[str, float]]] = None,
 ) -> np.ndarray:
     """Classifies resource blocks into confidence categories based on drillhole spacing and hole counts.
 
-    In accordance with CIM Definition Standards (2014) and JORC Code (2012) principles:
+    In accordance with CIM Definition Standards (2014) and JORC Code (2012) principles (TODO: Manually Verify):
     - Measured: Dense drillhole spacing where at least `min_holes_measured` informing
       drillholes lie within `max_radius_measured`, demonstrating high geological and grade continuity.
     - Indicated: Moderate drillhole spacing where at least `min_holes_indicated` informing
@@ -2291,16 +2821,22 @@ def classify_resources_by_drill_spacing(
       (within `max_radius_inferred` if specified).
     - Unclassified: Blocks beyond the maximum inferred search radius or lacking sufficient data.
 
+    Supports 2D and 3D geometric anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify): when `anisotropy_ranges`
+    and/or `anisotropy_angles` are supplied, search distances are evaluated along the
+    oriented search ellipsoid.
+
     Parameters
     ----------
     grid_points : np.ndarray
         Array of block centers of shape (M, 2) or (M, 3).
     samples_xy : np.ndarray
         Array of informing drillhole coordinates of shape (N, 2) or (N, 3).
-    max_radius_measured : float, default 30.0
+    max_radius_measured : float
         Maximum search radius to qualify for Measured classification.
-    max_radius_indicated : float, default 60.0
+        Site-specific parameter required without default.
+    max_radius_indicated : float
         Maximum search radius to qualify for Indicated classification.
+        Site-specific parameter required without default.
     min_holes_measured : int, default 3
         Minimum informing drillholes within `max_radius_measured` for Measured.
     min_holes_indicated : int, default 2
@@ -2312,6 +2848,10 @@ def classify_resources_by_drill_spacing(
         Boolean mask of shape (M,) indicating whether each block lies within the
         convex hull / domain interpolation volume. Blocks where `is_interpolated`
         is False cannot be classified as Measured or Indicated (capped at Inferred).
+    anisotropy_ranges : float, Sequence[float], or Mapping, optional
+        Directional ranges (major, minor) in 2D or (major, semi-major, minor) in 3D.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth in 2D, or azimuth, dip, plunge in 3D).
 
     Returns
     -------
@@ -2364,11 +2904,18 @@ def classify_resources_by_drill_spacing(
     if N == 0:
         return np.full(M, "Unclassified", dtype=object)
 
-    tree = KDTree(samples)
+    samples_t, _ = transform_anisotropic_coordinates(
+        samples, ranges=anisotropy_ranges, angles=anisotropy_angles
+    )
+    pts_t, _ = transform_anisotropic_coordinates(
+        pts, ranges=anisotropy_ranges, angles=anisotropy_angles
+    )
+
+    tree = KDTree(samples_t)
 
     # Check Measured criteria
     if N >= min_holes_measured:
-        d_meas, _ = tree.query(pts, k=min_holes_measured)
+        d_meas, _ = tree.query(pts_t, k=min_holes_measured)
         dist_meas = d_meas if min_holes_measured == 1 else d_meas[:, -1]
         has_measured = dist_meas <= max_radius_measured
     else:
@@ -2376,7 +2923,7 @@ def classify_resources_by_drill_spacing(
 
     # Check Indicated criteria
     if N >= min_holes_indicated:
-        d_ind, _ = tree.query(pts, k=min_holes_indicated)
+        d_ind, _ = tree.query(pts_t, k=min_holes_indicated)
         dist_ind = d_ind if min_holes_indicated == 1 else d_ind[:, -1]
         has_indicated = dist_ind <= max_radius_indicated
     else:
@@ -2384,7 +2931,7 @@ def classify_resources_by_drill_spacing(
 
     # Check Inferred criteria
     if max_radius_inferred is not None:
-        d_inf, _ = tree.query(pts, k=1)
+        d_inf, _ = tree.query(pts_t, k=1)
         has_inferred = d_inf <= max_radius_inferred
     else:
         has_inferred = np.ones(M, dtype=bool)
@@ -2409,15 +2956,15 @@ def classify_resources_by_drill_spacing(
 # TODO: possibly remove and inline in classify_mineral_resources
 def classify_resources_by_sor(
     slopes_of_regression: np.ndarray,
+    threshold_measured: float,
+    threshold_indicated: float,
     kriging_efficiencies: Optional[np.ndarray] = None,
-    threshold_measured: float = 0.80,
-    threshold_indicated: float = 0.50,
     max_slope_measured: float = 1.05,
     min_kriging_efficiency: Optional[float] = 0.0,
 ) -> np.ndarray:
     """Classifies resource blocks based on Kriging Neighborhood Analysis (KNA) Slope of Regression (SoR).
 
-    In geostatistical best practice (Vann et al., 2003; Armstrong, 1998):
+    In geostatistical best practice (Vann et al., 2003; Armstrong, 1998) (TODO: Manually Verify):
     - Slope of Regression (SoR) gauges conditional unbiasedness of block estimates.
     - Measured: High conditional unbiasedness (typically SoR >= 0.80 and <= 1.05, with positive KE).
     - Indicated: Moderate conditional unbiasedness (typically 0.50 <= SoR < 0.80, with positive KE).
@@ -2428,13 +2975,15 @@ def classify_resources_by_sor(
     ----------
     slopes_of_regression : np.ndarray
         Array of Slope of Regression values of shape (M,).
+    threshold_measured : float
+        Minimum Slope of Regression for Measured classification.
+        Site-specific parameter required without default.
+    threshold_indicated : float
+        Minimum Slope of Regression for Indicated classification.
+        Site-specific parameter required without default.
     kriging_efficiencies : np.ndarray, optional
         Array of Kriging Efficiency values of shape (M,). If provided, blocks
         with KE < min_kriging_efficiency are disqualified from Measured/Indicated.
-    threshold_measured : float, default 0.80
-        Minimum Slope of Regression for Measured classification.
-    threshold_indicated : float, default 0.50
-        Minimum Slope of Regression for Indicated classification.
     max_slope_measured : float, default 1.05
         Maximum Slope of Regression for Measured classification (slopes > 1.05
         frequently reflect numerical instability or severe conditional bias).
@@ -2491,18 +3040,193 @@ def classify_resources_by_sor(
     return categories
 
 
-# TODO: possibly remove and inline in classify_mineral_resources
+def smooth_resource_categories(
+    grid_points: np.ndarray,
+    categories: Sequence[str] | np.ndarray,
+    smoothing_radius: Optional[float] = None,
+    k_neighbors: Optional[int] = None,
+    min_cluster_size: int = 1,
+    downgrade_isolated: bool = True,
+) -> np.ndarray:
+    """Eliminates the 'spotted dog' artifact by spatially smoothing block classifications.
+
+    Regulatory & Geostatistical Context (CIM MRMR Guidelines §6.11) (TODO: Manually Verify):
+    ----------------------------------------------------------------
+    Automated numeric classification criteria (such as Kriging estimation variance or
+    drill spacing cut-offs) frequently produce isolated, disjointed blocks of high confidence
+    surrounded by lower confidence (the 'spotted dog' effect, Stephenson et al., 2006).
+    Under CIM MRMR Best Practice Guidelines (§6.11, pp. 25–26) (TODO: Manually Verify), numeric cut-offs must only be
+    an initial guide; computer-based 'categorization smoothers' or wireframe envelopes must be
+    applied to ensure resource categories form coherent, operationally mineable zones.
+
+    This function applies:
+    1. Spatial Majority / Mode Filtering:
+       For each block, queries neighbors within `smoothing_radius` (or `k_neighbors`).
+       Replaces isolated classifications with the majority class of its neighborhood.
+       Under the Conservative Downgrade Principle (`downgrade_isolated=True`), isolated
+       high-confidence blocks ('Measured') surrounded by lower confidence are downgraded
+       to 'Indicated', but low-confidence blocks are not artificially upgraded into Measured
+       without supporting drill data.
+    2. Minimum Contiguous Volume / Cluster Filtering:
+       If `min_cluster_size > 1`, connected components of blocks belonging to 'Measured'
+       or 'Indicated' with fewer than `min_cluster_size` contiguous blocks are downgraded
+       to the next lower category, ensuring that reported resources meet minimum selective
+       mining unit (SMU) or stope panel volume requirements.
+
+    Parameters
+    ----------
+    grid_points : np.ndarray
+        Coordinates of block centers of shape (M, 2) or (M, 3).
+    categories : Sequence[str] or np.ndarray
+        Array of category strings ("Measured", "Indicated", "Inferred", or "Unclassified") of shape (M,).
+    smoothing_radius : float, optional
+        Spatial search radius for neighborhood majority voting. If None and `k_neighbors` is None,
+        only `min_cluster_size` filtering is performed.
+    k_neighbors : int, optional
+        Number of nearest neighbors to evaluate if `smoothing_radius` is not specified.
+    min_cluster_size : int, default 1
+        Minimum number of contiguous blocks required to sustain a confidence category.
+        Clusters smaller than this threshold are downgraded.
+    downgrade_isolated : bool, default True
+        If True (conservative principle), isolated high-confidence blocks are downgraded,
+        preventing un-drilled areas from being upgraded. If False, standard majority vote is applied.
+
+    Returns
+    -------
+    np.ndarray
+        Smoothed category array of shape (M,).
+    """
+    pts = np.asarray(grid_points, dtype=float)
+    cats = np.asarray(categories, dtype=object).copy()
+    M = len(pts)
+    if M == 0:
+        return np.empty(0, dtype=object)
+    if len(cats) != M:
+        raise ValueError(
+            f"Shape mismatch: grid_points length ({M}) does not match categories length ({len(cats)})."
+        )
+
+    if smoothing_radius is not None and smoothing_radius <= 0.0:
+        raise ValueError(
+            f"smoothing_radius must be strictly positive, got {smoothing_radius}"
+        )
+    if k_neighbors is not None and k_neighbors <= 0:
+        raise ValueError(f"k_neighbors must be strictly positive, got {k_neighbors}")
+    if min_cluster_size < 1:
+        raise ValueError(f"min_cluster_size must be >= 1, got {min_cluster_size}")
+
+    if smoothing_radius is None and k_neighbors is None and min_cluster_size <= 1:
+        return cats
+
+    inv_ranks = {0: "Unclassified", 1: "Inferred", 2: "Indicated", 3: "Measured"}
+
+    numeric_ranks = np.zeros(M, dtype=int)
+    for i, c in enumerate(cats):
+        norm_c = str(c).strip().capitalize()
+        if norm_c.startswith("Meas"):
+            numeric_ranks[i] = 3
+        elif norm_c.startswith("Ind"):
+            numeric_ranks[i] = 2
+        elif norm_c.startswith("Infer"):
+            numeric_ranks[i] = 1
+        else:
+            numeric_ranks[i] = 0
+
+    tree = cKDTree(pts)
+
+    # 1. Spatial majority filter
+    if smoothing_radius is not None or k_neighbors is not None:
+        smoothed_ranks = numeric_ranks.copy()
+        for i in range(M):
+            if smoothing_radius is not None:
+                nbr_indices = tree.query_ball_point(pts[i], r=smoothing_radius)
+            else:
+                _, nbr_indices = tree.query(pts[i], k=min(M, k_neighbors or 5))
+                if isinstance(nbr_indices, (int, np.integer)):
+                    nbr_indices = [int(nbr_indices)]
+                else:
+                    nbr_indices = list(nbr_indices)
+
+            if len(nbr_indices) == 0:
+                continue
+
+            nbr_ranks = numeric_ranks[nbr_indices]
+            counts = np.bincount(nbr_ranks, minlength=4)
+            max_c = np.max(counts)
+            candidates = np.where(counts == max_c)[0]
+            # Conservative tie-breaking: choose lower rank when downgrade_isolated=True
+            mode_rank = (
+                int(np.min(candidates))
+                if downgrade_isolated
+                else int(np.max(candidates))
+            )
+
+            if downgrade_isolated:
+                smoothed_ranks[i] = min(numeric_ranks[i], mode_rank)
+            else:
+                smoothed_ranks[i] = mode_rank
+
+        numeric_ranks = smoothed_ranks
+
+    # 2. Minimum cluster size filter (connected components)
+    if min_cluster_size > 1:
+        if smoothing_radius is not None:
+            r_conn = smoothing_radius
+        else:
+            dists, _ = tree.query(pts, k=min(2, M))
+            if dists.ndim == 2 and dists.shape[1] > 1:
+                r_conn = 1.5 * float(np.median(dists[:, 1]))
+            else:
+                r_conn = 1.0
+
+        for cat_rank, downgrade_to in [(3, 2), (2, 1)]:
+            mask = numeric_ranks == cat_rank
+            indices = np.where(mask)[0]
+            if len(indices) > 0:
+                if len(indices) < min_cluster_size:
+                    numeric_ranks[indices] = downgrade_to
+                else:
+                    sub_pts = pts[indices]
+                    sub_tree = cKDTree(sub_pts)
+                    pairs = sub_tree.query_pairs(r=r_conn)
+                    adj = lil_matrix((len(indices), len(indices)), dtype=bool)
+                    for u, v in pairs:
+                        adj[u, v] = True
+                        adj[v, u] = True
+                    n_comp, labels = connected_components(adj, directed=False)
+                    comp_sizes = np.bincount(labels)
+                    small_comp_labels = np.where(comp_sizes < min_cluster_size)[0]
+                    to_downgrade = indices[np.isin(labels, small_comp_labels)]
+                    numeric_ranks[to_downgrade] = downgrade_to
+
+    return np.array(
+        [inv_ranks.get(r, "Unclassified") for r in numeric_ranks], dtype=object
+    )
+
+
 def classify_resources_by_kriging_variance(
     kriging_variances: np.ndarray,
     variance_threshold_measured: float,
     variance_threshold_indicated: float,
     variance_threshold_inferred: Optional[float] = None,
+    grid_points: Optional[np.ndarray] = None,
+    smoothing_radius: Optional[float] = None,
+    k_neighbors: Optional[int] = None,
+    min_cluster_size: int = 1,
+    downgrade_isolated: bool = True,
+    warn_standalone: bool = True,
 ) -> np.ndarray:
     """Classifies resource blocks based on Kriging estimation variance thresholds.
 
-    While automated Kriging variance cutoffs must be interpreted with caution
-    due to geometric bullseye ("spotted dog") effects, Kriging estimation variance
-    provides a direct measure of local data configuration and relative error.
+    Regulatory & Geostatistical Best Practice Warning (CIM MRMR Guidelines §6.11) (TODO: Manually Verify):
+    ------------------------------------------------------------------------------
+    Kriging estimation variance is a purely geometric metric reflecting data spacing and
+    variogram structure, independent of actual grade values or geological complexity.
+    Under CIM MRMR Best Practice Guidelines (§6.11, pp. 25–26) (TODO: Manually Verify), relying solely on Kriging
+    variance produces the 'spotted dog' artifact (isolated high-confidence blocks surrounded
+    by lower confidence). Standalone numeric variance classification must be post-processed
+    using spatial smoothing (`grid_points` + `smoothing_radius`) or embedded in multi-criteria
+    classification (`classify_mineral_resources`).
 
     Parameters
     ----------
@@ -2515,6 +3239,18 @@ def classify_resources_by_kriging_variance(
     variance_threshold_inferred : float, optional
         Maximum Kriging variance allowed for Inferred classification.
         Variances exceeding this threshold are assigned "Unclassified".
+    grid_points : np.ndarray, optional
+        Block coordinates of shape (M, 2) or (M, 3) for spatial smoothing.
+    smoothing_radius : float, optional
+        Spatial search radius for neighborhood majority smoothing to eliminate spotted dog artifacts.
+    k_neighbors : int, optional
+        Number of nearest neighbors for smoothing if smoothing_radius is not specified.
+    min_cluster_size : int, default 1
+        Minimum contiguous cluster size required to sustain Measured/Indicated confidence.
+    downgrade_isolated : bool, default True
+        If True, applies conservative downgrade to isolated high-confidence blocks.
+    warn_standalone : bool, default True
+        If True and no spatial smoothing is applied, issues a regulatory warning under CIM MRMR §6.11 (TODO: Manually Verify).
 
     Returns
     -------
@@ -2539,6 +3275,21 @@ def classify_resources_by_kriging_variance(
             f"variance_threshold_inferred ({variance_threshold_inferred}) must be > variance_threshold_indicated ({variance_threshold_indicated})."
         )
 
+    # Issue regulatory compliance warning if used as an unsmoothed standalone metric
+    if warn_standalone and (
+        grid_points is None
+        or (smoothing_radius is None and k_neighbors is None and min_cluster_size <= 1)
+    ):
+        warnings.warn(
+            "CIM MRMR Best Practice Guidelines (§6.11) (TODO: Manually Verify) explicitly caution against classifying "
+            "mineral resources based solely on Kriging estimation variance. Kriging variance is a purely "
+            "geometric measure independent of grade values and produces isolated, unmineable 'spotted dog' "
+            "artifacts. Best practice requires multi-criteria classification (via 'classify_mineral_resources') "
+            "or applying spatial smoothing (via 'smooth_resource_categories').",
+            UserWarning,
+            stacklevel=2,
+        )
+
     valid_var = np.isfinite(vars_arr) & (vars_arr >= 0.0)
     categories = np.full(len(vars_arr), "Unclassified", dtype=object)
 
@@ -2561,6 +3312,18 @@ def classify_resources_by_kriging_variance(
     categories[is_ind] = "Indicated"
     categories[is_inf] = "Inferred"
 
+    if grid_points is not None and (
+        smoothing_radius is not None or k_neighbors is not None or min_cluster_size > 1
+    ):
+        categories = smooth_resource_categories(
+            grid_points=grid_points,
+            categories=categories,
+            smoothing_radius=smoothing_radius,
+            k_neighbors=k_neighbors,
+            min_cluster_size=min_cluster_size,
+            downgrade_isolated=downgrade_isolated,
+        )
+
     return categories
 
 
@@ -2568,8 +3331,8 @@ def classify_mineral_resources(
     grid_points: np.ndarray,
     samples_xy: Optional[np.ndarray] = None,
     kriging_variances: Optional[np.ndarray] = None,
-    max_radius_measured: float = 30.0,
-    max_radius_indicated: float = 60.0,
+    max_radius_measured: Optional[float] = None,
+    max_radius_indicated: Optional[float] = None,
     min_holes_measured: int = 3,
     min_holes_indicated: int = 2,
     variance_threshold_measured: Optional[float] = None,
@@ -2577,16 +3340,26 @@ def classify_mineral_resources(
     variance_threshold_inferred: Optional[float] = None,
     slopes_of_regression: Optional[np.ndarray] = None,
     kriging_efficiencies: Optional[np.ndarray] = None,
-    sor_threshold_measured: float = 0.80,
-    sor_threshold_indicated: float = 0.50,
+    sor_threshold_measured: Optional[float] = None,
+    sor_threshold_indicated: Optional[float] = None,
     max_slope_measured: float = 1.05,
     min_kriging_efficiency: Optional[float] = 0.0,
     max_radius_inferred: Optional[float] = None,
     is_interpolated: Optional[np.ndarray] = None,
+    smoothing_radius: Optional[float] = None,
+    k_neighbors_smoothing: Optional[int] = None,
+    min_cluster_size: int = 1,
+    downgrade_isolated: bool = True,
+    anisotropy_ranges: Optional[
+        Union[float, Sequence[float], Mapping[str, float]]
+    ] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[str, float]]
+    ] = None,
 ) -> np.ndarray:
     """Classifies mineral resources into Measured, Indicated, and Inferred using multi-criteria standard practice.
 
-    CIM Definition Standards (2014) and JORC Code (Clause 20-24) Regulatory Framework:
+    CIM Definition Standards (2014) and JORC Code (Clause 20-24) Regulatory Framework (TODO: Manually Verify):
     ----------------------------------------------------------------------------------
     Mineral Resource classification categorizes estimates based on geological confidence:
     - Measured: High geological confidence; dense drilling; verified continuous geology/grades.
@@ -2598,7 +3371,8 @@ def classify_mineral_resources(
     Rather than relying on a single simplistic metric, this function integrates:
     1. Drill spacing and informing hole count (`classify_resources_by_drill_spacing`),
     2. Kriging estimation variance thresholds (`classify_resources_by_kriging_variance`),
-    3. Kriging Neighborhood Analysis Slope of Regression / Efficiency (`classify_resources_by_sor`).
+    3. Kriging Neighborhood Analysis Slope of Regression / Efficiency (`classify_resources_by_sor`),
+    4. Categorization Smoothing (`smooth_resource_categories`) to eliminate spotted dog artifacts.
 
     When multiple criteria are provided, classification follows the conservative
     minimum-confidence principle: a block only attains "Measured" status if it satisfies
@@ -2614,10 +3388,10 @@ def classify_mineral_resources(
         If provided, drillhole spacing and hole count criteria are evaluated.
     kriging_variances : np.ndarray, optional
         Array of Kriging estimation variances of shape (M,).
-    max_radius_measured : float, default 30.0
-        Nominal drillhole spacing radius for Measured classification.
-    max_radius_indicated : float, default 60.0
-        Nominal drillhole spacing radius for Indicated classification.
+    max_radius_measured : float, optional
+        Nominal drillhole spacing radius for Measured classification. Required if samples_xy is provided.
+    max_radius_indicated : float, optional
+        Nominal drillhole spacing radius for Indicated classification. Required if samples_xy is provided.
     min_holes_measured : int, default 3
         Minimum informing drillholes within search radius for Measured.
     min_holes_indicated : int, default 2
@@ -2632,10 +3406,10 @@ def classify_mineral_resources(
         Array of Slope of Regression values of shape (M,).
     kriging_efficiencies : np.ndarray, optional
         Array of Kriging Efficiency values of shape (M,).
-    sor_threshold_measured : float, default 0.80
-        Minimum Slope of Regression for Measured classification.
-    sor_threshold_indicated : float, default 0.50
-        Minimum Slope of Regression for Indicated classification.
+    sor_threshold_measured : float, optional
+        Minimum Slope of Regression for Measured classification. Required if slopes_of_regression is provided.
+    sor_threshold_indicated : float, optional
+        Minimum Slope of Regression for Indicated classification. Required if slopes_of_regression is provided.
     max_slope_measured : float, default 1.05
         Maximum Slope of Regression for Measured classification.
     min_kriging_efficiency : float, optional, default 0.0
@@ -2645,6 +3419,18 @@ def classify_mineral_resources(
     is_interpolated : np.ndarray of bool, optional
         Boolean mask indicating whether each block lies within the interpolation hull.
         Blocks outside the hull are restricted to Inferred or Unclassified.
+    smoothing_radius : float, optional
+        Search radius for spatial majority smoothing to remove isolated 'spotted dog' blocks.
+    k_neighbors_smoothing : int, optional
+        Number of nearest neighbors for spatial smoothing if smoothing_radius is not set.
+    min_cluster_size : int, default 1
+        Minimum contiguous cluster size required to sustain Measured/Indicated confidence.
+    downgrade_isolated : bool, default True
+        Conservative principle: isolated high-confidence blocks are downgraded.
+    anisotropy_ranges : float, Sequence[float], or Mapping, optional
+        Directional ranges (major, minor) in 2D or (major, semi-major, minor) in 3D.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth in 2D, or azimuth, dip, plunge in 3D).
 
     Returns
     -------
@@ -2660,6 +3446,11 @@ def classify_mineral_resources(
 
     # 1. Drill spacing criterion
     if samples_xy is not None:
+        if max_radius_measured is None or max_radius_indicated is None:
+            raise ValueError(
+                "When classifying by drillhole spacing (samples_xy provided), "
+                "max_radius_measured and max_radius_indicated must be explicitly specified."
+            )
         cats_spacing = classify_resources_by_drill_spacing(
             grid_points=pts,
             samples_xy=samples_xy,
@@ -2669,6 +3460,8 @@ def classify_mineral_resources(
             min_holes_indicated=min_holes_indicated,
             max_radius_inferred=max_radius_inferred,
             is_interpolated=is_interpolated,
+            anisotropy_ranges=anisotropy_ranges,
+            anisotropy_angles=anisotropy_angles,
         )
         criteria_results.append(cats_spacing)
 
@@ -2682,11 +3475,23 @@ def classify_mineral_resources(
             raise ValueError(
                 "variance_threshold_measured and variance_threshold_indicated must be specified when passing kriging_variances."
             )
+        # Check standalone variance usage in classify_mineral_resources
+        if samples_xy is None and slopes_of_regression is None:
+            warnings.warn(
+                "CIM MRMR Best Practice Guidelines (§6.11) (TODO: Manually Verify) caution against classifying mineral resources "
+                "based solely on Kriging estimation variance. Kriging variance is a geometric measure "
+                "independent of actual grades and produces unmineable 'spotted dog' artifacts. Multi-criteria "
+                "classification with drillhole spacing ('samples_xy') and spatial smoothing ('smoothing_radius') "
+                "is strongly recommended.",
+                UserWarning,
+                stacklevel=2,
+            )
         cats_var = classify_resources_by_kriging_variance(
             kriging_variances=kriging_variances,
             variance_threshold_measured=variance_threshold_measured,
             variance_threshold_indicated=variance_threshold_indicated,
             variance_threshold_inferred=variance_threshold_inferred,
+            warn_standalone=False,
         )
         criteria_results.append(cats_var)
     elif (
@@ -2699,15 +3504,20 @@ def classify_mineral_resources(
 
     # 3. Slope of regression criterion
     if slopes_of_regression is not None:
+        if sor_threshold_measured is None or sor_threshold_indicated is None:
+            raise ValueError(
+                "When classifying by Slope of Regression (slopes_of_regression provided), "
+                "sor_threshold_measured and sor_threshold_indicated must be explicitly specified."
+            )
         if len(slopes_of_regression) != M:
             raise ValueError(
                 f"Shape mismatch: slopes_of_regression length ({len(slopes_of_regression)}) must match grid_points length ({M})."
             )
         cats_sor = classify_resources_by_sor(
             slopes_of_regression=slopes_of_regression,
-            kriging_efficiencies=kriging_efficiencies,
             threshold_measured=sor_threshold_measured,
             threshold_indicated=sor_threshold_indicated,
+            kriging_efficiencies=kriging_efficiencies,
             max_slope_measured=max_slope_measured,
             min_kriging_efficiency=min_kriging_efficiency,
         )
@@ -2743,7 +3553,24 @@ def classify_mineral_resources(
             interp_mask, combined_ranks, np.minimum(combined_ranks, 1)
         )
 
-    return np.array([rank_to_category[r] for r in combined_ranks], dtype=object)
+    final_cats = np.array([rank_to_category[r] for r in combined_ranks], dtype=object)
+
+    # 4. Apply Spatial Categorization Smoothing (CIM MRMR §6.11) (TODO: Manually Verify)
+    if (
+        smoothing_radius is not None
+        or k_neighbors_smoothing is not None
+        or min_cluster_size > 1
+    ):
+        final_cats = smooth_resource_categories(
+            grid_points=pts,
+            categories=final_cats,
+            smoothing_radius=smoothing_radius,
+            k_neighbors=k_neighbors_smoothing,
+            min_cluster_size=min_cluster_size,
+            downgrade_isolated=downgrade_isolated,
+        )
+
+    return final_cats
 
 
 def _round_sig_figs(value: float, sig_figs: int) -> float:
@@ -2766,11 +3593,13 @@ def format_resource_statement(
     commodity_price: Optional[str] = None,
     metallurgical_recovery: Optional[float] = None,
     rpeee_constraint: str = "Constrained within an optimized pit shell",
+    reporting_basis: str = "exclusive",
+    point_of_reference: str = "In situ",
 ) -> pd.DataFrame:
     """Formats an official Mineral Resource Statement adhering to significant figures rules.
 
-    In accordance with CIM Definition Standards (2014), JORC (Clause 25), and
-    SEC S-K 1300 standards:
+    In accordance with CIM Definition Standards (2014), JORC Code (2012), and
+    SEC S-K 1300 standards (TODO: Manually Verify):
     - Avoid False Precision: Tonnages, grades, and contained metal must be rounded
       to reflect the relative uncertainty of each classification tier:
         * Measured: 3 significant figures (or nearest deposit-scale precision)
@@ -2780,6 +3609,12 @@ def format_resource_statement(
     - Mandatory Footnote: Clarifies rounding and non-additivity.
     - RPEEE Condition: Requires reporting base-case economic cut-off, commodity price,
       metallurgical recovery, and spatial constraint (pit shell or stope shapes).
+    - Inclusive vs. Exclusive Declaration: Declares whether Mineral Resources are reported
+      exclusive of (additional to) or inclusive of Mineral Reserves as mandated by
+      SEC Regulation S-K 1300 (§229.1303(b)(2)(ii)), JORC Code (2012, Clauses on Resource/Reserve Reporting), and CRIRSCO Template (Clause 39) (TODO: Manually Verify).
+    - Point of Reference: Mandatory declaration under SEC Regulation S-K 1300
+      (§229.1303(b)(1) / §229.1304(d)(1)), JORC Code (Clause 35), and CRIRSCO Template (Clause 38) (TODO: Manually Verify)
+      specifying the reference point (e.g., "In situ", "Run-of-Mine", "Plant feed").
 
     Parameters
     ----------
@@ -2807,6 +3642,14 @@ def format_resource_statement(
         Assumed metallurgical recovery percentage (e.g. 88.0%).
     rpeee_constraint : str, default "Constrained within an optimized pit shell"
         Spatial constraint applied to demonstrate RPEEE.
+    reporting_basis : {"exclusive", "inclusive"}, default "exclusive"
+        Mandatory statutory declaration under SEC S-K 1300 (§229.1303(b)(2)(ii)),
+        JORC Code (2012, Clauses on Resource/Reserve Reporting), and CRIRSCO Template (Clause 39) (TODO: Manually Verify).
+        - "exclusive": Mineral Resources are reported exclusive of (additional to) Mineral Reserves.
+        - "inclusive": Mineral Resources are reported inclusive of Mineral Reserves.
+    point_of_reference : str, default "In situ"
+        Mandatory reference point under SEC S-K 1300 (§229.1303(b)(1)) and
+        CRIRSCO Template (Clause 38) / JORC Code (Clause 35) (TODO: Manually Verify). Defaults to "In situ".
 
     Returns
     -------
@@ -2817,16 +3660,45 @@ def format_resource_statement(
     if block_df.empty:
         raise ValueError("block_df cannot be empty.")
 
+    basis = str(reporting_basis).strip().lower()
+    if basis not in ("exclusive", "inclusive"):
+        raise ValueError(
+            f"Invalid reporting_basis '{reporting_basis}'. Must be either 'exclusive' or 'inclusive' "
+            "under SEC S-K 1300 (§229.1303(b)(2)(ii)), JORC (Clause 19/38), and CRIRSCO (Clause 39)."
+        )
+
+    if not isinstance(point_of_reference, str) or not point_of_reference.strip():
+        raise ValueError(
+            "point_of_reference must be a non-empty string specifying the reference point "
+            "(e.g., 'In situ', 'Run-of-Mine', or 'Plant feed') in compliance with "
+            "SEC Regulation S-K 1300 (§229.1303(b)(1)) and CRIRSCO / JORC standards."
+        )
+    ref_point = point_of_reference.strip()
+
     # Filter by economic cutoff
     valid_blocks = block_df[block_df[grade_col] >= cutoff_grade].copy()
 
     # Define unit scaling factors
-    t_scale = 1e6 if tonnage_unit.upper() == "MT" else 1e3
-    m_scale = (
-        1e3
-        if metal_unit.lower() == "kt"
-        else (1.0 if metal_unit.lower() == "t" else 31103.5)
+    t_scale = (
+        1e6
+        if tonnage_unit.upper() == "MT"
+        else (1e3 if tonnage_unit.upper() == "KT" else 1.0)
     )
+    m_unit = metal_unit.lower().strip()
+    if m_unit == "kt":
+        m_scale = 1e3
+    elif m_unit == "mt":
+        m_scale = 1e6
+    elif m_unit == "t":
+        m_scale = 1.0
+    elif "koz" in m_unit:
+        m_scale = 0.0311034768  # 1 koz = 0.0311034768 tonnes
+    elif "moz" in m_unit:
+        m_scale = 31.1034768  # 1 Moz = 31.1034768 tonnes
+    elif "oz" in m_unit:
+        m_scale = 31.1034768e-6
+    else:
+        m_scale = 1.0
 
     # Standard category groupings
     cat_names = {
@@ -2900,8 +3772,16 @@ def format_resource_statement(
     statement_df = pd.DataFrame(rows)
 
     # Mandatory Disclosure Footnotes
+    basis_fn = (
+        "6. Mineral Resources are reported exclusive of Mineral Reserves in accordance with "
+        "SEC Regulation S-K 1300 (§229.1303(b)(2)(ii)) and JORC Code (2012, Clauses on Resource/Reserve Reporting) (TODO: Manually Verify)."
+        if basis == "exclusive"
+        else "6. Mineral Resources are reported inclusive of Mineral Reserves (Measured and Indicated "
+        "resources include material modified to produce reserves)."
+    )
+
     footnotes = [
-        "1. Mineral Resources are reported in accordance with CIM Definition Standards (2014) / JORC Code (2012).",
+        "1. Mineral Resources are reported in accordance with CIM Definition Standards (2014) / JORC Code (2012) (TODO: Manually Verify).",
         "2. Tonnages, grades, and contained metal are rounded to reflect relative estimation uncertainty. Totals may not sum due to rounding.",
         "3. Mineral Resources that are not Mineral Reserves do not have demonstrated economic viability.",
         "4. Inferred Mineral Resources have greater uncertainty and cannot be combined with Measured and Indicated Resources.",
@@ -2914,8 +3794,12 @@ def format_resource_statement(
             else ""
         )
         + ".",
+        basis_fn,
+        f"7. Point of Reference: {ref_point} in compliance with SEC Regulation S-K 1300 (§229.1303(b)(1)) and CRIRSCO / JORC standards (TODO: Manually Verify).",
     ]
     statement_df.attrs["footnotes"] = footnotes
+    statement_df.attrs["reporting_basis"] = basis
+    statement_df.attrs["point_of_reference"] = ref_point
 
     return statement_df
 
@@ -2940,9 +3824,9 @@ def plot_swath_analysis(
     ax: Optional[plt.Axes] = None,
     figsize: Tuple[float, float] = (10.0, 5.2),
 ) -> Tuple[plt.Figure, plt.Axes]:
-    """Generates a directional Swath Plot (drift analysis) for local bias validation.
+    """Validates block model estimates against informing drillhole composites across spatial swaths.
 
-    Swath plots are the industry-wide validation tool mandated under NI 43-101 and JORC.
+    Swath plots are the industry-wide validation tool mandated under NI 43-101 and JORC (TODO: Manually Verify).
     They slice the deposit along major Cartesian corridors (Easting, Northing, or Elevation),
     comparing the estimated model against a declustered validation model (e.g., Nearest
     Neighbor / Polygonal) and raw drillhole composites, overlaid with slice tonnages on
@@ -3197,7 +4081,7 @@ def plot_swath_analysis(
 
 
 # =============================================================================
-# RESOURCE TO RESERVE DELINEATION (CIM / NI 43-101 / JORC MODIFYING FACTORS)
+# RESOURCE TO RESERVE DELINEATION (CIM / NI 43-101 / JORC MODIFYING FACTORS) (TODO: Manually Verify)
 # =============================================================================
 
 
@@ -3206,23 +4090,31 @@ def calculate_cut_off_grade(
     ga_cost: float,
     commodity_price: float,
     metallurgical_recovery: float,
+    payable_metal_factor: float,
     mining_cost: Optional[float] = None,
+    sustaining_capital: float = 0.0,
     selling_cost: float = 0.0,
     royalty_pct: float = 0.0,
     metal_conversion_factor: float = 1.0,
+    mining_dilution_pct: float = 0.0,
+    dilution_grade: float = 0.0,
 ) -> float:
-    """Calculates engineering cut-off grades with zero assumed default costs or prices.
+    """Calculates engineering and regulatory compliant cut-off grades.
 
-    In mining economics (Lane, 1988; Taylor, 1972):
-    - Breakeven Cut-Off Grade: Covers total costs (mining + processing + G&A + selling).
+    In accordance with CIM MRMR Best Practice Guidelines (§7.2.2 & Table 7-1),
+    Kenneth Lane (1988), and Taylor (1972) (TODO: Manually Verify):
+    - Breakeven Cut-Off Grade: Covers total costs (mining + processing + G&A + realization).
       Used to delineate the ultimate economic pit limit / stope envelope.
-    - Marginal / Internal Cut-Off Grade: Covers processing + G&A + selling (mining cost
-      is treated as sunk because the rock must be excavated anyway to access deeper ore).
+    - Marginal / Internal Cut-Off Grade: Covers processing + G&A + realization (mining cost
+      is treated as sunk because rock must be excavated anyway to access deeper ore).
+    - Mineral Reserve Cut-Off Grade: Must include sustaining capital (tailings expansions,
+      equipment replacement, ongoing development) directly associated with extraction and milling.
+    - In-Situ Equivalent Cut-Off: Adjusted for planned mining dilution prior to processing.
 
     Parameters
     ----------
     processing_cost : float
-        Processing / milling cost per tonne of ore ($/t ore). Required.
+        Processing / milling operating cost per tonne of ore ($/t ore). Required.
     ga_cost : float
         General & Administrative (G&A) overhead cost per tonne of ore ($/t ore). Required.
     commodity_price : float
@@ -3230,19 +4122,33 @@ def calculate_cut_off_grade(
     metallurgical_recovery : float
         Plant metallurgical recovery percentage (0 < recovery <= 100.0) or fraction
         (0 < recovery <= 1.0). Required.
+    payable_metal_factor : float
+        Smelter / refiner payable metal fraction (e.g., 0.95 for 95%) or percentage (95.0).
+        Required without default because off-take terms vary significantly across metals
+        (e.g., copper concentrate ~95%, zinc concentrate ~85%, gold doré ~99.5%).
     mining_cost : float, optional
-        Mining cost per tonne of rock ($/t rock).
+        Ore mining cost per tonne of rock ($/t rock).
         If provided: calculates Breakeven Cut-Off Grade.
         If None: calculates Marginal / Internal Cut-Off Grade.
+    sustaining_capital : float, default 0.0
+        Sustaining capital cost per tonne of ore ($/t ore). Under CIM MRMR Table 7-1 (TODO: Manually Verify),
+        mandatory for Mineral Reserve cut-off grades; excluded from Mineral Resources.
     selling_cost : float, default 0.0
-        Refining, smelting, freight, and realization deduction per unit metal ($/unit).
+        Smelter refining charges, treatment deductions (TC/RCs), freight, and realization
+        deduction per unit metal ($/unit metal).
     royalty_pct : float, default 0.0
         Net Smelter Return (NSR) or gross revenue royalty percentage (e.g., 2.0 for 2%).
     metal_conversion_factor : float, default 1.0
-        Multiplier to convert grade unit into pricing unit:
+        Multiplier converting grade unit into pricing unit:
         - Copper (% Cu grade to $/lb price): 1% Cu = 22.0462 lbs Cu per metric tonne -> 22.0462
         - Gold (g/t Au grade to $/oz price): 1 g/t = 1/31.1035 oz/t -> 0.0321507
         - Base metals in $/tonne metal with % grade: 1% = 0.01 tonnes metal -> 0.01
+    mining_dilution_pct : float, default 0.0
+        Anticipated mining dilution percentage (e.g., 10.0 for 10% dilution).
+        If > 0, returns the in-situ equivalent cut-off grade required to achieve
+        the economic mill-feed cut-off grade after dilution.
+    dilution_grade : float, default 0.0
+        Average grade of diluting wall-rock / backfill material.
 
     Returns
     -------
@@ -3253,9 +4159,31 @@ def calculate_cut_off_grade(
         raise ValueError("Operating costs (processing, G&A) cannot be negative.")
     if commodity_price <= 0:
         raise ValueError("Commodity price must be strictly positive.")
+    if sustaining_capital < 0:
+        raise ValueError("Sustaining capital cannot be negative.")
+    if selling_cost < 0:
+        raise ValueError("Selling / realization cost cannot be negative.")
+    if royalty_pct < 0 or royalty_pct >= 100.0:
+        raise ValueError(f"Royalty percentage must be in [0, 100)%, got {royalty_pct}")
+    if metal_conversion_factor <= 0:
+        raise ValueError("metal_conversion_factor must be strictly positive.")
+    if mining_dilution_pct < 0:
+        raise ValueError("mining_dilution_pct cannot be negative.")
+    if dilution_grade < 0:
+        raise ValueError("dilution_grade cannot be negative.")
+
+    # Normalize payable metal factor
+    pay_factor = (
+        payable_metal_factor / 100.0
+        if payable_metal_factor > 1.0
+        else payable_metal_factor
+    )
+    if pay_factor <= 0.0 or pay_factor > 1.0:
+        raise ValueError(
+            f"payable_metal_factor must be in (0, 100]% or (0, 1.0], got {payable_metal_factor}"
+        )
 
     # Normalize metallurgical recovery
-    # TODO: somewhat dangerous here.
     rec = (
         metallurgical_recovery / 100.0
         if metallurgical_recovery > 1.0
@@ -3266,25 +4194,143 @@ def calculate_cut_off_grade(
             f"Metallurgical recovery must be in (0, 100]%, got {metallurgical_recovery}"
         )
 
-    # Net realized revenue per unit metal after deductions and royalties
+    # Net realized revenue per unit metal after payability, selling/refining costs, and royalties
     royalty_factor = max(0.0, 1.0 - (royalty_pct / 100.0))
-    net_price = (commodity_price - selling_cost) * royalty_factor
+    payable_price = commodity_price * pay_factor
+    net_price = (payable_price - selling_cost) * royalty_factor
     if net_price <= 0:
         raise ValueError(
-            f"Net price ({net_price:.4f}) is non-positive after selling deductions and royalties."
+            f"Net price ({net_price:.4f}) is non-positive after payability, selling deductions, and royalties."
         )
 
     revenue_per_grade_unit = net_price * rec * metal_conversion_factor
 
-    total_ore_cost = processing_cost + ga_cost
+    total_cost = processing_cost + ga_cost + sustaining_capital
     if mining_cost is not None:
         if mining_cost < 0:
             raise ValueError("Mining cost cannot be negative.")
-        total_cost = total_ore_cost + mining_cost
-    else:
-        total_cost = total_ore_cost
+        total_cost += mining_cost
 
-    return float(total_cost / revenue_per_grade_unit)
+    mill_feed_cog = total_cost / revenue_per_grade_unit
+
+    if mining_dilution_pct > 0.0:
+        d = (
+            mining_dilution_pct / 100.0
+            if mining_dilution_pct > 1.0
+            else mining_dilution_pct
+        )
+        if d >= 1.0:
+            raise ValueError("mining_dilution_pct cannot be 100% or greater.")
+        in_situ_cog = max(0.0, (mill_feed_cog - d * dilution_grade) / (1.0 - d))
+        return float(in_situ_cog)
+
+    return float(mill_feed_cog)
+
+
+def cut_off_grade_breakdown(
+    processing_cost: float,
+    ga_cost: float,
+    commodity_price: float,
+    metallurgical_recovery: float,
+    payable_metal_factor: float,
+    mining_cost: Optional[float] = None,
+    sustaining_capital: float = 0.0,
+    selling_cost: float = 0.0,
+    royalty_pct: float = 0.0,
+    metal_conversion_factor: float = 1.0,
+    mining_dilution_pct: float = 0.0,
+    dilution_grade: float = 0.0,
+) -> dict[str, Any]:
+    """Provides a detailed engineering and regulatory breakdown of cut-off grade economics.
+
+    In accordance with CIM MRMR Best Practice Guidelines (§7.2.2 & Table 7-1) (TODO: Manually Verify),
+    distinguishes Resource RPEEE operating parameters from Reserve LOM feasibility parameters.
+
+    Returns
+    -------
+    dict[str, Any]
+        Financial and engineering audit dictionary:
+        - 'gross_price': Base commodity price.
+        - 'payable_price': Commodity price after smelter payability.
+        - 'net_realized_price': Net price per unit metal after TC/RCs and royalties.
+        - 'revenue_per_grade_unit': Net realized revenue per 1.0 unit of grade per tonne.
+        - 'operating_cost_per_tonne': Milling + G&A (+ mining) cash operating cost.
+        - 'sustaining_capital_per_tonne': Capital required to sustain Life-of-Mine production.
+        - 'total_cost_per_tonne': Total cost applied to cut-off grade calculation.
+        - 'mill_feed_cutoff_grade': Cut-off grade at process plant feed / ROM.
+        - 'in_situ_cutoff_grade': Dilution-adjusted in-situ resource cut-off grade.
+        - 'cutoff_type': Classification category description.
+    """
+    # Validate via calculate_cut_off_grade
+    _ = calculate_cut_off_grade(
+        processing_cost=processing_cost,
+        ga_cost=ga_cost,
+        commodity_price=commodity_price,
+        metallurgical_recovery=metallurgical_recovery,
+        payable_metal_factor=payable_metal_factor,
+        mining_cost=mining_cost,
+        sustaining_capital=sustaining_capital,
+        selling_cost=selling_cost,
+        royalty_pct=royalty_pct,
+        metal_conversion_factor=metal_conversion_factor,
+        mining_dilution_pct=mining_dilution_pct,
+        dilution_grade=dilution_grade,
+    )
+
+    pay_factor = (
+        payable_metal_factor / 100.0
+        if payable_metal_factor > 1.0
+        else payable_metal_factor
+    )
+    rec = (
+        metallurgical_recovery / 100.0
+        if metallurgical_recovery > 1.0
+        else metallurgical_recovery
+    )
+    royalty_factor = max(0.0, 1.0 - (royalty_pct / 100.0))
+    payable_price = commodity_price * pay_factor
+    net_price = (payable_price - selling_cost) * royalty_factor
+    revenue_per_grade_unit = net_price * rec * metal_conversion_factor
+
+    op_cost = processing_cost + ga_cost + (mining_cost if mining_cost is not None else 0.0)
+    total_cost = op_cost + sustaining_capital
+    mill_feed_cog = total_cost / revenue_per_grade_unit
+
+    if mining_dilution_pct > 0.0:
+        d = (
+            mining_dilution_pct / 100.0
+            if mining_dilution_pct > 1.0
+            else mining_dilution_pct
+        )
+        in_situ_cog = max(0.0, (mill_feed_cog - d * dilution_grade) / (1.0 - d))
+    else:
+        in_situ_cog = mill_feed_cog
+
+    if mining_cost is not None:
+        c_type = (
+            "Breakeven Reserve (LOM)"
+            if sustaining_capital > 0.0
+            else "Breakeven Resource (RPEEE)"
+        )
+    else:
+        c_type = (
+            "Marginal Reserve (Internal)"
+            if sustaining_capital > 0.0
+            else "Marginal Resource (Internal)"
+        )
+
+    return {
+        "gross_price": float(commodity_price),
+        "payable_price": float(payable_price),
+        "net_realized_price": float(net_price),
+        "revenue_per_grade_unit": float(revenue_per_grade_unit),
+        "operating_cost_per_tonne": float(op_cost),
+        "sustaining_capital_per_tonne": float(sustaining_capital),
+        "total_cost_per_tonne": float(total_cost),
+        "mill_feed_cutoff_grade": float(mill_feed_cog),
+        "in_situ_cutoff_grade": float(in_situ_cog),
+        "cutoff_type": c_type,
+    }
 
 
 def convert_resource_to_reserve(
@@ -3296,19 +4342,35 @@ def convert_resource_to_reserve(
     category_col: str = "category",
     grade_col: str = "grade",
     tonnes_col: str = "tonnes",
-    allow_inferred: bool = False,
+    metal_factor: float = 0.01,
+    cutoff_type: Literal["rom", "in_situ"] = "rom",
 ) -> pd.DataFrame:
     """Converts classified Mineral Resources into Mineral Reserves applying Modifying Factors.
 
-    Under CIM Definition Standards (2014), JORC Code (2012), and SEC S-K 1300:
-    1. 'Measured' Mineral Resources convert into 'Proven' (or 'Proved') Reserves.
-    2. 'Indicated' Mineral Resources convert into 'Probable' Reserves.
-    3. 'Inferred' Mineral Resources CANNOT be converted into Mineral Reserves under
-       any circumstances due to low geological confidence. They are excluded by default.
-    4. Applies Mining Dilution: waste rock inadvertently blasted and hauled with ore,
+    Strict Regulatory Compliance Framework:
+    ---------------------------------------
+    Under CRIRSCO International Reporting Template (Clause 28), CIM Definition Standards (2014),
+    CIM MRMR Best Practice Guidelines (§7.1–§7.7 on Modifying Factors), JORC Code (2012, Clause 29 on Modifying Factors and Ore Reserves), and
+    SEC Regulation S-K 1300 (§229.1302(d)(4)) (TODO: Manually Verify):
+    1. 'Measured' Mineral Resources convert into 'Proven' (or 'Proved') Mineral Reserves.
+    2. 'Indicated' Mineral Resources convert into 'Probable' Mineral Reserves.
+    3. 'Inferred' Mineral Resources CANNOT be converted into Mineral Reserves under any
+       circumstances due to low geological confidence. Inferred material is strictly excluded.
+    4. 'Unclassified' or waste blocks cannot be converted into Mineral Reserves.
+    5. Applies Mining Dilution: waste or contact rock inadvertently blasted and hauled with ore,
        increasing run-of-mine tonnage and lowering delivered head grade.
-    5. Applies Mining Recovery (Ore Loss): unrecovered ore due to blast scatter or
+    6. Applies Mining Recovery (Ore Loss): unrecovered ore due to blast scatter or
        stability pillars, reducing delivered tonnage.
+    7. Cut-off Grade Application (CIM MRMR §7.2.1 & SME Mining Engineering Handbook Ch. 6.1) (TODO: Manually Verify):
+       The economic cut-off grade represents the marginal economic threshold of the delivered
+       Run-of-Mine (ROM) product at the processing plant gate. When mining dilution is added,
+       wall-rock dilution lowers the head grade of the delivered ore. Under standard practice
+       (`cutoff_type='rom'`, default), the economic cut-off criterion is tested against the
+       delivered ROM grade (rom_grade >= cutoff_grade). Blocks whose diluted head grade falls
+       below the cut-off cannot pay for processing and delivery, and are excluded from the reserve
+       and audited in `attrs['excluded_subeconomic_diluted_tonnes']`. Alternatively, if the practitioner
+       has pre-adjusted the in-situ cut-off for dilution (COG_insitu = COG_rom * (1 + Dilution)),
+       `cutoff_type='in_situ'` applies the filter directly to in-situ grades.
 
     Parameters
     ----------
@@ -3320,8 +4382,7 @@ def convert_resource_to_reserve(
         Mining extraction recovery percentage (e.g., 95.0 for 95% recovery, meaning 5% ore loss).
         Required without default.
     cutoff_grade : float
-        Economic cut-off grade for reserve delineation. Material below cutoff is excluded.
-        Required without default.
+        Economic cut-off grade for reserve delineation. Required without default.
     dilution_grade : float, default 0.0
         Grade of the diluting waste or contact rock.
     category_col : str, default "category"
@@ -3330,9 +4391,16 @@ def convert_resource_to_reserve(
         In-situ grade column name.
     tonnes_col : str, default "tonnes"
         In-situ tonnage column name.
-    allow_inferred : bool, default False
-        Strict compliance enforcement. If False (default), Inferred material is strictly
-        excluded from reserves in compliance with international reporting codes.
+    metal_factor : float, default 0.01
+        Multiplier converting (grade * tonnes) to contained metal quantity.
+        Default is 0.01 for percentage grades (% Cu). For g/t or ppm, use 1e-6 (or 1.0 for grams).
+    cutoff_type : Literal["rom", "in_situ"], default "rom"
+        Basis for economic cut-off grade evaluation:
+        - "rom" (default, industry standard): Economic cut-off is applied to the delivered Run-of-Mine
+          (ROM) diluted head grade (rom_grade >= cutoff_grade). Diluted blocks falling below cutoff
+          are excluded as sub-economic.
+        - "in_situ": Economic cut-off is applied directly to in-situ resource grades
+          (in_situ_grade >= cutoff_grade). Use only if cutoff_grade has already been adjusted for dilution.
 
     Returns
     -------
@@ -3359,24 +4427,29 @@ def convert_resource_to_reserve(
         raise ValueError(
             f"Mining recovery must be in (0, 100]%, got {mining_recovery_pct}%"
         )
+    if cutoff_grade < 0.0:
+        raise ValueError(f"cutoff_grade cannot be negative, got {cutoff_grade}")
+    if cutoff_type not in ("rom", "in_situ"):
+        raise ValueError(f"cutoff_type must be 'rom' or 'in_situ', got '{cutoff_type}'")
 
     # Normalize category strings for robust matching
     cat_series = resource_df[category_col].astype(str).str.strip().str.capitalize()
 
-    # Segregate and audit Inferred material
+    # Segregate and audit Inferred and Unclassified material
+    is_meas = cat_series.str.startswith("Meas")
+    is_ind = cat_series.str.startswith("Ind")
     is_inferred = cat_series.str.startswith("Infer")
-    n_inferred = int(is_inferred.sum())
+    is_unclassified = ~(is_meas | is_ind | is_inferred)
+
     inferred_tonnes = float(resource_df.loc[is_inferred, tonnes_col].sum())
+    unclassified_tonnes = float(resource_df.loc[is_unclassified, tonnes_col].sum())
 
-    if n_inferred > 0 and not allow_inferred:
-        # Strictly excluded from reserves
-        eligible_mask = ~is_inferred
-    else:
-        eligible_mask = np.ones(len(resource_df), dtype=bool)
+    # Only Measured and Indicated resources are eligible for conversion
+    eligible_mask = is_meas | is_ind
 
-    # Filter by economic cut-off grade
-    above_cutoff = eligible_mask & (resource_df[grade_col] >= cutoff_grade)
-    res_subset = resource_df.loc[above_cutoff].copy()
+    # Candidate blocks: must be eligible classification and part of mineral resource (>= cutoff in-situ)
+    above_insitu = eligible_mask & (resource_df[grade_col] >= cutoff_grade)
+    res_subset = resource_df.loc[above_insitu].copy()
 
     if len(res_subset) == 0:
         empty_df = pd.DataFrame(
@@ -3390,24 +4463,19 @@ def convert_resource_to_reserve(
             ]
         )
         empty_df.attrs["excluded_inferred_tonnes"] = inferred_tonnes
+        empty_df.attrs["excluded_unclassified_tonnes"] = unclassified_tonnes
+        empty_df.attrs["excluded_subeconomic_diluted_tonnes"] = 0.0
+        empty_df.attrs["excluded_subeconomic_diluted_metal"] = 0.0
+        empty_df.attrs["excluded_subeconomic_insitu_tonnes"] = 0.0
+        empty_df.attrs["excluded_subeconomic_insitu_metal"] = 0.0
+        empty_df.attrs["mining_dilution_pct"] = mining_dilution_pct
+        empty_df.attrs["mining_recovery_pct"] = mining_recovery_pct
+        empty_df.attrs["cutoff_grade"] = cutoff_grade
+        empty_df.attrs["cutoff_type"] = cutoff_type
+        empty_df.attrs["metal_factor"] = metal_factor
         return empty_df
 
-    # Map categories to reserve classifications
-    subset_cats = cat_series.loc[above_cutoff]
-    reserve_cats = np.empty(len(res_subset), dtype=object)
-
-    is_meas = subset_cats.str.startswith("Meas")
-    is_ind = subset_cats.str.startswith("Ind")
-
-    reserve_cats[is_meas.to_numpy()] = "Proven Reserve"
-    reserve_cats[is_ind.to_numpy()] = "Probable Reserve"
-
-    # Any remaining (e.g. Inferred if allow_inferred was true, or unclassified)
-    unmapped = ~(is_meas | is_ind)
-    if unmapped.any():
-        reserve_cats[unmapped.to_numpy()] = "Probable Reserve"
-
-    # In-situ values
+    # In-situ values of candidate blocks
     t_insitu = res_subset[tonnes_col].to_numpy(dtype=float)
     g_insitu = res_subset[grade_col].to_numpy(dtype=float)
 
@@ -3427,30 +4495,104 @@ def convert_resource_to_reserve(
     rec_frac = mining_recovery_pct / 100.0
     t_rom = t_diluted * rec_frac
     g_rom = g_diluted
-    contained_metal = t_rom * (g_rom / 100.0)
+    contained_metal = t_rom * g_rom * metal_factor
+
+    # 3. Apply Economic Cut-off Grade Criterion (CIM MRMR §7.2.1 / SME Handbook Ch. 6.1) (TODO: Manually Verify)
+    if cutoff_type == "rom":
+        economic_mask = g_rom >= cutoff_grade
+    else:
+        economic_mask = np.ones(len(res_subset), dtype=bool)
+
+    # Audit candidate blocks that fell below cutoff after dilution
+    subecon_mask = ~economic_mask
+    excluded_subecon_diluted_tonnes = float(np.sum(t_rom[subecon_mask]))
+    excluded_subecon_diluted_metal = float(np.sum(contained_metal[subecon_mask]))
+    excluded_subecon_insitu_tonnes = float(np.sum(t_insitu[subecon_mask]))
+    excluded_subecon_insitu_metal = float(
+        np.sum((t_insitu * g_insitu * metal_factor)[subecon_mask])
+    )
+
+    if not np.any(economic_mask):
+        empty_df = pd.DataFrame(
+            columns=[
+                "reserve_category",
+                "rom_tonnes",
+                "rom_grade",
+                "contained_metal",
+                "in_situ_tonnes",
+                "in_situ_grade",
+            ]
+        )
+        empty_df.attrs["excluded_inferred_tonnes"] = inferred_tonnes
+        empty_df.attrs["excluded_unclassified_tonnes"] = unclassified_tonnes
+        empty_df.attrs["excluded_subeconomic_diluted_tonnes"] = (
+            excluded_subecon_diluted_tonnes
+        )
+        empty_df.attrs["excluded_subeconomic_diluted_metal"] = (
+            excluded_subecon_diluted_metal
+        )
+        empty_df.attrs["excluded_subeconomic_insitu_tonnes"] = (
+            excluded_subecon_insitu_tonnes
+        )
+        empty_df.attrs["excluded_subeconomic_insitu_metal"] = (
+            excluded_subecon_insitu_metal
+        )
+        empty_df.attrs["mining_dilution_pct"] = mining_dilution_pct
+        empty_df.attrs["mining_recovery_pct"] = mining_recovery_pct
+        empty_df.attrs["cutoff_grade"] = cutoff_grade
+        empty_df.attrs["cutoff_type"] = cutoff_type
+        empty_df.attrs["metal_factor"] = metal_factor
+        return empty_df
+
+    # Map categories strictly to reserve classifications for economic blocks
+    subset_cats = cat_series.loc[above_insitu].iloc[economic_mask]
+    reserve_cats = np.empty(int(np.sum(economic_mask)), dtype=object)
+
+    subset_meas = subset_cats.str.startswith("Meas")
+    subset_ind = subset_cats.str.startswith("Ind")
+
+    reserve_cats[subset_meas.to_numpy()] = "Proven Reserve"
+    reserve_cats[subset_ind.to_numpy()] = "Probable Reserve"
+
+    econ_res_subset = res_subset.iloc[economic_mask].copy()
 
     reserve_df = pd.DataFrame(
         {
             "reserve_category": reserve_cats,
-            "rom_tonnes": t_rom,
-            "rom_grade": g_rom,
-            "contained_metal": contained_metal,
-            "in_situ_tonnes": t_insitu,
-            "in_situ_grade": g_insitu,
+            "rom_tonnes": t_rom[economic_mask],
+            "rom_grade": g_rom[economic_mask],
+            "contained_metal": contained_metal[economic_mask],
+            "in_situ_tonnes": t_insitu[economic_mask],
+            "in_situ_grade": g_insitu[economic_mask],
         },
-        index=res_subset.index,
+        index=econ_res_subset.index,
     )
 
     # Preserve spatial coordinates if present
     for coord in ("x", "y", "z", "easting", "northing", "elevation"):
-        if coord in res_subset.columns:
-            reserve_df[coord] = res_subset[coord]
+        if coord in econ_res_subset.columns:
+            reserve_df[coord] = econ_res_subset[coord]
 
     # Attach conversion audit metadata
     reserve_df.attrs["excluded_inferred_tonnes"] = inferred_tonnes
+    reserve_df.attrs["excluded_unclassified_tonnes"] = unclassified_tonnes
+    reserve_df.attrs["excluded_subeconomic_diluted_tonnes"] = (
+        excluded_subecon_diluted_tonnes
+    )
+    reserve_df.attrs["excluded_subeconomic_diluted_metal"] = (
+        excluded_subecon_diluted_metal
+    )
+    reserve_df.attrs["excluded_subeconomic_insitu_tonnes"] = (
+        excluded_subecon_insitu_tonnes
+    )
+    reserve_df.attrs["excluded_subeconomic_insitu_metal"] = (
+        excluded_subecon_insitu_metal
+    )
     reserve_df.attrs["mining_dilution_pct"] = mining_dilution_pct
     reserve_df.attrs["mining_recovery_pct"] = mining_recovery_pct
     reserve_df.attrs["cutoff_grade"] = cutoff_grade
+    reserve_df.attrs["cutoff_type"] = cutoff_type
+    reserve_df.attrs["metal_factor"] = metal_factor
     return reserve_df
 
 
@@ -3467,15 +4609,20 @@ def format_reserve_statement(
     grade_unit: str = "% Cu",
     tonnage_unit: str = "Mt",
     metal_unit: str = "kt",
+    metal_factor: float = 0.01,
     rpeee_constraint: str = "Constrained within engineered final pit design",
+    point_of_reference: str = "Run-of-Mine (ROM) delivered to processing facility",
     sig_figs: Optional[dict[str, int]] = None,
 ) -> pd.DataFrame:
-    """Formats an official NI 43-101 / JORC compliant Mineral Reserve Statement.
+    """Formats an official NI 43-101 / JORC compliant Mineral Reserve Statement (TODO: Manually Verify).
 
     Enforces:
     - Segregation into Proven, Probable, and Total Proven + Probable reserves.
     - Tiered significant figures rounding to eliminate false precision.
     - Mandatory regulatory footnotes disclosing all applied Modifying Factors.
+    - Mandatory Point of Reference: Discloses the reference point (e.g., Run-of-Mine delivered to
+      processing facility, plant feed, or marketable product) under SEC Regulation S-K 1300
+      (§229.1303(b)(1)), JORC Code (Clause 35), and CRIRSCO Template (Clause 38) (TODO: Manually Verify).
 
     Parameters
     ----------
@@ -3503,8 +4650,13 @@ def format_reserve_statement(
         Tonnage display unit ("t", "kt", "Mt").
     metal_unit : str, default "kt"
         Contained metal display unit.
+    metal_factor : float, default 0.01
+        Multiplier to convert (grade * tonnes) to raw metal tonnes. Default 0.01 for %.
     rpeee_constraint : str, default "Constrained within engineered final pit design"
         Engineering design constraint statement.
+    point_of_reference : str, default "Run-of-Mine (ROM) delivered to processing facility"
+        Mandatory reference point under SEC S-K 1300 (§229.1303(b)(1)) and
+        CRIRSCO Template (Clause 38) / JORC Code (Clause 35) (TODO: Manually Verify).
     sig_figs : dict, optional
         Custom significant figures per category.
 
@@ -3517,6 +4669,14 @@ def format_reserve_statement(
         if col not in reserve_df.columns:
             raise ValueError(f"Required column '{col}' not found in reserve DataFrame.")
 
+    if not isinstance(point_of_reference, str) or not point_of_reference.strip():
+        raise ValueError(
+            "point_of_reference must be a non-empty string specifying the reference point "
+            "(e.g., 'Run-of-Mine (ROM) delivered to processing facility', 'Plant feed', or 'Marketable product') "
+            "in compliance with SEC Regulation S-K 1300 (§229.1303(b)(1)) and CRIRSCO / JORC standards."
+        )
+    ref_point = point_of_reference.strip()
+
     default_sig_figs = {
         "Proven Reserve": 3,
         "Probable Reserve": 2,
@@ -3526,8 +4686,26 @@ def format_reserve_statement(
         default_sig_figs.update(sig_figs)
 
     # Unit scaling
-    t_scale = 1e6 if tonnage_unit == "Mt" else (1e3 if tonnage_unit == "kt" else 1.0)
-    m_scale = 1e3 if metal_unit == "kt" else (1e6 if metal_unit == "Mt" else 1.0)
+    t_scale = (
+        1e6
+        if tonnage_unit.upper() == "MT"
+        else (1e3 if tonnage_unit.upper() == "KT" else 1.0)
+    )
+    m_unit = metal_unit.lower().strip()
+    if m_unit == "kt":
+        m_scale = 1e3
+    elif m_unit == "mt":
+        m_scale = 1e6
+    elif m_unit == "t":
+        m_scale = 1.0
+    elif "koz" in m_unit:
+        m_scale = 0.0311034768  # 1 koz = 0.0311034768 tonnes
+    elif "moz" in m_unit:
+        m_scale = 31.1034768  # 1 Moz = 31.1034768 tonnes
+    elif "oz" in m_unit:
+        m_scale = 31.1034768e-6
+    else:
+        m_scale = 1.0
 
     rows = []
     # 1. Proven Reserves
@@ -3540,7 +4718,7 @@ def format_reserve_statement(
         if t_prov > 0
         else 0.0
     )
-    m_prov = t_prov * (g_prov / 100.0) if t_prov > 0 else 0.0
+    m_prov = t_prov * g_prov * metal_factor if t_prov > 0 else 0.0
 
     # 2. Probable Reserves
     prob_mask = reserve_df[category_col].astype(str).str.strip().str.startswith("Prob")
@@ -3552,7 +4730,7 @@ def format_reserve_statement(
         if t_prob > 0
         else 0.0
     )
-    m_prob = t_prob * (g_prob / 100.0) if t_prob > 0 else 0.0
+    m_prob = t_prob * g_prob * metal_factor if t_prob > 0 else 0.0
 
     # 3. Total Proven + Probable
     t_tot = t_prov + t_prob
@@ -3561,7 +4739,7 @@ def format_reserve_statement(
         if t_tot > 0
         else 0.0
     )
-    m_tot = t_prov * (g_prov / 100.0) + t_prob * (g_prob / 100.0)
+    m_tot = m_prov + m_prob
 
     for cat_name, t_val, g_val, m_val in [
         ("Proven Reserve", t_prov, g_prov, m_prov),
@@ -3583,18 +4761,21 @@ def format_reserve_statement(
 
     statement_df = pd.DataFrame(rows)
 
-    # Mandatory CIM / JORC Compliance Footnotes
+    # Mandatory CIM / JORC / SEC S-K 1300 Compliance Footnotes (TODO: Manually Verify)
     footnotes = [
-        "1. Mineral Reserves are reported in accordance with CIM Definition Standards (2014) / JORC Code (2012).",
-        "2. Tonnages, grades, and contained metal are Run-of-Mine (ROM) and rounded to reflect relative uncertainty. Totals may not sum due to rounding.",
+        "1. Mineral Reserves are reported in accordance with CIM Definition Standards (2014) / JORC Code (2012) (TODO: Manually Verify).",
+        "2. Tonnages, grades, and contained metal are rounded to reflect relative uncertainty. Totals may not sum due to rounding.",
         "3. Mineral Reserves represent the economically mineable part of Measured and Indicated Mineral Resources demonstrated by at least a Pre-Feasibility Study.",
         (
             f"4. Modifying Factors applied: Mining Dilution = {mining_dilution_pct:.1f}%, Mining Recovery = {mining_recovery_pct:.1f}%, "
             f"Metallurgical Recovery = {metallurgical_recovery:.1f}%, Base Cutoff Grade = {cutoff_grade:.2f}{grade_unit}, Commodity Price = {commodity_price}."
         ),
         f"5. {rpeee_constraint}.",
+        f"6. Point of Reference: {ref_point} in compliance with SEC Regulation S-K 1300 (§229.1303(b)(1)) and CRIRSCO / JORC standards (TODO: Manually Verify).",
     ]
     statement_df.attrs["footnotes"] = footnotes
+    statement_df.attrs["point_of_reference"] = ref_point
+    statement_df.attrs["metal_factor"] = metal_factor
     return statement_df
 
 
@@ -3615,6 +4796,7 @@ def plot_resource_to_reserve_waterfall(
     tonnes_col: str = "tonnes",
     tonnage_unit: str = "Mt",
     metal_unit: str = "kt",
+    metal_factor: float = 0.01,
     grade_unit: str = "% Cu",
     title: Optional[str] = None,
     figsize: tuple[float, float] = (16, 7),
@@ -3652,7 +4834,9 @@ def plot_resource_to_reserve_waterfall(
     tonnage_unit : str, default "Mt"
         Tonnage scale unit ("t", "kt", "Mt").
     metal_unit : str, default "kt"
-        Metal scale unit ("t", "kt", "Mt").
+        Metal scale unit ("t", "kt", "Mt", "koz").
+    metal_factor : float, default 0.01
+        Multiplier converting (grade * tonnes) to raw metal tonnes. Default 0.01 for %.
     grade_unit : str, default "% Cu"
         Grade display unit.
     title : str, optional
@@ -3665,8 +4849,26 @@ def plot_resource_to_reserve_waterfall(
     tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]
         Matplotlib figure and pair of axes (tonnage_ax, metal_ax).
     """
-    t_scale = 1e6 if tonnage_unit == "Mt" else (1e3 if tonnage_unit == "kt" else 1.0)
-    m_scale = 1e3 if metal_unit == "kt" else (1e6 if metal_unit == "Mt" else 1.0)
+    t_scale = (
+        1e6
+        if tonnage_unit.upper() == "MT"
+        else (1e3 if tonnage_unit.upper() == "KT" else 1.0)
+    )
+    m_unit = metal_unit.lower().strip()
+    if m_unit == "kt":
+        m_scale = 1e3
+    elif m_unit == "mt":
+        m_scale = 1e6
+    elif m_unit == "t":
+        m_scale = 1.0
+    elif "koz" in m_unit:
+        m_scale = 0.0311034768  # 1 koz = 0.0311034768 tonnes
+    elif "moz" in m_unit:
+        m_scale = 31.1034768  # 1 Moz = 31.1034768 tonnes
+    elif "oz" in m_unit:
+        m_scale = 31.1034768e-6
+    else:
+        m_scale = 1.0
 
     # 1. Filter for Measured & Indicated in-situ resource
     cat_s = resource_df[category_col].astype(str).str.strip().str.capitalize()
@@ -3675,12 +4877,14 @@ def plot_resource_to_reserve_waterfall(
 
     # Step 1: In-Situ M&I
     t_step1 = float(mi_df[tonnes_col].sum())
-    m_step1 = float((mi_df[tonnes_col] * mi_df[grade_col] / 100.0).sum())
+    m_step1 = float((mi_df[tonnes_col] * mi_df[grade_col] * metal_factor).sum())
 
     # Step 2: Cut-Off Loss
     sub_cutoff = mi_df[mi_df[grade_col] < cutoff_grade]
     delta_t_co = -float(sub_cutoff[tonnes_col].sum())
-    delta_m_co = -float((sub_cutoff[tonnes_col] * sub_cutoff[grade_col] / 100.0).sum())
+    delta_m_co = -float(
+        (sub_cutoff[tonnes_col] * sub_cutoff[grade_col] * metal_factor).sum()
+    )
 
     t_above_co = t_step1 + delta_t_co
     m_above_co = m_step1 + delta_m_co
@@ -3693,21 +4897,71 @@ def plot_resource_to_reserve_waterfall(
     # Step 4: Mining Dilution
     dil_frac = (mining_dilution_pct / 100.0) * (mining_recovery_pct / 100.0)
     delta_t_dil = float(t_above_co * dil_frac)
-    delta_m_dil = float(delta_t_dil * (dilution_grade / 100.0))
+    delta_m_dil = float(delta_t_dil * dilution_grade * metal_factor)
 
     # Step 5: Final ROM Reserve
     t_final = float(reserve_df["rom_tonnes"].sum())
     m_final = float(reserve_df["contained_metal"].sum())
 
-    fig, (ax_t, ax_m) = plt.subplots(1, 2, figsize=figsize)
+    # Check for dilution sub-cutoff loss (material degraded below cutoff by dilution)
+    t_running = t_above_co + delta_t_loss + delta_t_dil
+    m_running = m_above_co + delta_m_loss + delta_m_dil
+    delta_t_spoilage = t_final - t_running
+    delta_m_spoilage = m_final - m_running
 
-    steps = [
-        "In-Situ M&I\nResource",
-        f"Sub-Cutoff\n(<{cutoff_grade:.2f}{grade_unit})",
-        f"Ore Loss\n({100-mining_recovery_pct:.1f}%)",
-        f"Dilution\n(+{mining_dilution_pct:.1f}%)",
-        "Run-of-Mine\nReserve",
-    ]
+    has_spoilage = (abs(delta_t_spoilage / max(1e-9, t_step1)) > 1e-4) or (
+        abs(delta_m_spoilage / max(1e-9, m_step1)) > 1e-4
+    )
+
+    if has_spoilage:
+        steps = [
+            "In-Situ M&I\nResource",
+            f"Sub-Cutoff\n(<{cutoff_grade:.2f}{grade_unit})",
+            f"Ore Loss\n({100-mining_recovery_pct:.1f}%)",
+            f"Dilution\n(+{mining_dilution_pct:.1f}%)",
+            f"Dilution Spoilage\n(<{cutoff_grade:.2f}{grade_unit})",
+            "Run-of-Mine\nReserve",
+        ]
+        t_deltas = [
+            t_step1 / t_scale,
+            delta_t_co / t_scale,
+            delta_t_loss / t_scale,
+            delta_t_dil / t_scale,
+            delta_t_spoilage / t_scale,
+            t_final / t_scale,
+        ]
+        m_deltas = [
+            m_step1 / m_scale,
+            delta_m_co / m_scale,
+            delta_m_loss / m_scale,
+            delta_m_dil / m_scale,
+            delta_m_spoilage / m_scale,
+            m_final / m_scale,
+        ]
+    else:
+        steps = [
+            "In-Situ M&I\nResource",
+            f"Sub-Cutoff\n(<{cutoff_grade:.2f}{grade_unit})",
+            f"Ore Loss\n({100-mining_recovery_pct:.1f}%)",
+            f"Dilution\n(+{mining_dilution_pct:.1f}%)",
+            "Run-of-Mine\nReserve",
+        ]
+        t_deltas = [
+            t_step1 / t_scale,
+            delta_t_co / t_scale,
+            delta_t_loss / t_scale,
+            delta_t_dil / t_scale,
+            t_final / t_scale,
+        ]
+        m_deltas = [
+            m_step1 / m_scale,
+            delta_m_co / m_scale,
+            delta_m_loss / m_scale,
+            delta_m_dil / m_scale,
+            m_final / m_scale,
+        ]
+
+    fig, (ax_t, ax_m) = plt.subplots(1, 2, figsize=figsize)
 
     def _render_waterfall(ax, deltas, finals, unit, label):
         n = len(deltas)
@@ -3794,13 +5048,7 @@ def plot_resource_to_reserve_waterfall(
     # Render Tonnage Waterfall
     _render_waterfall(
         ax_t,
-        [
-            t_step1 / t_scale,
-            delta_t_co / t_scale,
-            delta_t_loss / t_scale,
-            delta_t_dil / t_scale,
-            t_final / t_scale,
-        ],
+        t_deltas,
         t_final / t_scale,
         tonnage_unit,
         "Ore Tonnage",
@@ -3810,13 +5058,7 @@ def plot_resource_to_reserve_waterfall(
     # Render Contained Metal Waterfall
     _render_waterfall(
         ax_m,
-        [
-            m_step1 / m_scale,
-            delta_m_co / m_scale,
-            delta_m_loss / m_scale,
-            delta_m_dil / m_scale,
-            m_final / m_scale,
-        ],
+        m_deltas,
         m_final / m_scale,
         metal_unit,
         "Contained Metal",
@@ -3975,7 +5217,7 @@ def plot_resource_classification_map(
 ) -> tuple[plt.Figure, plt.Axes]:
     """Renders 2D spatial mine plan map colored by regulatory mineral resource category.
 
-    In accordance with CIM Definition Standards (2014) and JORC Code (2012):
+    In accordance with CIM Definition Standards (2014) and JORC Code (2012) (TODO: Manually Verify):
     - Measured Resource: Forest Green (#2ca02c)
     - Indicated Resource: Royal Blue (#1f77b4)
     - Inferred Resource: Amber / Orange (#ff7f0e)
@@ -4010,9 +5252,9 @@ def plot_resource_classification_map(
         fig = ax.figure
 
     color_palette = {
-        "Measured": "#2ca02c",      # Forest green
-        "Indicated": "#1f77b4",     # Royal Blue
-        "Inferred": "#ff7f0e",      # Amber / Orange
+        "Measured": "#2ca02c",  # Forest green
+        "Indicated": "#1f77b4",  # Royal Blue
+        "Inferred": "#ff7f0e",  # Amber / Orange
         "Unclassified": "#d3d3d3",  # Light grey
     }
 
@@ -4048,8 +5290,16 @@ def plot_resource_classification_map(
 
     # Draw drillholes if provided
     if drillholes is not None and not drillholes.empty:
-        dh_x = drillholes["x"] if "x" in drillholes else (drillholes[x_col] if x_col in drillholes else drillholes.iloc[:, 0])
-        dh_y = drillholes["y"] if "y" in drillholes else (drillholes[y_col] if y_col in drillholes else drillholes.iloc[:, 1])
+        dh_x = (
+            drillholes["x"]
+            if "x" in drillholes
+            else (drillholes[x_col] if x_col in drillholes else drillholes.iloc[:, 0])
+        )
+        dh_y = (
+            drillholes["y"]
+            if "y" in drillholes
+            else (drillholes[y_col] if y_col in drillholes else drillholes.iloc[:, 1])
+        )
         ax.scatter(
             dh_x,
             dh_y,
@@ -4185,13 +5435,23 @@ def composite_drillhole_intervals(
     density_col: Optional[str] = None,
     min_length_ratio: float = 0.50,
     remnant_strategy: str = "discard",
+    unassayed_treatment: str = "zero",
+    unassayed_grade: float = 0.0,
+    max_gap_length: float = 0.0,
+    min_coverage_ratio: float = 0.0,
+    missing_grade_values: Optional[Sequence[float]] = None,
 ) -> pd.DataFrame:
-    """Down-hole regular compositing with domain-boundary constraints.
+    """Down-hole regular compositing with domain-boundary constraints and unassayed gap handling.
 
     Solves the Support Effect in mining geostatistics: raw drill core assays have
     variable sample lengths cut along geological and alteration contacts. Equal
     volume/length support is required prior to spatial statistical evaluation and
     variography.
+
+    In accordance with CIM Exploration Best Practice Guidelines (2018, §4.3 & §5.1)
+    and JORC Code (2012, Table 1) (TODO: Manually Verify), unassayed core loss intervals, cavities, or missing
+    assays must never be assumed to carry the grade of adjacent mineralization without
+    explicit justification.
 
     Parameters
     ----------
@@ -4208,8 +5468,9 @@ def composite_drillhole_intervals(
         Assay grade column name.
     domain_col : str, optional
         Geological / lithological / structural domain column.
-        CRITICAL: If provided, compositing strictly resets at domain contacts.
-        Composites never cross domain boundaries.
+        CRITICAL: Compositing strictly resets at domain contacts.
+        Composites never cross domain boundaries. Furthermore, non-contiguous
+        intercepts of the same domain (e.g. A -> B -> A) are treated as distinct runs.
     density_col : str, optional
         Bulk density column for mass-weighted compositing (length * density).
     min_length_ratio : float, default 0.50
@@ -4220,11 +5481,33 @@ def composite_drillhole_intervals(
         - "discard": Discards remnants shorter than min_length_ratio * composite_length.
         - "distribute": Evenly adjusts composite lengths across the interval so all
           composites have equal support without tiny remnants.
+    unassayed_treatment : {"zero", "split", "ignore", "error"}, default "zero"
+        Strategy for handling unsampled gaps and missing/NaN assay intervals:
+        - "zero": Replaces unassayed/missing intervals with unassayed_grade (typically 0.0),
+          conserving physical contained metal over the full composite length (CIM best practice) (TODO: Manually Verify).
+          If max_gap_length > 0 and a gap exceeds max_gap_length, the run is split instead.
+        - "split": Treats any unassayed gap exceeding max_gap_length (and missing assay rows)
+          as a hard boundary, splitting the drillhole run so intervals before and after
+          the gap are composited independently.
+        - "ignore": Length-weights only the assayed segments (legacy behavior), but records
+          true sampled_length and coverage_ratio in the output.
+        - "error": Raises ValueError if any unassayed gap or missing assay is detected.
+    unassayed_grade : float, default 0.0
+        Grade assigned to unassayed/missing core intervals when unassayed_treatment="zero".
+    max_gap_length : float, default 0.0
+        Maximum allowable depth gap before triggering gap treatment or splitting.
+    min_coverage_ratio : float, default 0.0
+        Minimum ratio of assayed core length to total composite length (sampled_length / length)
+        required to retain a composite. Composites with coverage below this threshold are discarded.
+    missing_grade_values : Sequence[float], optional
+        Numeric codes treated as missing assays (e.g., [-999.0, -1.0]). If None, NaN/null and
+        negative values are treated as missing.
 
     Returns
     -------
     pd.DataFrame
-        Composited drillhole intervals with length-weighted grades and midpoint coordinates.
+        Composited drillhole intervals with length-weighted grades, sampled lengths,
+        coverage ratios, and midpoint coordinates.
     """
     if composite_length <= 0:
         raise ValueError(
@@ -4234,6 +5517,22 @@ def composite_drillhole_intervals(
         raise ValueError(
             f"remnant_strategy must be 'discard' or 'distribute', got '{remnant_strategy}'"
         )
+    if unassayed_treatment not in ("zero", "split", "ignore", "error"):
+        raise ValueError(
+            f"unassayed_treatment must be 'zero', 'split', 'ignore', or 'error', got '{unassayed_treatment}'"
+        )
+    if not (0.0 <= min_length_ratio <= 1.0):
+        raise ValueError(
+            f"min_length_ratio must be in [0, 1], got {min_length_ratio}"
+        )
+    if not (0.0 <= min_coverage_ratio <= 1.0):
+        raise ValueError(
+            f"min_coverage_ratio must be in [0, 1], got {min_coverage_ratio}"
+        )
+    if max_gap_length < 0.0:
+        raise ValueError(
+            f"max_gap_length must be non-negative, got {max_gap_length}"
+        )
 
     for col in (hole_id_col, from_col, to_col, grade_col):
         if col not in assay_df.columns:
@@ -4242,118 +5541,348 @@ def composite_drillhole_intervals(
     if domain_col is not None and domain_col not in assay_df.columns:
         raise ValueError(f"Specified domain column '{domain_col}' not found.")
 
-    # Spatial coordinate columns to preserve and interpolate
+    if density_col is not None and density_col not in assay_df.columns:
+        raise ValueError(f"Specified density column '{density_col}' not found.")
+
     coord_cols = [c for c in ("x", "y", "z", "elevation") if c in assay_df.columns]
 
-    # Grouping keys: strictly constrain by hole_id and domain (if provided)
-    group_cols = [hole_id_col]
-    if domain_col is not None:
-        group_cols.append(domain_col)
+    if assay_df.empty:
+        out_cols = [
+            hole_id_col,
+            from_col,
+            to_col,
+            "length",
+            grade_col,
+            "sampled_length",
+            "coverage_ratio",
+        ]
+        if domain_col is not None:
+            out_cols.append(domain_col)
+        out_cols.extend(coord_cols)
+        out_empty = pd.DataFrame(columns=out_cols)
+        out_empty.attrs["composite_length"] = composite_length
+        out_empty.attrs["remnant_strategy"] = remnant_strategy
+        out_empty.attrs["unassayed_treatment"] = unassayed_treatment
+        out_empty.attrs["unassayed_grade"] = unassayed_grade
+        out_empty.attrs["discarded_remnants_count"] = 0
+        out_empty.attrs["discarded_low_coverage_count"] = 0
+        out_empty.attrs["unassayed_gaps_count"] = 0
+        out_empty.attrs["unassayed_gaps_total_length"] = 0.0
+        out_empty.attrs["contiguous_runs_count"] = 0
+        return out_empty
+
+    def is_missing_grade(val) -> bool:
+        if pd.isna(val):
+            return True
+        try:
+            fval = float(val)
+        except (ValueError, TypeError):
+            return True
+        if missing_grade_values is not None:
+            return any(np.isclose(fval, float(m)) for m in missing_grade_values)
+        return fval < 0.0
 
     composite_records = []
-    discarded_count = 0
+    discarded_remnants_count = 0
+    discarded_low_cov_count = 0
+    total_gaps_count = 0
+    total_gaps_length = 0.0
+    total_runs_count = 0
 
-    for keys, grp in assay_df.groupby(group_cols, sort=False):
-        hole_id = keys[0] if isinstance(keys, tuple) else keys
-        dom_val = keys[1] if (isinstance(keys, tuple) and len(keys) > 1) else None
-
-        sub = grp.sort_values(from_col).copy()
+    # Group by hole_id only to maintain sequential down-hole continuity
+    for hole_id, grp in assay_df.groupby(hole_id_col, sort=False):
+        sub = grp.sort_values([from_col, to_col]).copy()
         if len(sub) == 0:
             continue
 
-        run_start = float(sub[from_col].min())
-        run_end = float(sub[to_col].max())
-        run_len = run_end - run_start
-
-        if run_len <= 0:
-            continue
-
-        # Establish composite interval boundaries
-        comp_intervals = []
-        if remnant_strategy == "distribute":
-            n_comp = max(1, int(round(run_len / composite_length)))
-            actual_len = run_len / n_comp
-            # If total run is shorter than min_length_ratio * composite_length, check discard
-            if run_len < (min_length_ratio * composite_length):
-                discarded_count += 1
-                continue
-            for i in range(n_comp):
-                c_start = run_start + i * actual_len
-                c_end = run_start + (i + 1) * actual_len
-                comp_intervals.append((c_start, c_end))
-        else:  # "discard"
-            curr = run_start
-            while curr + composite_length <= run_end:
-                comp_intervals.append((curr, curr + composite_length))
-                curr += composite_length
-            remnant_len = run_end - curr
-            if remnant_len >= (min_length_ratio * composite_length):
-                comp_intervals.append((curr, run_end))
-            elif remnant_len > 0:
-                discarded_count += 1
-
-        # Calculate length-weighted (and density-weighted) grades for each composite
         raw_from = sub[from_col].to_numpy(dtype=float)
         raw_to = sub[to_col].to_numpy(dtype=float)
-        raw_grade = sub[grade_col].to_numpy(dtype=float)
-        raw_dens = (
+        raw_grade = sub[grade_col].to_numpy()
+        raw_domain = sub[domain_col].to_numpy() if domain_col is not None else None
+        raw_density = (
             sub[density_col].to_numpy(dtype=float)
-            if density_col
+            if density_col is not None
             else np.ones(len(sub), dtype=float)
         )
+        mean_density = float(np.nanmean(raw_density)) if len(raw_density) > 0 else 1.0
+        if not np.isfinite(mean_density) or mean_density <= 0:
+            mean_density = 1.0
 
-        for c_from, c_to in comp_intervals:
-            c_len = c_to - c_from
-            if c_len <= 0:
-                continue
+        raw_coords = {c: sub[c].to_numpy(dtype=float) for c in coord_cols}
 
-            # Overlap calculation
-            overlap_starts = np.maximum(c_from, raw_from)
-            overlap_ends = np.minimum(c_to, raw_to)
-            overlaps = np.maximum(0.0, overlap_ends - overlap_starts)
-
-            valid_mask = overlaps > 1e-9
-            if not np.any(valid_mask):
-                continue
-
-            active_lens = overlaps[valid_mask]
-            active_grades = raw_grade[valid_mask]
-            active_weights = active_lens * raw_dens[valid_mask]
-
-            total_weight = float(active_weights.sum())
-            if total_weight <= 0:
-                continue
-
-            weighted_grade = float(
-                (active_weights * active_grades).sum() / total_weight
-            )
-
-            rec: dict = {
-                hole_id_col: hole_id,
-                from_col: c_from,
-                to_col: c_to,
-                "length": c_len,
-                grade_col: weighted_grade,
-            }
-            if domain_col is not None:
-                rec[domain_col] = dom_val
-
-            # Interpolate spatial coordinates to composite midpoint
-            c_mid = (c_from + c_to) / 2.0
-            for c_name in coord_cols:
-                raw_coords = sub[c_name].to_numpy(dtype=float)
-                # Weighted average coordinate for midpoint
-                comp_coord = float(
-                    (active_lens * raw_coords[valid_mask]).sum() / active_lens.sum()
+        # 1. Validation: from < to and strictly no overlapping intervals
+        n_rows = len(raw_from)
+        for i in range(n_rows):
+            f_i = raw_from[i]
+            t_i = raw_to[i]
+            if t_i <= f_i:
+                raise ValueError(
+                    f"Invalid interval in hole '{hole_id}' at row {i}: "
+                    f"from_m ({f_i}) >= to_m ({t_i})"
                 )
-                rec[c_name] = comp_coord
+            if i > 0 and f_i < raw_to[i - 1] - 1e-6:
+                raise ValueError(
+                    f"Overlapping intervals detected in drillhole '{hole_id}': "
+                    f"interval [{f_i}, {t_i}] overlaps with preceding interval "
+                    f"[{raw_from[i-1]}, {raw_to[i-1]}]"
+                )
 
-            composite_records.append(rec)
+        # 2. Build segments and partition into contiguous runs
+        # A run is a contiguous list of segments sharing the same domain and unbroken by splits.
+        runs: list[list[dict]] = []
+        current_run: list[dict] = []
+        current_dom = None
+
+        for i in range(n_rows):
+            f_i = raw_from[i]
+            t_i = raw_to[i]
+            val_i = raw_grade[i]
+            dom_i = raw_domain[i] if raw_domain is not None else None
+            dens_i = (
+                raw_density[i]
+                if (np.isfinite(raw_density[i]) and raw_density[i] > 0)
+                else mean_density
+            )
+            c_dict = {c: raw_coords[c][i] for c in coord_cols}
+
+            missing_i = is_missing_grade(val_i)
+
+            # Check gap between previous interval and current interval
+            if i > 0:
+                prev_to = raw_to[i - 1]
+                gap_len = f_i - prev_to
+                if gap_len > 1e-6:
+                    total_gaps_count += 1
+                    total_gaps_length += gap_len
+
+                    if unassayed_treatment == "error":
+                        raise ValueError(
+                            f"Unassayed depth gap of {gap_len:.2f}m detected in hole '{hole_id}' "
+                            f"between {prev_to}m and {f_i}m."
+                        )
+
+                    gap_causes_split = (unassayed_treatment == "split") or (
+                        unassayed_treatment == "zero"
+                        and max_gap_length > 0.0
+                        and gap_len > max_gap_length
+                    )
+
+                    if gap_causes_split:
+                        if current_run:
+                            runs.append(current_run)
+                            current_run = []
+                            current_dom = None
+                    else:
+                        # Materialize gap segment (treated as unassayed rock)
+                        gap_coords = {}
+                        prev_mid = (raw_from[i - 1] + prev_to) / 2.0
+                        curr_mid = (f_i + t_i) / 2.0
+                        gap_mid = (prev_to + f_i) / 2.0
+                        denom = curr_mid - prev_mid
+                        for c in coord_cols:
+                            p_val = raw_coords[c][i - 1]
+                            c_val = raw_coords[c][i]
+                            if np.isfinite(p_val) and np.isfinite(c_val) and abs(denom) > 1e-9:
+                                gap_coords[c] = float(
+                                    p_val + ((gap_mid - prev_mid) / denom) * (c_val - p_val)
+                                )
+                            elif np.isfinite(p_val):
+                                gap_coords[c] = float(p_val)
+                            else:
+                                gap_coords[c] = float(c_val)
+
+                        current_run.append({
+                            "from": prev_to,
+                            "to": f_i,
+                            "length": gap_len,
+                            "grade": unassayed_grade,
+                            "density": mean_density,
+                            "is_sampled": False,
+                            "domain": current_dom,
+                            "coords": gap_coords,
+                        })
+
+            # Check domain transition
+            if domain_col is not None and current_dom is not None and dom_i != current_dom:
+                if current_run:
+                    runs.append(current_run)
+                    current_run = []
+                    current_dom = None
+
+            # Handle current interval
+            if missing_i:
+                total_gaps_count += 1
+                total_gaps_length += (t_i - f_i)
+                if unassayed_treatment == "error":
+                    raise ValueError(
+                        f"Missing or unassayed grade detected in hole '{hole_id}' "
+                        f"between {f_i}m and {t_i}m."
+                    )
+                if unassayed_treatment == "split":
+                    if current_run:
+                        runs.append(current_run)
+                        current_run = []
+                        current_dom = None
+                    continue
+
+                # For "zero" or "ignore", keep interval marked as unsampled
+                seg = {
+                    "from": f_i,
+                    "to": t_i,
+                    "length": t_i - f_i,
+                    "grade": unassayed_grade,
+                    "density": dens_i,
+                    "is_sampled": False,
+                    "domain": dom_i,
+                    "coords": c_dict,
+                }
+            else:
+                seg = {
+                    "from": f_i,
+                    "to": t_i,
+                    "length": t_i - f_i,
+                    "grade": float(val_i),
+                    "density": dens_i,
+                    "is_sampled": True,
+                    "domain": dom_i,
+                    "coords": c_dict,
+                }
+
+            current_run.append(seg)
+            current_dom = dom_i
+
+        if current_run:
+            runs.append(current_run)
+
+        # 3. Composite each contiguous run independently
+        for run in runs:
+            if not run:
+                continue
+            total_runs_count += 1
+
+            run_start = run[0]["from"]
+            run_end = run[-1]["to"]
+            run_len = run_end - run_start
+            run_dom = run[0]["domain"]
+
+            if run_len <= 1e-9:
+                continue
+
+            # Establish composite interval boundaries
+            comp_intervals = []
+            if remnant_strategy == "distribute":
+                n_comp = max(1, int(round(run_len / composite_length)))
+                actual_len = run_len / n_comp
+                if run_len < (min_length_ratio * composite_length):
+                    discarded_remnants_count += 1
+                    continue
+                for ci in range(n_comp):
+                    comp_intervals.append((
+                        run_start + ci * actual_len,
+                        run_start + (ci + 1) * actual_len,
+                    ))
+            else:  # "discard"
+                curr = run_start
+                while curr + composite_length <= run_end + 1e-9:
+                    comp_intervals.append((curr, curr + composite_length))
+                    curr += composite_length
+                remnant_len = run_end - curr
+                if remnant_len >= (min_length_ratio * composite_length) - 1e-9:
+                    comp_intervals.append((curr, run_end))
+                elif remnant_len > 1e-9:
+                    discarded_remnants_count += 1
+
+            # Extract numpy arrays for the run's segments
+            seg_from = np.array([s["from"] for s in run], dtype=float)
+            seg_to = np.array([s["to"] for s in run], dtype=float)
+            seg_grade = np.array([s["grade"] for s in run], dtype=float)
+            seg_dens = np.array([s["density"] for s in run], dtype=float)
+            seg_sampled = np.array([s["is_sampled"] for s in run], dtype=bool)
+
+            for c_from, c_to in comp_intervals:
+                c_len = c_to - c_from
+                if c_len <= 1e-9:
+                    continue
+
+                # Overlap calculation
+                overlap_starts = np.maximum(c_from, seg_from)
+                overlap_ends = np.minimum(c_to, seg_to)
+                overlaps = np.maximum(0.0, overlap_ends - overlap_starts)
+
+                valid_mask = overlaps > 1e-9
+                if not np.any(valid_mask):
+                    continue
+
+                active_lens = overlaps[valid_mask]
+                active_grades = seg_grade[valid_mask]
+                active_dens = seg_dens[valid_mask]
+                active_sampled = seg_sampled[valid_mask]
+
+                sampled_len = float(active_lens[active_sampled].sum())
+                coverage_ratio = float(sampled_len / c_len) if c_len > 0 else 0.0
+
+                # Check coverage threshold
+                if coverage_ratio < min_coverage_ratio - 1e-9:
+                    discarded_low_cov_count += 1
+                    continue
+
+                # Compute weighted grade based on unassayed_treatment
+                if unassayed_treatment == "ignore":
+                    if not np.any(active_sampled):
+                        continue
+                    sample_weights = active_lens[active_sampled] * active_dens[active_sampled]
+                    tot_w = float(sample_weights.sum())
+                    if tot_w <= 0:
+                        continue
+                    weighted_grade = float(
+                        (sample_weights * active_grades[active_sampled]).sum() / tot_w
+                    )
+                else:
+                    weights = active_lens * active_dens
+                    tot_w = float(weights.sum())
+                    if tot_w <= 0:
+                        continue
+                    weighted_grade = float(
+                        (weights * active_grades).sum() / tot_w
+                    )
+
+                rec: dict = {
+                    hole_id_col: hole_id,
+                    from_col: c_from,
+                    to_col: c_to,
+                    "length": c_len,
+                    grade_col: weighted_grade,
+                    "sampled_length": sampled_len,
+                    "coverage_ratio": coverage_ratio,
+                }
+                if domain_col is not None:
+                    rec[domain_col] = run_dom
+
+                # Interpolate spatial coordinates to composite midpoint
+                c_mid = (c_from + c_to) / 2.0
+                for c_name in coord_cols:
+                    raw_c = np.array([s["coords"].get(c_name, np.nan) for s in run], dtype=float)
+                    active_c = raw_c[valid_mask]
+                    c_valid = np.isfinite(active_c)
+                    if np.any(c_valid):
+                        c_weights = active_lens[c_valid]
+                        comp_coord = float((c_weights * active_c[c_valid]).sum() / c_weights.sum())
+                    else:
+                        comp_coord = np.nan
+                    rec[c_name] = comp_coord
+
+                composite_records.append(rec)
 
     out_df = pd.DataFrame(composite_records)
     out_df.attrs["composite_length"] = composite_length
     out_df.attrs["remnant_strategy"] = remnant_strategy
-    out_df.attrs["discarded_remnants_count"] = discarded_count
+    out_df.attrs["unassayed_treatment"] = unassayed_treatment
+    out_df.attrs["unassayed_grade"] = unassayed_grade
+    out_df.attrs["discarded_remnants_count"] = discarded_remnants_count
+    out_df.attrs["discarded_low_coverage_count"] = discarded_low_cov_count
+    out_df.attrs["unassayed_gaps_count"] = total_gaps_count
+    out_df.attrs["unassayed_gaps_total_length"] = total_gaps_length
+    out_df.attrs["contiguous_runs_count"] = total_runs_count
     return out_df
 
 
@@ -4475,7 +6004,7 @@ def exploratory_data_analysis(
 ) -> pd.DataFrame:
     """Computes comprehensive summary statistics for mineral resource evaluation.
 
-    Complies with NI 43-101 and JORC reporting standards for exploratory data
+    Complies with NI 43-101 and JORC reporting standards (TODO: Manually Verify) for exploratory data
     analysis (EDA). Evaluates distributional symmetry, mean vs. median divergence,
     the Coefficient of Variation (CV = sigma / mu), and preferential drilling
     clustering bias if weights are provided.
@@ -5156,7 +6685,7 @@ def plot_contact_profile(
 ) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
     """Generates the industry-standard Contact Profile Plot (Grade vs. Distance from Contact).
 
-    Mandatory deliverable for NI 43-101 / JORC Section 14 to document whether
+    Mandatory deliverable for NI 43-101 / JORC Section 14 (TODO: Manually Verify) to document whether
     geological contacts are treated as Hard, Soft, or Semi-Soft boundaries.
 
     Parameters
@@ -5346,6 +6875,7 @@ def reconcile_production_to_reserve(
     reserve_data: Union[pd.DataFrame, Dict[str, float]],
     plant_data: Union[pd.DataFrame, Dict[str, float]],
     grade_control_data: Optional[Union[pd.DataFrame, Dict[str, float]]] = None,
+    stockpile_data: Optional[Union[pd.DataFrame, Dict[str, float]]] = None,
     tonnes_col: str = "tonnes",
     grade_col: str = "grade",
     period_col: Optional[str] = None,
@@ -5353,7 +6883,7 @@ def reconcile_production_to_reserve(
 ) -> pd.DataFrame:
     """Reconciles mine production against the long-term mineral reserve model.
 
-    Implements the Harry Parker (2012) F1, F2, F3 reconciliation framework:
+    Implements the Harry Parker (2012) F1, F2, F3 reconciliation framework (TODO: Manually Verify):
     - F1 Factor (Model to Mine / Ore Selection):
       F1 = Metal(Grade Control) / Metal(Reserve)
       Measures reserve model accuracy and local estimation bias.
@@ -5364,10 +6894,16 @@ def reconcile_production_to_reserve(
       F3 = F1 * F2 = Metal(Plant Received) / Metal(Reserve)
       Measures total value chain health and cash-flow delivery.
 
-    Also calculates component ratios for every stage:
-    - Tonnage Ratio (R_T): T_actual / T_pred (high R_T flags excess dilution)
-    - Grade Ratio (R_G): g_actual / g_pred (low R_G confirms dilution)
-    - Metal Ratio (R_M): M_actual / M_pred = R_T * R_G
+    Stockpile Accounting (Harry Parker 2012 §4 & SME Mining Engineering Handbook §13) (TODO: Manually Verify):
+    In operating mines, ore mined does not necessarily equal ore processed in the same period
+    due to ROM stockpiling, low-grade blending pads, and stockpile drawdowns.
+    Without explicit stockpile accounting, stockpiling produces false-alarm drops in F2 (apparent ore loss),
+    while reclaim produces false-alarm surges in F2 (phantom metal creation).
+    When `stockpile_data` is provided, conservation of mass is applied:
+      Delta Stockpile = Closing Inventory - Opening Inventory = Additions - Reclaims
+      Adjusted Plant Delivery = Plant Received + Delta Stockpile
+      F2_adj = Metal(Adjusted Plant) / Metal(Grade Control)
+      F3_adj = Metal(Adjusted Plant) / Metal(Reserve)
 
     Parameters
     ----------
@@ -5377,6 +6913,12 @@ def reconcile_production_to_reserve(
         Actual received plant/mill feed (weightometer tonnes, assayed head grade).
     grade_control_data : pd.DataFrame or dict, optional
         Short-term grade control / blasthole model (delineated/trucked ore).
+    stockpile_data : pd.DataFrame or dict, optional
+        Intermediate stockpile inventory or movement data. If None, assumes direct
+        mine-to-mill delivery (no stockpiling). Accepts any of 3 standard industry formats:
+        1. Opening/closing balances: 'opening_tonnes', 'opening_grade', 'closing_tonnes', 'closing_grade'
+        2. Movement flows: 'added_tonnes', 'added_grade', 'reclaimed_tonnes', 'reclaimed_grade'
+        3. Direct net deltas: 'delta_tonnes', and ('delta_grade' or 'delta_metal')
     tonnes_col : str, default "tonnes"
         Tonnage column name.
     grade_col : str, default "grade"
@@ -5391,7 +6933,8 @@ def reconcile_production_to_reserve(
     -------
     pd.DataFrame
         Reconciliation summary table per period (plus Total row) with F1, F2, F3
-        factors and component ratios. Attributes (.attrs) contain cumulative metrics
+        factors and component ratios. If stockpile_data is provided, includes both
+        unadjusted and stockpile-adjusted factors. Attributes (.attrs) contain cumulative metrics
         and the value chain health diagnosis.
     """
 
@@ -5400,10 +6943,60 @@ def reconcile_production_to_reserve(
             return pd.DataFrame([data])
         return data.copy()
 
+    def _extract_stockpile_delta(sp_row: pd.Series, g_scale: float) -> Tuple[float, float]:
+        """Extracts (delta_tonnes, delta_metal) from a stockpile record."""
+        # Format 1: Opening & closing inventory balances
+        open_t = next((c for c in sp_row.index if c in ("opening_tonnes", "open_tonnes", "opening_t", "open_t")), None)
+        close_t = next((c for c in sp_row.index if c in ("closing_tonnes", "close_tonnes", "closing_t", "close_t")), None)
+        if open_t is not None and close_t is not None:
+            open_g = next((c for c in sp_row.index if c in ("opening_grade", "open_grade", "opening_g", "open_g")), None)
+            close_g = next((c for c in sp_row.index if c in ("closing_grade", "close_grade", "closing_g", "close_g")), None)
+            if open_g is None or close_g is None:
+                raise ValueError("Stockpile opening/closing balances require both tonnes and grade columns.")
+            t_o, g_o = float(sp_row[open_t]), float(sp_row[open_g])
+            t_c, g_c = float(sp_row[close_t]), float(sp_row[close_g])
+            d_t = t_c - t_o
+            d_m = (t_c * g_c - t_o * g_o) / g_scale
+            return d_t, d_m
+
+        # Format 2: Movement receipts and reclaims
+        add_t = next((c for c in sp_row.index if c in ("added_tonnes", "deposit_tonnes", "inflow_tonnes", "feed_tonnes", "add_tonnes")), None)
+        rec_t = next((c for c in sp_row.index if c in ("reclaimed_tonnes", "reclaim_tonnes", "drawdown_tonnes", "outflow_tonnes")), None)
+        if add_t is not None and rec_t is not None:
+            add_g = next((c for c in sp_row.index if c in ("added_grade", "deposit_grade", "inflow_grade", "feed_grade", "add_grade")), None)
+            rec_g = next((c for c in sp_row.index if c in ("reclaimed_grade", "reclaim_grade", "drawdown_grade", "outflow_grade")), None)
+            if add_g is None or rec_g is None:
+                raise ValueError("Stockpile movement flows require both added/reclaimed tonnes and grade columns.")
+            t_a, g_a = float(sp_row[add_t]), float(sp_row[add_g])
+            t_r, g_r = float(sp_row[rec_t]), float(sp_row[rec_g])
+            d_t = t_a - t_r
+            d_m = (t_a * g_a - t_r * g_r) / g_scale
+            return d_t, d_m
+
+        # Format 3: Direct deltas
+        d_t_col = next((c for c in sp_row.index if c in ("delta_tonnes", "delta_t", "stockpile_delta_tonnes", "tonnes")), None)
+        if d_t_col is not None:
+            d_m_col = next((c for c in sp_row.index if c in ("delta_metal", "delta_m", "stockpile_delta_metal", "metal")), None)
+            if d_m_col is not None:
+                return float(sp_row[d_t_col]), float(sp_row[d_m_col])
+            d_g_col = next((c for c in sp_row.index if c in ("delta_grade", "delta_g", "stockpile_delta_grade", "grade")), None)
+            if d_g_col is not None:
+                d_t = float(sp_row[d_t_col])
+                d_g = float(sp_row[d_g_col])
+                return d_t, d_t * (d_g / g_scale)
+
+        raise ValueError(
+            "stockpile_data must contain either opening/closing balances ('opening_tonnes', 'opening_grade', 'closing_tonnes', 'closing_grade'), "
+            "movement flows ('added_tonnes', 'added_grade', 'reclaimed_tonnes', 'reclaimed_grade'), "
+            "or net deltas ('delta_tonnes', 'delta_grade' / 'delta_metal')."
+        )
+
     df_res = _to_df(reserve_data)
     df_plant = _to_df(plant_data)
     has_gc = grade_control_data is not None
     df_gc = _to_df(grade_control_data) if has_gc else None
+    has_stockpile = stockpile_data is not None
+    df_sp = _to_df(stockpile_data) if has_stockpile else None
 
     # Handle period identifier
     if period_col is None or period_col not in df_res.columns:
@@ -5414,6 +7007,8 @@ def reconcile_production_to_reserve(
         df_plant[p_col] = df_res[p_col].values
         if has_gc:
             df_gc[p_col] = df_res[p_col].values
+        if has_stockpile:
+            df_sp[p_col] = df_res[p_col].values
     else:
         p_col = period_col
 
@@ -5425,6 +7020,11 @@ def reconcile_production_to_reserve(
         for col in (tonnes_col, grade_col):
             if col not in df_gc.columns:
                 raise ValueError(f"Column '{col}' not found in grade_control data.")
+    if has_stockpile and p_col not in df_sp.columns:
+        if len(df_sp) == len(df_res):
+            df_sp[p_col] = df_res[p_col].values
+        else:
+            raise ValueError(f"Period column '{p_col}' not found in stockpile_data and length does not match reserve data.")
 
     grade_scale = 100.0 if "%" in grade_unit else 1.0
 
@@ -5469,15 +7069,43 @@ def reconcile_production_to_reserve(
             rec["f1_grade_ratio"] = g_gc / g_res if g_res > 0 else 1.0
             rec["f1_metal_factor"] = m_gc / m_res if m_res > 0 else 1.0
 
-            # F2: Grade Control to Plant
+            # F2: Grade Control to Plant (Direct)
             rec["f2_tonnes_ratio"] = t_plant / t_gc if t_gc > 0 else 1.0
             rec["f2_grade_ratio"] = g_plant / g_gc if g_gc > 0 else 1.0
             rec["f2_metal_factor"] = m_plant / m_gc if m_gc > 0 else 1.0
 
-        # F3: Reserve to Plant (Total)
+        # F3: Reserve to Plant (Direct)
         rec["f3_tonnes_ratio"] = t_plant / t_res if t_res > 0 else 1.0
         rec["f3_grade_ratio"] = g_plant / g_res if g_res > 0 else 1.0
         rec["f3_metal_factor"] = m_plant / m_res if m_res > 0 else 1.0
+
+        # Stockpile-adjusted reconciliation
+        if has_stockpile:
+            sp_match = df_sp[df_sp[p_col] == p]
+            if sp_match.empty:
+                raise ValueError(f"Period '{p}' not found in stockpile_data.")
+            d_t, d_m = _extract_stockpile_delta(sp_match.iloc[0], grade_scale)
+            d_g = (d_m / d_t) * grade_scale if d_t != 0 else 0.0
+
+            t_plant_adj = t_plant + d_t
+            m_plant_adj = m_plant + d_m
+            g_plant_adj = (m_plant_adj / t_plant_adj) * grade_scale if t_plant_adj > 0 else 0.0
+
+            rec["stockpile_delta_tonnes"] = d_t
+            rec["stockpile_delta_grade"] = d_g
+            rec["stockpile_delta_metal"] = d_m
+            rec["plant_adj_tonnes"] = t_plant_adj
+            rec["plant_adj_grade"] = g_plant_adj
+            rec["plant_adj_metal"] = m_plant_adj
+
+            if has_gc:
+                rec["f2_adj_tonnes_ratio"] = t_plant_adj / t_gc if t_gc > 0 else 1.0
+                rec["f2_adj_grade_ratio"] = g_plant_adj / g_gc if g_gc > 0 else 1.0
+                rec["f2_adj_metal_factor"] = m_plant_adj / m_gc if m_gc > 0 else 1.0
+
+            rec["f3_adj_tonnes_ratio"] = t_plant_adj / t_res if t_res > 0 else 1.0
+            rec["f3_adj_grade_ratio"] = g_plant_adj / g_res if g_res > 0 else 1.0
+            rec["f3_adj_metal_factor"] = m_plant_adj / m_res if m_res > 0 else 1.0
 
         records.append(rec)
 
@@ -5526,6 +7154,30 @@ def reconcile_production_to_reserve(
         tot_rec["f3_grade_ratio"] = tot_g_plant / tot_g_res if tot_g_res > 0 else 1.0
         tot_rec["f3_metal_factor"] = tot_m_plant / tot_m_res if tot_m_res > 0 else 1.0
 
+        if has_stockpile:
+            tot_d_t = float(res_df["stockpile_delta_tonnes"].sum())
+            tot_d_m = float(res_df["stockpile_delta_metal"].sum())
+            tot_d_g = (tot_d_m / tot_d_t) * grade_scale if tot_d_t != 0 else 0.0
+            tot_t_plant_adj = tot_t_plant + tot_d_t
+            tot_m_plant_adj = tot_m_plant + tot_d_m
+            tot_g_plant_adj = (tot_m_plant_adj / tot_t_plant_adj) * grade_scale if tot_t_plant_adj > 0 else 0.0
+
+            tot_rec["stockpile_delta_tonnes"] = tot_d_t
+            tot_rec["stockpile_delta_grade"] = tot_d_g
+            tot_rec["stockpile_delta_metal"] = tot_d_m
+            tot_rec["plant_adj_tonnes"] = tot_t_plant_adj
+            tot_rec["plant_adj_grade"] = tot_g_plant_adj
+            tot_rec["plant_adj_metal"] = tot_m_plant_adj
+
+            if has_gc:
+                tot_rec["f2_adj_tonnes_ratio"] = tot_t_plant_adj / tot_t_gc if tot_t_gc > 0 else 1.0
+                tot_rec["f2_adj_grade_ratio"] = tot_g_plant_adj / tot_g_gc if tot_g_gc > 0 else 1.0
+                tot_rec["f2_adj_metal_factor"] = tot_m_plant_adj / tot_m_gc if tot_m_gc > 0 else 1.0
+
+            tot_rec["f3_adj_tonnes_ratio"] = tot_t_plant_adj / tot_t_res if tot_t_res > 0 else 1.0
+            tot_rec["f3_adj_grade_ratio"] = tot_g_plant_adj / tot_g_res if tot_g_res > 0 else 1.0
+            tot_rec["f3_adj_metal_factor"] = tot_m_plant_adj / tot_m_res if tot_m_res > 0 else 1.0
+
         res_df = pd.concat([res_df, pd.DataFrame([tot_rec])], ignore_index=True)
 
     # Attach summary attributes
@@ -5534,19 +7186,39 @@ def reconcile_production_to_reserve(
     f1_tot = float(final_row["f1_metal_factor"]) if has_gc else None
     f2_tot = float(final_row["f2_metal_factor"]) if has_gc else None
 
-    if 0.95 <= f3_tot <= 1.05:
-        health_status = "EXCELLENT: Production is within +/-5% of reserve model (Bankable benchmark)."
-    elif 0.90 <= f3_tot <= 1.10:
-        health_status = "GOOD: Production is within +/-10% of reserve model."
-    elif f3_tot < 0.90:
-        health_status = "WARNING: Metal under-performance (>10% deficit vs. reserve model). Check dilution or over-smoothing."
-    else:
-        health_status = "WARNING: Metal over-performance (>10% surplus vs. reserve model). Check conservative bias or unmodeled ore."
+    if has_stockpile:
+        res_df.attrs["stockpile_mode"] = "Inventory adjusted"
+        f3_adj_tot = float(final_row["f3_adj_metal_factor"])
+        res_df.attrs["f3_factor"] = f3_adj_tot
+        res_df.attrs["f3_adjusted_factor"] = f3_adj_tot
+        res_df.attrs["f3_unadjusted_factor"] = f3_tot
+        if has_gc:
+            f2_adj_tot = float(final_row["f2_adj_metal_factor"])
+            res_df.attrs["f2_factor"] = f2_adj_tot
+            res_df.attrs["f2_adjusted_factor"] = f2_adj_tot
+            res_df.attrs["f2_unadjusted_factor"] = f2_tot
+            res_df.attrs["f1_factor"] = f1_tot
 
-    res_df.attrs["f3_factor"] = f3_tot
-    if has_gc:
-        res_df.attrs["f1_factor"] = f1_tot
-        res_df.attrs["f2_factor"] = f2_tot
+        eval_f3 = f3_adj_tot
+        suffix = " (stockpile-adjusted)"
+    else:
+        res_df.attrs["stockpile_mode"] = "Direct feed (no intermediate stockpiling)"
+        res_df.attrs["f3_factor"] = f3_tot
+        if has_gc:
+            res_df.attrs["f1_factor"] = f1_tot
+            res_df.attrs["f2_factor"] = f2_tot
+        eval_f3 = f3_tot
+        suffix = ""
+
+    if 0.95 <= eval_f3 <= 1.05:
+        health_status = f"EXCELLENT: Production is within +/-5% of reserve model (Bankable benchmark{suffix})."
+    elif 0.90 <= eval_f3 <= 1.10:
+        health_status = f"GOOD: Production is within +/-10% of reserve model{suffix}."
+    elif eval_f3 < 0.90:
+        health_status = f"WARNING: Metal under-performance (>10% deficit vs. reserve model{suffix}). Check dilution or over-smoothing."
+    else:
+        health_status = f"WARNING: Metal over-performance (>10% surplus vs. reserve model{suffix}). Check conservative bias or unmodeled ore."
+
     res_df.attrs["health_status"] = health_status
     res_df.attrs["grade_unit"] = grade_unit
     return res_df
@@ -5563,7 +7235,7 @@ def plot_production_reconciliation(
     """Generates the industry-standard 4-panel Production Reconciliation Dashboard.
 
     Visualizes:
-    1. Ore Tonnage Comparison (Reserve vs. Grade Control vs. Plant Feed)
+    1. Ore Tonnage Comparison (Reserve vs. Grade Control vs. Plant Direct vs. Stockpile Adjusted)
     2. Head Grade Comparison
     3. Contained Metal Comparison
     4. Harry Parker F1, F2, F3 Factors tracking over time against the [0.95, 1.05] benchmark band.
@@ -5596,69 +7268,51 @@ def plot_production_reconciliation(
         plot_df = reconciliation_df.copy()
 
     has_gc = "gc_tonnes" in plot_df.columns
+    has_sp = "plant_adj_tonnes" in plot_df.columns
     periods = plot_df["period"].astype(str).tolist()
     n_p = len(periods)
     x = np.arange(n_p)
 
-    width = 0.26 if has_gc else 0.38
+    # Calculate bar width based on number of series
+    num_series = 1 + (1 if has_gc else 0) + 1 + (1 if has_sp else 0)
+    width = 0.80 / num_series
 
     fig, axes = plt.subplots(2, 2, figsize=figsize)
     ax_t, ax_g = axes[0, 0], axes[0, 1]
     ax_m, ax_f = axes[1, 0], axes[1, 1]
 
-    col_res = "#1f77b4"  # Blue (Reserve Model)
-    col_gc = "#ff7f0e"  # Orange (Grade Control)
-    col_plant = "#2ca02c"  # Green (Plant Feed)
+    col_res = "#1f77b4"      # Blue (Reserve Model)
+    col_gc = "#ff7f0e"       # Orange (Grade Control)
+    col_plant = "#2ca02c"    # Green (Plant Direct Feed)
+    col_plant_adj = "#9467bd"# Purple (Plant + Stockpile Delta)
+
+    # Offsets helper
+    offsets = np.linspace(-width * (num_series - 1) / 2, width * (num_series - 1) / 2, num_series)
 
     # -------------------------------------------------------------------------
     # Panel 1: Ore Tonnage
     # -------------------------------------------------------------------------
+    s_idx = 0
+    ax_t.bar(
+        x + offsets[s_idx], plot_df["reserve_tonnes"], width,
+        label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85
+    )
+    s_idx += 1
     if has_gc:
         ax_t.bar(
-            x - width,
-            plot_df["reserve_tonnes"],
-            width,
-            label="Reserve Model",
-            color=col_res,
-            edgecolor="black",
-            alpha=0.85,
+            x + offsets[s_idx], plot_df["gc_tonnes"], width,
+            label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85
         )
+        s_idx += 1
+    ax_t.bar(
+        x + offsets[s_idx], plot_df["plant_tonnes"], width,
+        label="Plant (Direct)", color=col_plant, edgecolor="black", alpha=0.85
+    )
+    s_idx += 1
+    if has_sp:
         ax_t.bar(
-            x,
-            plot_df["gc_tonnes"],
-            width,
-            label="Grade Control",
-            color=col_gc,
-            edgecolor="black",
-            alpha=0.85,
-        )
-        ax_t.bar(
-            x + width,
-            plot_df["plant_tonnes"],
-            width,
-            label="Plant Feed",
-            color=col_plant,
-            edgecolor="black",
-            alpha=0.85,
-        )
-    else:
-        ax_t.bar(
-            x - width / 2,
-            plot_df["reserve_tonnes"],
-            width,
-            label="Reserve Model",
-            color=col_res,
-            edgecolor="black",
-            alpha=0.85,
-        )
-        ax_t.bar(
-            x + width / 2,
-            plot_df["plant_tonnes"],
-            width,
-            label="Plant Feed",
-            color=col_plant,
-            edgecolor="black",
-            alpha=0.85,
+            x + offsets[s_idx], plot_df["plant_adj_tonnes"], width,
+            label="Plant (Stockpile-Adj)", color=col_plant_adj, edgecolor="black", alpha=0.85
         )
 
     ax_t.set_ylabel(f"Ore Tonnage ({tonnage_unit})", fontsize=10, fontweight="bold")
@@ -5666,57 +7320,32 @@ def plot_production_reconciliation(
     ax_t.set_xticks(x)
     ax_t.set_xticklabels(periods, fontsize=9)
     ax_t.grid(True, linestyle=":", alpha=0.5)
-    ax_t.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+    ax_t.legend(loc="upper right", fontsize=8.0, framealpha=0.9)
 
     # -------------------------------------------------------------------------
     # Panel 2: Head Grade
     # -------------------------------------------------------------------------
+    s_idx = 0
+    ax_g.bar(
+        x + offsets[s_idx], plot_df["reserve_grade"], width,
+        label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85
+    )
+    s_idx += 1
     if has_gc:
         ax_g.bar(
-            x - width,
-            plot_df["reserve_grade"],
-            width,
-            label="Reserve Model",
-            color=col_res,
-            edgecolor="black",
-            alpha=0.85,
+            x + offsets[s_idx], plot_df["gc_grade"], width,
+            label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85
         )
+        s_idx += 1
+    ax_g.bar(
+        x + offsets[s_idx], plot_df["plant_grade"], width,
+        label="Plant (Direct)", color=col_plant, edgecolor="black", alpha=0.85
+    )
+    s_idx += 1
+    if has_sp:
         ax_g.bar(
-            x,
-            plot_df["gc_grade"],
-            width,
-            label="Grade Control",
-            color=col_gc,
-            edgecolor="black",
-            alpha=0.85,
-        )
-        ax_g.bar(
-            x + width,
-            plot_df["plant_grade"],
-            width,
-            label="Plant Feed",
-            color=col_plant,
-            edgecolor="black",
-            alpha=0.85,
-        )
-    else:
-        ax_g.bar(
-            x - width / 2,
-            plot_df["reserve_grade"],
-            width,
-            label="Reserve Model",
-            color=col_res,
-            edgecolor="black",
-            alpha=0.85,
-        )
-        ax_g.bar(
-            x + width / 2,
-            plot_df["plant_grade"],
-            width,
-            label="Plant Feed",
-            color=col_plant,
-            edgecolor="black",
-            alpha=0.85,
+            x + offsets[s_idx], plot_df["plant_adj_grade"], width,
+            label="Plant (Stockpile-Adj)", color=col_plant_adj, edgecolor="black", alpha=0.85
         )
 
     ax_g.set_ylabel(f"Head Grade ({grade_unit})", fontsize=10, fontweight="bold")
@@ -5724,57 +7353,32 @@ def plot_production_reconciliation(
     ax_g.set_xticks(x)
     ax_g.set_xticklabels(periods, fontsize=9)
     ax_g.grid(True, linestyle=":", alpha=0.5)
-    ax_g.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+    ax_g.legend(loc="upper right", fontsize=8.0, framealpha=0.9)
 
     # -------------------------------------------------------------------------
     # Panel 3: Contained Metal
     # -------------------------------------------------------------------------
+    s_idx = 0
+    ax_m.bar(
+        x + offsets[s_idx], plot_df["reserve_metal"], width,
+        label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85
+    )
+    s_idx += 1
     if has_gc:
         ax_m.bar(
-            x - width,
-            plot_df["reserve_metal"],
-            width,
-            label="Reserve Model",
-            color=col_res,
-            edgecolor="black",
-            alpha=0.85,
+            x + offsets[s_idx], plot_df["gc_metal"], width,
+            label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85
         )
+        s_idx += 1
+    ax_m.bar(
+        x + offsets[s_idx], plot_df["plant_metal"], width,
+        label="Plant (Direct)", color=col_plant, edgecolor="black", alpha=0.85
+    )
+    s_idx += 1
+    if has_sp:
         ax_m.bar(
-            x,
-            plot_df["gc_metal"],
-            width,
-            label="Grade Control",
-            color=col_gc,
-            edgecolor="black",
-            alpha=0.85,
-        )
-        ax_m.bar(
-            x + width,
-            plot_df["plant_metal"],
-            width,
-            label="Plant Feed",
-            color=col_plant,
-            edgecolor="black",
-            alpha=0.85,
-        )
-    else:
-        ax_m.bar(
-            x - width / 2,
-            plot_df["reserve_metal"],
-            width,
-            label="Reserve Model",
-            color=col_res,
-            edgecolor="black",
-            alpha=0.85,
-        )
-        ax_m.bar(
-            x + width / 2,
-            plot_df["plant_metal"],
-            width,
-            label="Plant Feed",
-            color=col_plant,
-            edgecolor="black",
-            alpha=0.85,
+            x + offsets[s_idx], plot_df["plant_adj_metal"], width,
+            label="Plant (Stockpile-Adj)", color=col_plant_adj, edgecolor="black", alpha=0.85
         )
 
     ax_m.set_ylabel(f"Contained Metal ({metal_unit})", fontsize=10, fontweight="bold")
@@ -5782,77 +7386,73 @@ def plot_production_reconciliation(
     ax_m.set_xticks(x)
     ax_m.set_xticklabels(periods, fontsize=9)
     ax_m.grid(True, linestyle=":", alpha=0.5)
-    ax_m.legend(loc="upper right", fontsize=8.5, framealpha=0.9)
+    ax_m.legend(loc="upper right", fontsize=8.0, framealpha=0.9)
 
     # -------------------------------------------------------------------------
     # Panel 4: Harry Parker F1, F2, F3 Factors Tracking
     # -------------------------------------------------------------------------
-    # Benchmark target band: [0.95, 1.05] shaded green
     ax_f.axhspan(0.95, 1.05, color="#2ca02c", alpha=0.15, label="Target Band (±5%)")
     ax_f.axhline(1.00, color="black", linestyle="--", linewidth=1.2, alpha=0.7)
 
     if n_p > 1:
         if has_gc:
             ax_f.plot(
-                x,
-                plot_df["f1_metal_factor"],
-                "-o",
-                color=col_res,
-                linewidth=2.0,
-                markersize=6,
-                label="F1 (Model → Mine)",
+                x, plot_df["f1_metal_factor"], "-o",
+                color=col_res, linewidth=2.0, markersize=6, label="F1 (Model → Mine)"
             )
             ax_f.plot(
-                x,
-                plot_df["f2_metal_factor"],
-                "-s",
-                color=col_gc,
-                linewidth=2.0,
-                markersize=6,
-                label="F2 (Mine → Mill)",
+                x, plot_df["f2_metal_factor"], "--s" if has_sp else "-s",
+                color=col_gc, linewidth=1.8 if has_sp else 2.0, markersize=5 if has_sp else 6,
+                label="F2 (Direct Mine → Mill)" if has_sp else "F2 (Mine → Mill)"
             )
+            if has_sp:
+                ax_f.plot(
+                    x, plot_df["f2_adj_metal_factor"], "-s",
+                    color="#d62728", linewidth=2.2, markersize=6, label="F2 (Stockpile-Adj)"
+                )
         ax_f.plot(
-            x,
-            plot_df["f3_metal_factor"],
-            "-^",
-            color=col_plant,
-            linewidth=2.5,
-            markersize=7,
-            label="F3 (Total Value Chain)",
+            x, plot_df["f3_metal_factor"], "--^" if has_sp else "-^",
+            color=col_plant, linewidth=1.8 if has_sp else 2.5, markersize=6 if has_sp else 7,
+            label="F3 (Direct Total)" if has_sp else "F3 (Total Value Chain)"
         )
+        if has_sp:
+            ax_f.plot(
+                x, plot_df["f3_adj_metal_factor"], "-^",
+                color=col_plant_adj, linewidth=2.5, markersize=7, label="F3 (Stockpile-Adj Total)"
+            )
         ax_f.set_xticks(x)
         ax_f.set_xticklabels(periods, fontsize=9)
     else:
         # Single period bar representation
-        cats = (
-            ["F1 (Model→Mine)", "F2 (Mine→Mill)", "F3 (Total)"]
-            if has_gc
-            else ["F3 (Total)"]
-        )
-        vals = (
-            [
-                float(plot_df["f1_metal_factor"].iloc[0]),
-                float(plot_df["f2_metal_factor"].iloc[0]),
-                float(plot_df["f3_metal_factor"].iloc[0]),
-            ]
-            if has_gc
-            else [float(plot_df["f3_metal_factor"].iloc[0])]
-        )
-        bar_c = [col_res, col_gc, col_plant] if has_gc else [col_plant]
+        cats = ["F1 (Model→Mine)"] if has_gc else []
+        vals = [float(plot_df["f1_metal_factor"].iloc[0])] if has_gc else []
+        bar_c = [col_res] if has_gc else []
+
+        if has_gc:
+            cats.append("F2 (Direct)")
+            vals.append(float(plot_df["f2_metal_factor"].iloc[0]))
+            bar_c.append(col_gc)
+            if has_sp:
+                cats.append("F2 (Adj)")
+                vals.append(float(plot_df["f2_adj_metal_factor"].iloc[0]))
+                bar_c.append("#d62728")
+
+        cats.append("F3 (Direct)")
+        vals.append(float(plot_df["f3_metal_factor"].iloc[0]))
+        bar_c.append(col_plant)
+        if has_sp:
+            cats.append("F3 (Adj)")
+            vals.append(float(plot_df["f3_adj_metal_factor"].iloc[0]))
+            bar_c.append(col_plant_adj)
+
         ax_f.bar(
-            range(len(cats)),
-            vals,
-            width=0.45,
-            color=bar_c,
-            edgecolor="black",
-            alpha=0.85,
+            range(len(cats)), vals, width=0.45,
+            color=bar_c, edgecolor="black", alpha=0.85
         )
         ax_f.set_xticks(range(len(cats)))
-        ax_f.set_xticklabels(cats, fontsize=9, fontweight="bold")
+        ax_f.set_xticklabels(cats, fontsize=8.5, fontweight="bold")
         for idx, v in enumerate(vals):
-            ax_f.text(
-                idx, v + 0.02, f"{v:.3f}", ha="center", fontsize=9, fontweight="bold"
-            )
+            ax_f.text(idx, v + 0.02, f"{v:.3f}", ha="center", fontsize=8.5, fontweight="bold")
 
     ax_f.set_ylabel("Reconciliation Factor (Ratio)", fontsize=10, fontweight="bold")
     ax_f.set_title(
@@ -5915,7 +7515,7 @@ def sequential_gaussian_simulation(
 ) -> np.ndarray:
     """Generates equiprobable conditional realizations via Sequential Gaussian Simulation (SGS).
 
-    Sequential Gaussian Simulation (Isaaks 1990; Deutsch & Journel 1998; SME Handbook)
+    Sequential Gaussian Simulation (Isaaks 1990; Deutsch & Journel 1998; SME Handbook) (TODO: Manually Verify)
     models spatial uncertainty by generating multiple stochastic realizations that honor:
     1. Conditioning sample values at drillhole locations.
     2. The experimental univariate histogram (via normal-score transformation).
@@ -6115,14 +7715,13 @@ def plot_simulation_realizations_dashboard(
 # =============================================================================
 # TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
 # Maintain clean separation of concerns by adding dedicated functions to this suite:
-# - `plot_resource_classification_3d_isometric`: Static 3D isometric projection of CIM/JORC resource categories.
+# - `plot_resource_classification_3d_isometric`: Static 3D isometric projection of CIM/JORC resource categories (TODO: Manually Verify).
 # - `plot_resource_classification_3d_interactive`: Interactive 3D explorer with category toggles, bench slider, and HUD.
 # - `plot_resource_classification_bench_gallery`: Multi-panel elevation gallery of classification slices.
 # - `plot_resource_classification_orthogonal_slices`: 3-view orthogonal slices (XY plan, XZ cross, YZ long).
 # - `plot_reserve_classification_3d_isometric` & `plot_reserve_classification_3d_interactive`: Reserve status 3D viewers.
 # - `plot_polygonal_3d_isometric` & `plot_polygonal_3d_interactive`: 3D polygonal/NN domain viewers.
 # - `plot_simulation_3d_isometric` & `plot_simulation_3d_interactive`: 3D conditional simulation realization viewers.
-
 
 
 def _get_block_grade_norm_and_cmap(
@@ -6220,7 +7819,7 @@ def plot_block_model_orthogonal_slices(
 ) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
     """Plots 3-panel orthogonal slices (Bench Plan, Cross-Section, Longitudinal Section).
 
-    Standard reporting practice in NI 43-101 and JORC technical reports:
+    Standard reporting practice in NI 43-101 and JORC technical reports (TODO: Manually Verify):
     1. Bench Plan (X-Y at elevation Z = bench_z): Shows horizontal grade continuity looking down.
     2. Cross-Section (X-Z at northing Y = section_y): Shows vertical depth continuity across strike.
        - Looking North (default): West is left, East is right.

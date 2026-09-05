@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 
 from drs_mining.components.estimation import (
     polygonal_estimation,
-    polygonal_reserve_summary,
-    format_reserve_summary,
+    polygonal_resource_summary,
+    format_polygonal_summary,
     grade_tonnage_table,
     plot_polygonal_map,
     inverse_distance_weighting,
@@ -22,11 +22,13 @@ from drs_mining.components.estimation import (
     classify_resources_by_drill_spacing,
     classify_resources_by_sor,
     classify_resources_by_kriging_variance,
+    smooth_resource_categories,
     classify_mineral_resources,
     format_resource_statement,
     plot_swath_analysis,
     plot_cell_declustering_curve,
     calculate_cut_off_grade,
+    cut_off_grade_breakdown,
     convert_resource_to_reserve,
     format_reserve_statement,
     plot_resource_to_reserve_waterfall,
@@ -53,6 +55,9 @@ from drs_mining.components.estimation import (
     plot_block_model_3d_interactive,
     plot_block_model_grade_uncertainty,
     _theoretical_covariance,
+    compute_anisotropy_rotation_matrix,
+    transform_anisotropic_coordinates,
+    compute_anisotropic_distance,
 )
 
 
@@ -68,7 +73,7 @@ def sample_polygons_df():
         "area_m2": [1000.0, 2000.0, 1000.0],
         "volume_m3": [10000.0, 20000.0, 10000.0],
         "tonnes": [27000.0, 54000.0, 27000.0],  # 2.7 t/m3 density
-        "contained_metal": [27000.0, 108000.0, 13500.0],  # tonnes * grade
+        "contained_metal": [270.0, 1080.0, 135.0],  # tonnes * grade * 0.01
         "vertices": [
             [(50, 50), (150, 50), (150, 150), (50, 150)],
             [(150, 150), (250, 150), (250, 250), (150, 250)],
@@ -99,6 +104,16 @@ def test_polygonal_estimation_execution():
     assert (polys["contained_metal"] > 0).all()
     assert all(len(v) >= 3 for v in polys["vertices"])
 
+    # Test custom metal_factor (e.g. g/t Au -> tonnes metal: 1e-6)
+    polys_gold = polygonal_estimation(
+        df_holes,
+        boundary=boundary,
+        bulk_density=2.7,
+        max_radius=100.0,
+        metal_factor=1e-6,
+    )
+    assert np.allclose(polys_gold["contained_metal"], polys["tonnes"] * polys["grade"] * 1e-6)
+
 
 def test_polygonal_estimation_clip_to_convex_hull():
     df_holes = pd.DataFrame({
@@ -112,22 +127,28 @@ def test_polygonal_estimation_clip_to_convex_hull():
 
     # 1. Unclipped: polygons expand across entire 500x500 boundary (250,000 m2)
     unclipped = polygonal_estimation(
-        df_holes, boundary=boundary, clip_to_convex_hull=False
+        df_holes, bulk_density=2.7, boundary=boundary, clip_to_convex_hull=False
     )
     assert unclipped["area_m2"].sum() == pytest.approx(250000.0)
 
     # 2. Clipped to convex hull: total area matches exact triangle area (10,000 m2)
-    # Triangle: base=200, height=100 -> area = 0.5 * 200 * 100 = 10,000
     clipped = polygonal_estimation(
-        df_holes, boundary=boundary, clip_to_convex_hull=True
+        df_holes, bulk_density=2.7, boundary=boundary, clip_to_convex_hull=True
     )
     assert clipped["area_m2"].sum() == pytest.approx(10000.0)
     assert (clipped["area_m2"] > 0).all()
 
+    # 3. Validations: required bulk_density and positive check
+    with pytest.raises(TypeError):
+        polygonal_estimation(df_holes, boundary=boundary)  # missing bulk_density
+    with pytest.raises(ValueError, match="bulk_density must be positive"):
+        polygonal_estimation(df_holes, bulk_density=0.0, boundary=boundary)
+    with pytest.raises(ValueError, match="bulk_density must be positive"):
+        polygonal_estimation(df_holes, bulk_density=-1.0, boundary=boundary)
 
 
-def test_polygonal_reserve_summary(sample_polygons_df):
-    summary = polygonal_reserve_summary(sample_polygons_df)
+def test_polygonal_resource_summary(sample_polygons_df):
+    summary = polygonal_resource_summary(sample_polygons_df)
     
     assert summary["total_tonnes"] == pytest.approx(108000.0)
     assert summary["total_area_m2"] == pytest.approx(4000.0)
@@ -136,20 +157,24 @@ def test_polygonal_reserve_summary(sample_polygons_df):
     assert summary["mean_polygon_area_m2"] == pytest.approx(4000.0 / 3)
 
     # Weighted mean grade: (27k*1.0 + 54k*2.0 + 27k*0.5) / 108k = 148,500 / 108,000 = 1.375
-    assert summary["contained_metal"] == pytest.approx(148500.0)
+    # Contained metal with metal_factor=0.01: 1485.0 tonnes
+    assert summary["contained_metal"] == pytest.approx(1485.0)
     assert summary["mean_grade"] == pytest.approx(1.375)
 
     # Test text formatting
-    formatted = format_reserve_summary(summary)
+    formatted = format_polygonal_summary(summary, metal_unit="t Cu")
+    assert "POLYGONAL IN-SITU RESOURCE SUMMARY" in formatted
     assert "108,000.0 tonnes" in formatted
     assert "1.3750 %" in formatted
+    assert "1,485.0 t Cu" in formatted
 
 
-def test_polygonal_reserve_summary_empty():
+def test_polygonal_resource_summary_empty():
     empty_df = pd.DataFrame(columns=["tonnes", "grade", "area_m2", "volume_m3"])
-    summary = polygonal_reserve_summary(empty_df)
+    summary = polygonal_resource_summary(empty_df)
     assert summary["total_tonnes"] == 0.0
     assert summary["mean_grade"] == 0.0
+    assert summary["contained_metal"] == 0.0
     assert summary["drillhole_count"] == 0
 
 
@@ -160,31 +185,42 @@ def test_grade_tonnage_table(sample_polygons_df):
     row_0 = gt.loc[0.0]
     assert row_0["ore_tonnes"] == pytest.approx(108000.0)
     assert row_0["ore_grade"] == pytest.approx(1.375)
-    assert row_0["waste_tonnes"] == 0.0
-    assert row_0["strip_ratio"] == 0.0
+    assert row_0["contained_metal"] == pytest.approx(1485.0)
+    assert row_0["internal_waste_tonnes"] == 0.0
+    assert row_0["internal_waste_ratio"] == 0.0
     assert row_0["ore_recovery_pct"] == pytest.approx(100.0)
     assert row_0["metal_recovery_pct"] == pytest.approx(100.0)
 
     # Cutoff 0.75: DH01 (1.0) and DH02 (2.0) -> 81k tonnes
     row_075 = gt.loc[0.75]
     assert row_075["ore_tonnes"] == pytest.approx(81000.0)
-    assert row_075["waste_tonnes"] == pytest.approx(27000.0)
-    assert row_075["strip_ratio"] == pytest.approx(27000.0 / 81000.0)
+    assert row_075["internal_waste_tonnes"] == pytest.approx(27000.0)
+    assert row_075["internal_waste_ratio"] == pytest.approx(27000.0 / 81000.0)
     # Ore grade = (27k*1 + 54k*2) / 81k = 135k / 81k = 1.6667
     assert row_075["ore_grade"] == pytest.approx(1.66666667)
-    assert row_075["metal_recovery_pct"] == pytest.approx(135000.0 / 148500.0 * 100.0)
+    assert row_075["contained_metal"] == pytest.approx(1350.0)
+    assert row_075["metal_recovery_pct"] == pytest.approx(1350.0 / 1485.0 * 100.0)
 
     # Cutoff 1.5: only DH02 (54k tonnes, 2.0 grade)
     row_15 = gt.loc[1.5]
     assert row_15["ore_tonnes"] == pytest.approx(54000.0)
+    assert row_15["contained_metal"] == pytest.approx(1080.0)
     assert row_15["ore_grade"] == pytest.approx(2.0)
 
     # Cutoff 3.0: exceeds all assays -> 0 ore
     row_30 = gt.loc[3.0]
     assert row_30["ore_tonnes"] == 0.0
     assert row_30["ore_grade"] == 0.0
-    assert row_30["waste_tonnes"] == pytest.approx(108000.0)
-    assert np.isinf(row_30["strip_ratio"])
+    assert row_30["internal_waste_tonnes"] == pytest.approx(108000.0)
+    assert np.isinf(row_30["internal_waste_ratio"])
+
+    # Test open-pit stripping ratio when external wall-rock waste is provided
+    # 162k external waste + 27k internal subgrade = 189k total waste / 81k ore = 2.333
+    gt_pit = grade_tonnage_table(
+        sample_polygons_df, cutoffs=[0.75], external_waste_tonnes=162000.0
+    )
+    assert "strip_ratio" in gt_pit.columns
+    assert gt_pit.loc[0.75, "strip_ratio"] == pytest.approx((162000.0 + 27000.0) / 81000.0)
 
 
 def test_plot_polygonal_map(sample_polygons_df):
@@ -553,21 +589,35 @@ def test_classify_resources_by_drill_spacing():
     assert cats_3d[1] == "Inferred"
 
     # 5. Empty inputs and edge cases
-    empty_cats = classify_resources_by_drill_spacing(np.empty((0, 2)), samples)
+    empty_cats = classify_resources_by_drill_spacing(
+        np.empty((0, 2)), samples, max_radius_measured=25.0, max_radius_indicated=50.0
+    )
     assert len(empty_cats) == 0
 
-    no_samples_cats = classify_resources_by_drill_spacing(pts, np.empty((0, 2)))
+    no_samples_cats = classify_resources_by_drill_spacing(
+        pts, np.empty((0, 2)), max_radius_measured=25.0, max_radius_indicated=50.0
+    )
     assert np.all(no_samples_cats == "Unclassified")
 
     # 6. Validations
+    with pytest.raises(TypeError):
+        classify_resources_by_drill_spacing(pts, samples)  # missing required radii
     with pytest.raises(ValueError, match="must have shape"):
-        classify_resources_by_drill_spacing(pts, np.array([[10.0, 10.0, 10.0]]))
+        classify_resources_by_drill_spacing(
+            pts, np.array([[10.0, 10.0, 10.0]]), max_radius_measured=25.0, max_radius_indicated=50.0
+        )
     with pytest.raises(ValueError, match="Search radii"):
-        classify_resources_by_drill_spacing(pts, samples, max_radius_measured=-5.0)
+        classify_resources_by_drill_spacing(
+            pts, samples, max_radius_measured=-5.0, max_radius_indicated=50.0
+        )
     with pytest.raises(ValueError, match=r"max_radius_measured .* must be <="):
-        classify_resources_by_drill_spacing(pts, samples, max_radius_measured=50.0, max_radius_indicated=20.0)
+        classify_resources_by_drill_spacing(
+            pts, samples, max_radius_measured=50.0, max_radius_indicated=20.0
+        )
     with pytest.raises(ValueError, match=r"min_holes_measured .* must be >="):
-        classify_resources_by_drill_spacing(pts, samples, min_holes_measured=1, min_holes_indicated=3)
+        classify_resources_by_drill_spacing(
+            pts, samples, max_radius_measured=25.0, max_radius_indicated=50.0, min_holes_measured=1, min_holes_indicated=3
+        )
 
 
 def test_classify_resources_by_sor():
@@ -576,9 +626,9 @@ def test_classify_resources_by_sor():
 
     cats = classify_resources_by_sor(
         slopes_of_regression=sor,
-        kriging_efficiencies=ke,
         threshold_measured=0.80,
         threshold_indicated=0.50,
+        kriging_efficiencies=ke,
         max_slope_measured=1.05,
         min_kriging_efficiency=0.0,
     )
@@ -594,19 +644,25 @@ def test_classify_resources_by_sor():
     ke_neg = np.array([-0.20])
     cats_ke_disqual = classify_resources_by_sor(
         slopes_of_regression=sor_high,
+        threshold_measured=0.80,
+        threshold_indicated=0.50,
         kriging_efficiencies=ke_neg,
         min_kriging_efficiency=0.0,
     )
     assert cats_ke_disqual[0] == "Inferred"
 
     # Validations
-    assert len(classify_resources_by_sor(np.array([]))) == 0
+    with pytest.raises(TypeError):
+        classify_resources_by_sor(sor)  # missing required thresholds
+    assert len(classify_resources_by_sor(np.array([]), threshold_measured=0.80, threshold_indicated=0.50)) == 0
     with pytest.raises(ValueError, match=r"threshold_measured .* must be >"):
         classify_resources_by_sor(sor, threshold_measured=0.40, threshold_indicated=0.60)
     with pytest.raises(ValueError, match=r"max_slope_measured .* must be >="):
-        classify_resources_by_sor(sor, threshold_measured=0.80, max_slope_measured=0.75)
+        classify_resources_by_sor(sor, threshold_measured=0.80, threshold_indicated=0.50, max_slope_measured=0.75)
     with pytest.raises(ValueError, match="Shape mismatch"):
-        classify_resources_by_sor(sor, kriging_efficiencies=np.array([0.5, 0.5]))
+        classify_resources_by_sor(
+            sor, threshold_measured=0.80, threshold_indicated=0.50, kriging_efficiencies=np.array([0.5, 0.5])
+        )
 
 
 def test_classify_resources_by_kriging_variance():
@@ -696,10 +752,14 @@ def test_classify_mineral_resources_unified():
     cats_triple = classify_mineral_resources(
         grid_points=pts,
         samples_xy=samples,
+        max_radius_measured=25.0,
+        max_radius_indicated=50.0,
         kriging_variances=ok_vars_ideal,
         variance_threshold_measured=0.10,
         variance_threshold_indicated=0.30,
         slopes_of_regression=sor,
+        sor_threshold_measured=0.80,
+        sor_threshold_indicated=0.50,
         kriging_efficiencies=ke,
     )
     assert cats_triple[0] == "Measured"
@@ -720,6 +780,10 @@ def test_classify_mineral_resources_unified():
     # 5. Error handling and validations
     with pytest.raises(ValueError, match="At least one classification criterion"):
         classify_mineral_resources(grid_points=pts)
+    with pytest.raises(ValueError, match="max_radius_measured and max_radius_indicated must be explicitly specified"):
+        classify_mineral_resources(grid_points=pts, samples_xy=samples)
+    with pytest.raises(ValueError, match="sor_threshold_measured and sor_threshold_indicated must be explicitly specified"):
+        classify_mineral_resources(grid_points=pts, slopes_of_regression=sor)
     with pytest.raises(ValueError, match="variance_threshold_measured and variance_threshold_indicated must be specified"):
         classify_mineral_resources(grid_points=pts, kriging_variances=ok_vars)
     with pytest.raises(ValueError, match="kriging_variances must be provided when variance thresholds"):
@@ -733,7 +797,129 @@ def test_classify_mineral_resources_unified():
         )
 
     # Empty inputs
-    assert len(classify_mineral_resources(np.empty((0, 2)), samples_xy=samples)) == 0
+    assert len(classify_mineral_resources(np.empty((0, 2)), samples_xy=samples, max_radius_measured=25.0, max_radius_indicated=50.0)) == 0
+
+
+def test_smooth_resource_categories_spotted_dog():
+    # 3x3 regular grid on 10m spacing
+    # Center block (10, 10) is an isolated "Measured" block in a sea of "Indicated" blocks (Classic Spotted Dog)
+    pts = []
+    cats = []
+    for x in (0.0, 10.0, 20.0):
+        for y in (0.0, 10.0, 20.0):
+            pts.append([x, y])
+            if x == 10.0 and y == 10.0:
+                cats.append("Measured")  # Isolated spotted dog
+            else:
+                cats.append("Indicated")
+
+    pts = np.array(pts, dtype=float)
+    cats = np.array(cats, dtype=object)
+
+    # 1. Majority smoothing eliminates the isolated Measured block
+    smoothed = smooth_resource_categories(pts, cats, smoothing_radius=15.0)
+    assert cats[4] == "Measured"
+    assert smoothed[4] == "Indicated"
+    assert all(c == "Indicated" for c in smoothed)
+
+    # 2. Conservative downgrade principle:
+    # A single Inferred block surrounded by 8 Measured blocks is NOT upgraded to Measured
+    cats_hole = cats.copy()
+    cats_hole[0:4] = "Measured"
+    cats_hole[5:9] = "Measured"
+    cats_hole[4] = "Inferred"  # Center is Inferred
+    smoothed_hole = smooth_resource_categories(pts, cats_hole, smoothing_radius=15.0, downgrade_isolated=True)
+    assert smoothed_hole[4] == "Inferred"  # Preserves conservative classification
+
+    # If downgrade_isolated=False, full mode filter can fill the hole
+    smoothed_filled = smooth_resource_categories(pts, cats_hole, smoothing_radius=15.0, downgrade_isolated=False)
+    assert smoothed_filled[4] == "Measured"
+
+    # 3. Minimum cluster size filtering:
+    # Cluster of 2 Measured blocks surrounded by Indicated; with min_cluster_size=4, both are downgraded
+    cats_pair = np.array(["Indicated"] * len(pts), dtype=object)
+    cats_pair[0] = "Measured"
+    cats_pair[1] = "Measured"  # Pair of only 2 blocks
+    smoothed_clust = smooth_resource_categories(pts, cats_pair, min_cluster_size=4)
+    assert smoothed_clust[0] == "Indicated"
+    assert smoothed_clust[1] == "Indicated"
+
+    # 4. 3D block model coordinates support:
+    pts3d = np.array([
+        [0, 0, 0], [10, 0, 0], [20, 0, 0],
+        [0, 10, 0], [10, 10, 0], [20, 10, 0],
+        [0, 20, 0], [10, 20, 0], [20, 20, 0],
+    ], dtype=float)
+    smoothed_3d = smooth_resource_categories(pts3d, cats, smoothing_radius=15.0)
+    assert smoothed_3d[4] == "Indicated"
+
+    # 5. Input validation and edge cases:
+    assert len(smooth_resource_categories(np.empty((0, 2)), [])) == 0
+    with pytest.raises(ValueError, match="Shape mismatch"):
+        smooth_resource_categories(pts, ["Measured"])
+    with pytest.raises(ValueError, match="smoothing_radius must be strictly positive"):
+        smooth_resource_categories(pts, cats, smoothing_radius=-5.0)
+    with pytest.raises(ValueError, match="k_neighbors must be strictly positive"):
+        smooth_resource_categories(pts, cats, k_neighbors=0)
+    with pytest.raises(ValueError, match="min_cluster_size must be >= 1"):
+        smooth_resource_categories(pts, cats, min_cluster_size=0)
+
+
+def test_classify_resources_with_spotted_dog_smoothing():
+    # 3x3 block model
+    pts = np.array([
+        [0.0, 0.0], [10.0, 0.0], [20.0, 0.0],
+        [0.0, 10.0], [10.0, 10.0], [20.0, 10.0],
+        [0.0, 20.0], [10.0, 20.0], [20.0, 20.0],
+    ])
+    # Center block has low kriging variance (0.05 <= 0.10 -> Measured), outer blocks have 0.20 (Indicated)
+    vars_grid = np.array([0.20, 0.20, 0.20, 0.20, 0.05, 0.20, 0.20, 0.20, 0.20])
+
+    # 1. Standalone classify_resources_by_kriging_variance issues warning without smoothing
+    with pytest.warns(UserWarning, match="CIM MRMR Best Practice Guidelines"):
+        cats_raw = classify_resources_by_kriging_variance(
+            kriging_variances=vars_grid,
+            variance_threshold_measured=0.10,
+            variance_threshold_indicated=0.30,
+        )
+    assert cats_raw[4] == "Measured"  # Center is raw spotted dog
+
+    # 2. When grid_points and smoothing_radius are provided to classify_resources_by_kriging_variance:
+    # Spotted dog is smoothed out!
+    cats_smooth = classify_resources_by_kriging_variance(
+        kriging_variances=vars_grid,
+        variance_threshold_measured=0.10,
+        variance_threshold_indicated=0.30,
+        grid_points=pts,
+        smoothing_radius=15.0,
+        warn_standalone=False,
+    )
+    assert cats_smooth[4] == "Indicated"
+
+    # 3. classify_mineral_resources with smoothing_radius:
+    samples = np.array([[10.0, 10.0]])
+    cats_multi_smooth = classify_mineral_resources(
+        grid_points=pts,
+        samples_xy=samples,
+        kriging_variances=vars_grid,
+        variance_threshold_measured=0.10,
+        variance_threshold_indicated=0.30,
+        max_radius_measured=15.0,
+        max_radius_indicated=35.0,
+        min_holes_measured=1,
+        min_holes_indicated=1,
+        smoothing_radius=15.0,
+    )
+    assert cats_multi_smooth[4] == "Indicated"
+
+    # 4. classify_mineral_resources issues warning if only kriging_variances is passed
+    with pytest.warns(UserWarning, match="CIM MRMR Best Practice Guidelines"):
+        classify_mineral_resources(
+            grid_points=pts,
+            kriging_variances=vars_grid,
+            variance_threshold_measured=0.10,
+            variance_threshold_indicated=0.30,
+        )
 
 
 def test_kriging_quality_metrics():
@@ -887,13 +1073,45 @@ def test_format_resource_statement_sig_figs_and_footnotes():
     # Check footnotes metadata
     assert "footnotes" in statement.attrs
     footnotes = statement.attrs["footnotes"]
-    assert len(footnotes) == 5
+    assert len(footnotes) == 7
     # Verify mandatory footnote 2 exists
     assert any("Totals may not sum due to rounding" in fn for fn in footnotes)
     # Verify RPEEE footnote exists
     assert any("Lerchs-Grossmann" in fn for fn in footnotes)
     assert any("$3.85/lb Cu" in fn for fn in footnotes)
     assert any("88.5%" in fn for fn in footnotes)
+    # Verify mandatory inclusive/exclusive declaration footnote exists
+    assert statement.attrs["reporting_basis"] == "exclusive"
+    assert any("exclusive of Mineral Reserves" in fn for fn in footnotes)
+    # Verify Point of Reference declaration exists
+    assert statement.attrs["point_of_reference"] == "In situ"
+    assert any("Point of Reference: In situ" in fn for fn in footnotes)
+
+    # Test custom point of reference
+    stmt_custom_por = format_resource_statement(
+        block_df,
+        cutoff_grade=0.50,
+        point_of_reference="Run-of-Mine / Plant feed",
+    )
+    assert stmt_custom_por.attrs["point_of_reference"] == "Run-of-Mine / Plant feed"
+    assert any("Point of Reference: Run-of-Mine / Plant feed" in fn for fn in stmt_custom_por.attrs["footnotes"])
+
+    # Test invalid point of reference raises ValueError
+    with pytest.raises(ValueError, match="point_of_reference must be a non-empty string"):
+        format_resource_statement(block_df, cutoff_grade=0.50, point_of_reference="")
+
+    # Test inclusive reporting basis
+    stmt_incl = format_resource_statement(
+        block_df,
+        cutoff_grade=0.50,
+        reporting_basis="inclusive",
+    )
+    assert stmt_incl.attrs["reporting_basis"] == "inclusive"
+    assert any("inclusive of Mineral Reserves" in fn for fn in stmt_incl.attrs["footnotes"])
+
+    # Test invalid reporting basis raises ValueError
+    with pytest.raises(ValueError, match="Invalid reporting_basis"):
+        format_resource_statement(block_df, cutoff_grade=0.50, reporting_basis="invalid_basis")
 
 
 def test_cell_declustering_removes_clustering_bias():
@@ -993,10 +1211,21 @@ def test_kriging_missing_required_sill_and_range_raises_type_error():
 def test_calculate_cut_off_grade_breakeven_and_marginal():
     # Base case: Cu mine with $3.80/lb Cu price, $12/t processing, $2/t G&A, $2.50/t mining
     # Met recovery = 88%, 1% Cu = 22.0462 lbs/t
-    # Net price = $3.80/lb
+    # Net price = $3.80/lb (payable_metal_factor = 1.0)
     # Revenue per 1% Cu = 3.80 * 0.88 * 22.0462 = $73.7225 / (% Cu)
     # Breakeven cost = 12 + 2 + 2.50 = $16.50/t -> cutoff = 16.50 / 73.7225 = 0.2238% Cu
     # Marginal cost = 12 + 2 = $14.00/t -> cutoff = 14.00 / 73.7225 = 0.1899% Cu
+
+    # Missing payable_metal_factor raises TypeError (required parameter, no default)
+    with pytest.raises(TypeError):
+        calculate_cut_off_grade(  # type: ignore[call-arg]
+            processing_cost=12.0,
+            ga_cost=2.0,
+            mining_cost=2.50,
+            commodity_price=3.80,
+            metallurgical_recovery=88.0,
+            metal_conversion_factor=22.0462,
+        )
 
     co_be = calculate_cut_off_grade(
         processing_cost=12.0,
@@ -1004,9 +1233,22 @@ def test_calculate_cut_off_grade_breakeven_and_marginal():
         mining_cost=2.50,
         commodity_price=3.80,
         metallurgical_recovery=88.0,
+        payable_metal_factor=1.0,
         metal_conversion_factor=22.0462,
     )
     assert np.isclose(co_be, 0.2238, atol=0.001)
+
+    # Percentage input for payable metal factor (100.0 == 1.0)
+    co_be_pct = calculate_cut_off_grade(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=2.50,
+        commodity_price=3.80,
+        metallurgical_recovery=88.0,
+        payable_metal_factor=100.0,
+        metal_conversion_factor=22.0462,
+    )
+    assert np.isclose(co_be, co_be_pct)
 
     co_marg = calculate_cut_off_grade(
         processing_cost=12.0,
@@ -1014,10 +1256,71 @@ def test_calculate_cut_off_grade_breakeven_and_marginal():
         mining_cost=None,  # Marginal / Internal (sunk mining cost)
         commodity_price=3.80,
         metallurgical_recovery=88.0,
+        payable_metal_factor=1.0,
         metal_conversion_factor=22.0462,
     )
     assert np.isclose(co_marg, 0.1899, atol=0.001)
     assert co_marg < co_be
+
+    # Payable metal factor (e.g. 95% off-take payability) increases required cut-off grade
+    co_pay95 = calculate_cut_off_grade(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=2.50,
+        commodity_price=3.80,
+        metallurgical_recovery=88.0,
+        payable_metal_factor=0.95,
+        metal_conversion_factor=22.0462,
+    )
+    assert np.isclose(co_pay95, 0.2238 / 0.95, atol=0.001)
+    assert co_pay95 > co_be
+
+    # Sustaining capital (Reserve LOM economics) increases required cut-off grade
+    co_sust = calculate_cut_off_grade(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=2.50,
+        commodity_price=3.80,
+        metallurgical_recovery=88.0,
+        payable_metal_factor=1.0,
+        sustaining_capital=1.50,  # $1.50/t ore sustaining capital
+        metal_conversion_factor=22.0462,
+    )
+    # Total cost = 16.50 + 1.50 = $18.00/t -> 18.00 / 73.7225 = 0.24416%
+    assert np.isclose(co_sust, 18.00 / 73.7225, atol=0.001)
+    assert co_sust > co_be
+
+    # Mining dilution adjustment: in-situ equivalent cut-off
+    # Mill feed cutoff = 0.2238%, 10% dilution with 0.0% grade -> in-situ cutoff = 0.2238 / (1 - 0.10) = 0.2487%
+    co_dil = calculate_cut_off_grade(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=2.50,
+        commodity_price=3.80,
+        metallurgical_recovery=88.0,
+        payable_metal_factor=1.0,
+        mining_dilution_pct=10.0,
+        dilution_grade=0.0,
+        metal_conversion_factor=22.0462,
+    )
+    assert np.isclose(co_dil, 0.2238 / 0.90, atol=0.001)
+    assert co_dil > co_be
+
+    # Dilution with non-zero grade (e.g. wall rock contains 0.10% Cu)
+    co_dil_mineralized = calculate_cut_off_grade(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=2.50,
+        commodity_price=3.80,
+        metallurgical_recovery=88.0,
+        payable_metal_factor=1.0,
+        mining_dilution_pct=10.0,
+        dilution_grade=0.10,
+        metal_conversion_factor=22.0462,
+    )
+    # (0.2238 - 0.10 * 0.10) / 0.90 = (0.2238 - 0.01) / 0.90 = 0.2138 / 0.90 = 0.2376%
+    assert co_dil_mineralized < co_dil
+    assert co_dil_mineralized > co_be
 
     # Royalties and selling deductions reduce net price and increase cut-off grade
     co_royalty = calculate_cut_off_grade(
@@ -1028,15 +1331,98 @@ def test_calculate_cut_off_grade_breakeven_and_marginal():
         selling_cost=0.30,  # $0.30/lb deduction
         royalty_pct=2.0,    # 2% NSR royalty
         metallurgical_recovery=88.0,
+        payable_metal_factor=1.0,
         metal_conversion_factor=22.0462,
     )
     assert co_royalty > co_be
 
     # Validation errors
     with pytest.raises(ValueError, match="negative"):
-        calculate_cut_off_grade(processing_cost=-5.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0)
+        calculate_cut_off_grade(
+            processing_cost=-5.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95
+        )
     with pytest.raises(ValueError, match="positive"):
-        calculate_cut_off_grade(processing_cost=12.0, ga_cost=2.0, commodity_price=-3.80, metallurgical_recovery=88.0)
+        calculate_cut_off_grade(
+            processing_cost=12.0, ga_cost=2.0, commodity_price=-3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95
+        )
+    with pytest.raises(ValueError, match="payable_metal_factor"):
+        calculate_cut_off_grade(
+            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.0
+        )
+    with pytest.raises(ValueError, match="payable_metal_factor"):
+        calculate_cut_off_grade(
+            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=150.0
+        )
+    with pytest.raises(ValueError, match="(?i)sustaining capital"):
+        calculate_cut_off_grade(
+            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95,
+            sustaining_capital=-1.0
+        )
+    with pytest.raises(ValueError, match="mining_dilution_pct"):
+        calculate_cut_off_grade(
+            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95,
+            mining_dilution_pct=-5.0
+        )
+    with pytest.raises(ValueError, match="mining_dilution_pct"):
+        calculate_cut_off_grade(
+            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95,
+            mining_dilution_pct=100.0
+        )
+    with pytest.raises(ValueError, match="dilution_grade"):
+        calculate_cut_off_grade(
+            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95,
+            dilution_grade=-0.1
+        )
+
+
+def test_cut_off_grade_breakdown():
+    # Test breakdown dictionary helper
+    breakdown = cut_off_grade_breakdown(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=2.50,
+        commodity_price=3.80,
+        metallurgical_recovery=88.0,
+        payable_metal_factor=0.95,
+        sustaining_capital=1.50,
+        selling_cost=0.30,
+        royalty_pct=2.0,
+        metal_conversion_factor=22.0462,
+        mining_dilution_pct=10.0,
+        dilution_grade=0.05,
+    )
+
+    assert "mill_feed_cutoff_grade" in breakdown
+    assert "in_situ_cutoff_grade" in breakdown
+    assert "net_realized_price" in breakdown
+    assert "revenue_per_grade_unit" in breakdown
+    assert "operating_cost_per_tonne" in breakdown
+    assert "total_cost_per_tonne" in breakdown
+    assert "sustaining_capital_per_tonne" in breakdown
+    assert "cutoff_type" in breakdown
+    assert breakdown["cutoff_type"] == "Breakeven Reserve (LOM)"
+
+    # Operating cost = 12 + 2 + 2.50 = 16.50
+    assert np.isclose(breakdown["operating_cost_per_tonne"], 16.50)
+    # Total cost = 16.50 + 1.50 = 18.00
+    assert np.isclose(breakdown["total_cost_per_tonne"], 18.00)
+
+    # In-situ cutoff should equal direct call to calculate_cut_off_grade with same params
+    direct_cog = calculate_cut_off_grade(
+        processing_cost=12.0,
+        ga_cost=2.0,
+        mining_cost=2.50,
+        commodity_price=3.80,
+        metallurgical_recovery=88.0,
+        payable_metal_factor=0.95,
+        sustaining_capital=1.50,
+        selling_cost=0.30,
+        royalty_pct=2.0,
+        metal_conversion_factor=22.0462,
+        mining_dilution_pct=10.0,
+        dilution_grade=0.05,
+    )
+    assert np.isclose(breakdown["in_situ_cutoff_grade"], direct_cog)
 
 
 def test_convert_resource_to_reserve_strict_inferred_exclusion_and_modifying_factors():
@@ -1057,7 +1443,6 @@ def test_convert_resource_to_reserve_strict_inferred_exclusion_and_modifying_fac
         mining_recovery_pct=recovery_pct,
         cutoff_grade=cutoff,
         dilution_grade=0.0,
-        allow_inferred=False,
     )
 
     # 1. Verification of Inferred exclusion: Inferred block (5000t, grade 1.50%) MUST NOT BE in reserves!
@@ -1082,6 +1467,134 @@ def test_convert_resource_to_reserve_strict_inferred_exclusion_and_modifying_fac
     # Missing required modifying factor raises TypeError
     with pytest.raises(TypeError):
         convert_resource_to_reserve(resource_df, mining_dilution_pct=5.0, cutoff_grade=0.5)  # Missing mining_recovery_pct
+
+    # allow_inferred is completely removed from the API (per CONTRIBUTING.md) and raises TypeError
+    with pytest.raises(TypeError, match="unexpected keyword argument 'allow_inferred'"):
+        convert_resource_to_reserve(
+            resource_df,
+            mining_dilution_pct=dilution_pct,
+            mining_recovery_pct=recovery_pct,
+            cutoff_grade=cutoff,
+            allow_inferred=True,
+        )
+
+    # Verification that unclassified/waste blocks are also excluded
+    res_with_unclass = pd.DataFrame({
+        "category": ["Measured", "Indicated", "Inferred", "Unclassified"],
+        "grade": [1.20, 0.90, 1.50, 1.80],  # 1.80 is high grade but unclassified
+        "tonnes": [1000.0, 2000.0, 5000.0, 3000.0],
+    })
+    res_out = convert_resource_to_reserve(
+        res_with_unclass,
+        mining_dilution_pct=dilution_pct,
+        mining_recovery_pct=recovery_pct,
+        cutoff_grade=cutoff,
+    )
+    assert len(res_out) == 2
+    assert res_out.attrs["excluded_inferred_tonnes"] == 5000.0
+    assert res_out.attrs["excluded_unclassified_tonnes"] == 3000.0
+
+
+def test_convert_resource_to_reserve_dilution_cutoff_spoilage():
+    # Demonstrates Item 2.1: In-situ blocks that meet cut-off in-situ (e.g. 0.52% >= 0.50%)
+    # but fall below cut-off after dilution (0.52 / 1.10 = 0.4727% < 0.50%)
+    resource_df = pd.DataFrame({
+        "category": ["Measured", "Indicated", "Measured"],
+        "grade": [1.20, 0.52, 0.45],  # 0.52 is in-situ above 0.50 cutoff, 0.45 is in-situ below
+        "tonnes": [1000.0, 1000.0, 1000.0],
+    })
+
+    cutoff = 0.50
+    dilution_pct = 10.0  # 10% zero-grade dilution
+    recovery_pct = 95.0
+
+    # 1. Default (ROM cut-off per CIM MRMR §7.2.1 and SME Handbook Ch. 6.1):
+    # Block 1 (grade 0.52%):
+    # Diluted head grade = (1000 * 0.52 + 100 * 0.0) / 1100 = 0.4727% < 0.50%
+    # This block is sub-economic at the plant gate and must be excluded from reserves!
+    res_rom = convert_resource_to_reserve(
+        resource_df,
+        mining_dilution_pct=dilution_pct,
+        mining_recovery_pct=recovery_pct,
+        cutoff_grade=cutoff,
+        dilution_grade=0.0,
+        cutoff_type="rom",
+    )
+
+    # Only Block 0 (1.20% -> 1.0909%) survives
+    assert len(res_rom) == 1
+    assert res_rom["reserve_category"].iloc[0] == "Proven Reserve"
+    assert np.isclose(res_rom["rom_tonnes"].iloc[0], 1045.0)
+
+    # Audit metadata verifies tracking of dilution spoilage
+    # Block 1: ROM tonnes = 1000 * 1.10 * 0.95 = 1045t, contained metal = 1045 * 0.472727 * 0.01
+    assert np.isclose(res_rom.attrs["excluded_subeconomic_diluted_tonnes"], 1045.0)
+    assert np.isclose(res_rom.attrs["excluded_subeconomic_insitu_tonnes"], 1000.0)
+    expected_spoilage_metal = 1045.0 * (0.52 / 1.10) * 0.01
+    assert np.isclose(res_rom.attrs["excluded_subeconomic_diluted_metal"], expected_spoilage_metal, atol=1e-3)
+    assert res_rom.attrs["cutoff_type"] == "rom"
+
+    # 2. In-situ cut-off mode (e.g., when cutoff was pre-adjusted by practitioner):
+    res_insitu = convert_resource_to_reserve(
+        resource_df,
+        mining_dilution_pct=dilution_pct,
+        mining_recovery_pct=recovery_pct,
+        cutoff_grade=cutoff,
+        dilution_grade=0.0,
+        cutoff_type="in_situ",
+    )
+    # Both Block 0 and Block 1 are included
+    assert len(res_insitu) == 2
+    assert res_insitu.attrs["excluded_subeconomic_diluted_tonnes"] == 0.0
+    assert res_insitu.attrs["cutoff_type"] == "in_situ"
+
+    # 3. Input validation:
+    with pytest.raises(ValueError, match="cutoff_type must be 'rom' or 'in_situ'"):
+        convert_resource_to_reserve(
+            resource_df,
+            mining_dilution_pct=dilution_pct,
+            mining_recovery_pct=recovery_pct,
+            cutoff_grade=cutoff,
+            cutoff_type="invalid_type",  # type: ignore
+        )
+
+    with pytest.raises(ValueError, match="cutoff_grade cannot be negative"):
+        convert_resource_to_reserve(
+            resource_df,
+            mining_dilution_pct=dilution_pct,
+            mining_recovery_pct=recovery_pct,
+            cutoff_grade=-0.1,
+        )
+
+    # 4. Scenario where ALL candidate blocks become sub-economic after dilution:
+    all_marginal_df = pd.DataFrame({
+        "category": ["Measured"],
+        "grade": [0.52],
+        "tonnes": [1000.0],
+    })
+    res_empty = convert_resource_to_reserve(
+        all_marginal_df,
+        mining_dilution_pct=dilution_pct,
+        mining_recovery_pct=recovery_pct,
+        cutoff_grade=cutoff,
+    )
+    assert len(res_empty) == 0
+    assert np.isclose(res_empty.attrs["excluded_subeconomic_diluted_tonnes"], 1045.0)
+
+    # 5. Waterfall reconciliation with dilution spoilage step:
+    fig, (ax1, ax2) = plot_resource_to_reserve_waterfall(
+        resource_df,
+        res_rom,
+        cutoff_grade=cutoff,
+        mining_dilution_pct=dilution_pct,
+        mining_recovery_pct=recovery_pct,
+        dilution_grade=0.0,
+    )
+    assert fig is not None
+    # Verify the x tick labels include Dilution Spoilage
+    xticklabels = [label.get_text() for label in ax1.get_xticklabels()]
+    assert any("Dilution Spoilage" in lbl for lbl in xticklabels)
+    plt.close(fig)
 
 
 def test_format_reserve_statement_sig_figs_and_footnotes():
@@ -1109,12 +1622,39 @@ def test_format_reserve_statement_sig_figs_and_footnotes():
 
     # Verify regulatory footnotes
     fns = stmt.attrs["footnotes"]
-    assert len(fns) == 5
+    assert len(fns) == 6
     assert any("CIM Definition Standards" in f for f in fns)
     assert any("Mining Dilution = 6.0%" in f for f in fns)
     assert any("Mining Recovery = 94.0%" in f for f in fns)
     assert any("Metallurgical Recovery = 88.5%" in f for f in fns)
     assert any("Pre-Feasibility" in f for f in fns)
+    assert stmt.attrs["point_of_reference"] == "Run-of-Mine (ROM) delivered to processing facility"
+    assert any("Point of Reference: Run-of-Mine (ROM) delivered to processing facility" in f for f in fns)
+
+    # Test custom point of reference
+    stmt_custom_por = format_reserve_statement(
+        reserve_df,
+        cutoff_grade=0.50,
+        mining_dilution_pct=6.0,
+        mining_recovery_pct=94.0,
+        commodity_price="$3.80/lb Cu",
+        metallurgical_recovery=88.5,
+        point_of_reference="Plant feed delivered to concentrator",
+    )
+    assert stmt_custom_por.attrs["point_of_reference"] == "Plant feed delivered to concentrator"
+    assert any("Point of Reference: Plant feed delivered to concentrator" in f for f in stmt_custom_por.attrs["footnotes"])
+
+    # Test invalid point of reference raises ValueError
+    with pytest.raises(ValueError, match="point_of_reference must be a non-empty string"):
+        format_reserve_statement(
+            reserve_df,
+            cutoff_grade=0.50,
+            mining_dilution_pct=6.0,
+            mining_recovery_pct=94.0,
+            commodity_price="$3.80/lb Cu",
+            metallurgical_recovery=88.5,
+            point_of_reference="   ",
+        )
 
 
 def test_plot_resource_to_reserve_waterfall():
@@ -1487,6 +2027,121 @@ def test_reconcile_production_to_reserve_f_factors_and_ratios():
     assert len(rec_single) == 1
     assert "f3_metal_factor" in rec_single.columns
     assert np.isclose(rec_single.iloc[0]["f3_tonnes_ratio"], 51000.0 / 50000.0)
+    assert rec_single.attrs["stockpile_mode"] == "Direct feed (no intermediate stockpiling)"
+
+
+def test_reconcile_production_stockpile_adjustments():
+    # Multi-period reconciliation demonstrating how stockpiling distorts unadjusted F2,
+    # and how Harry Parker (2012) mass-balance adjustment restores true operational stability.
+    # Month 1: Dig 100kt @ 1.0% Cu (1000t Cu). Mill only takes 70kt @ 1.0% Cu (700t Cu). 30kt stockpiled.
+    # Month 2: Dig 50kt @ 1.0% Cu (500t Cu). Mill draws 30kt from stockpile + 50kt from pit = 80kt (800t Cu).
+    reserve_df = pd.DataFrame({
+        "period": ["M1", "M2"],
+        "tonnes": [100_000.0, 50_000.0],
+        "grade": [1.00, 1.00],
+    })
+    gc_df = pd.DataFrame({
+        "period": ["M1", "M2"],
+        "tonnes": [100_000.0, 50_000.0],
+        "grade": [1.00, 1.00],
+    })
+    plant_df = pd.DataFrame({
+        "period": ["M1", "M2"],
+        "tonnes": [70_000.0, 80_000.0],
+        "grade": [1.00, 1.00],
+    })
+
+    # Test Format 1: Opening & closing stockpile balances
+    stockpile_balances = pd.DataFrame({
+        "period": ["M1", "M2"],
+        "opening_tonnes": [0.0, 30_000.0],
+        "opening_grade": [0.0, 1.00],
+        "closing_tonnes": [30_000.0, 0.0],
+        "closing_grade": [1.00, 0.0],
+    })
+
+    rec_df = reconcile_production_to_reserve(
+        reserve_data=reserve_df,
+        plant_data=plant_df,
+        grade_control_data=gc_df,
+        stockpile_data=stockpile_balances,
+        period_col="period",
+        grade_unit="% Cu",
+    )
+
+    # Output rows: 2 periods + 1 "Total" row = 3 rows
+    assert len(rec_df) == 3
+    assert "stockpile_delta_tonnes" in rec_df.columns
+    assert "plant_adj_tonnes" in rec_df.columns
+    assert "f2_adj_metal_factor" in rec_df.columns
+    assert "f3_adj_metal_factor" in rec_df.columns
+
+    # Unadjusted F2 swings wildly: 0.70 in M1 and 1.60 in M2!
+    assert np.isclose(rec_df.iloc[0]["f2_metal_factor"], 0.70)
+    assert np.isclose(rec_df.iloc[1]["f2_metal_factor"], 1.60)
+
+    # Stockpile-adjusted F2 is perfectly 1.00 in both months!
+    assert np.isclose(rec_df.iloc[0]["f2_adj_metal_factor"], 1.00)
+    assert np.isclose(rec_df.iloc[1]["f2_adj_metal_factor"], 1.00)
+    assert np.isclose(rec_df.iloc[2]["f2_adj_metal_factor"], 1.00)
+
+    # Mathematical identities hold: F1 * F2_adj == F3_adj
+    for i in range(len(rec_df)):
+        f1 = rec_df.iloc[i]["f1_metal_factor"]
+        f2_adj = rec_df.iloc[i]["f2_adj_metal_factor"]
+        f3_adj = rec_df.iloc[i]["f3_adj_metal_factor"]
+        assert np.isclose(f1 * f2_adj, f3_adj, atol=1e-5)
+
+        rt_adj = rec_df.iloc[i]["f2_adj_tonnes_ratio"]
+        rg_adj = rec_df.iloc[i]["f2_adj_grade_ratio"]
+        assert np.isclose(rt_adj * rg_adj, f2_adj, atol=1e-5)
+
+    assert rec_df.attrs["stockpile_mode"] == "Inventory adjusted"
+    assert np.isclose(rec_df.attrs["f3_adjusted_factor"], 1.00)
+    assert "EXCELLENT" in rec_df.attrs["health_status"]
+
+    # Test Format 2: Movement receipts and reclaims
+    stockpile_movements = pd.DataFrame({
+        "period": ["M1", "M2"],
+        "added_tonnes": [30_000.0, 0.0],
+        "added_grade": [1.00, 0.0],
+        "reclaimed_tonnes": [0.0, 30_000.0],
+        "reclaimed_grade": [0.0, 1.00],
+    })
+    rec_mvt = reconcile_production_to_reserve(
+        reserve_df, plant_df, gc_df, stockpile_data=stockpile_movements, period_col="period"
+    )
+    assert np.isclose(rec_mvt.iloc[0]["f2_adj_metal_factor"], 1.00)
+    assert np.isclose(rec_mvt.iloc[1]["f2_adj_metal_factor"], 1.00)
+
+    # Test Format 3: Direct deltas
+    stockpile_deltas = pd.DataFrame({
+        "period": ["M1", "M2"],
+        "delta_tonnes": [30_000.0, -30_000.0],
+        "delta_grade": [1.00, 1.00],
+    })
+    rec_deltas = reconcile_production_to_reserve(
+        reserve_df, plant_df, gc_df, stockpile_data=stockpile_deltas, period_col="period"
+    )
+    assert np.isclose(rec_deltas.iloc[0]["f2_adj_metal_factor"], 1.00)
+    assert np.isclose(rec_deltas.iloc[1]["f2_adj_metal_factor"], 1.00)
+
+    # Single-period dictionary with stockpile
+    res_dict = {"tonnes": 100_000.0, "grade": 1.00}
+    plant_dict = {"tonnes": 70_000.0, "grade": 1.00}
+    gc_dict = {"tonnes": 100_000.0, "grade": 1.00}
+    sp_dict = {"opening_tonnes": 0.0, "opening_grade": 0.0, "closing_tonnes": 30_000.0, "closing_grade": 1.00}
+    rec_single_sp = reconcile_production_to_reserve(
+        res_dict, plant_dict, grade_control_data=gc_dict, stockpile_data=sp_dict
+    )
+    assert np.isclose(rec_single_sp.iloc[0]["f2_metal_factor"], 0.70)
+    assert np.isclose(rec_single_sp.iloc[0]["f2_adj_metal_factor"], 1.00)
+
+    # Invalid stockpile data format raises ValueError
+    with pytest.raises(ValueError, match="stockpile_data must contain"):
+        reconcile_production_to_reserve(
+            reserve_df, plant_df, gc_df, stockpile_data=pd.DataFrame({"invalid_col": [1, 2]}), period_col="period"
+        )
 
 
 def test_plot_production_reconciliation():
@@ -1501,18 +2156,23 @@ def test_plot_production_reconciliation():
         "plant_tonnes": [1.01, 1.09, 1.19, 3.29],
         "plant_grade": [0.98, 1.00, 0.98, 0.99],
         "plant_metal": [0.0099, 0.0109, 0.0117, 0.0325],
+        "plant_adj_tonnes": [1.02, 1.08, 1.18, 3.28],
+        "plant_adj_grade": [0.99, 1.01, 0.99, 1.00],
+        "plant_adj_metal": [0.0101, 0.0109, 0.0117, 0.0327],
         "f1_metal_factor": [1.01, 0.99, 0.975, 0.99],
         "f2_metal_factor": [0.98, 1.00, 1.00, 0.994],
+        "f2_adj_metal_factor": [1.00, 1.00, 1.00, 1.00],
         "f3_metal_factor": [0.99, 0.99, 0.975, 0.985],
+        "f3_adj_metal_factor": [1.01, 0.99, 0.975, 0.99],
     })
-    rec_df.attrs["health_status"] = "EXCELLENT: Production is within +/-5% of reserve model."
+    rec_df.attrs["health_status"] = "EXCELLENT: Production is within +/-5% of reserve model (stockpile-adjusted)."
 
     fig, axes = plot_production_reconciliation(
         rec_df,
         grade_unit="% Cu",
         tonnage_unit="Mt",
         metal_unit="kt",
-        title="Mine-to-Mill Production Reconciliation",
+        title="Mine-to-Mill Production Reconciliation with Stockpile Adjustments",
     )
     assert fig is not None
     assert len(axes) == 4
@@ -1521,6 +2181,23 @@ def test_plot_production_reconciliation():
     assert "Metal" in axes[2].get_title()
     assert "Parker" in axes[3].get_title()
     plt.close(fig)
+
+    # Test single-period plot with stockpile adjustments
+    rec_single = pd.DataFrame([{
+        "period": "Total",
+        "reserve_tonnes": 1.0, "reserve_grade": 1.0, "reserve_metal": 0.01,
+        "gc_tonnes": 1.0, "gc_grade": 1.0, "gc_metal": 0.01,
+        "plant_tonnes": 0.7, "plant_grade": 1.0, "plant_metal": 0.007,
+        "plant_adj_tonnes": 1.0, "plant_adj_grade": 1.0, "plant_adj_metal": 0.01,
+        "f1_metal_factor": 1.0,
+        "f2_metal_factor": 0.7,
+        "f2_adj_metal_factor": 1.0,
+        "f3_metal_factor": 0.7,
+        "f3_adj_metal_factor": 1.0,
+    }])
+    fig_s, axes_s = plot_production_reconciliation(rec_single)
+    assert fig_s is not None
+    plt.close(fig_s)
 
 
 def test_compute_etype_mtype_maps_and_smoothing_ratio():
@@ -1587,6 +2264,14 @@ def test_create_block_model():
     assert (bm["domain"] == "Porphyry").all()
     assert bm["x"].min() == 105.0  # origin + 0.5 * dx
     assert bm["z"].max() == 12.5   # 0 + 2.5 * 5.0
+
+    # Validations for required density
+    with pytest.raises(TypeError):
+        create_block_model(origin=(0, 0, 0), block_size=(10, 10, 5), n_blocks=(2, 2, 2))
+    with pytest.raises(ValueError, match="default_density must be positive"):
+        create_block_model(origin=(0, 0, 0), block_size=(10, 10, 5), n_blocks=(2, 2, 2), default_density=0.0)
+    with pytest.raises(ValueError, match="default_density must be positive"):
+        create_block_model(origin=(0, 0, 0), block_size=(10, 10, 5), n_blocks=(2, 2, 2), default_density=-1.0)
 
     # Test ordinary_kriging_block_estimation
     samples_xyz = np.array([
@@ -1709,7 +2394,7 @@ def test_domain_constrained_estimation_all_methods():
         "thickness": [5.0, 5.0, 5.0, 5.0],
         "domain": ["DomainA", "DomainA", "DomainB", "DomainB"],
     })
-    poly_df = polygonal_estimation(dh_df, domain_col="domain")
+    poly_df = polygonal_estimation(dh_df, bulk_density=2.7, domain_col="domain")
     assert len(poly_df) == 4
     assert "domain" in poly_df.columns
     assert set(poly_df["domain"]) == {"DomainA", "DomainB"}
@@ -1747,6 +2432,7 @@ def test_simple_kriging_block_estimation():
         origin=(0.0, 0.0, 0.0),
         block_size=(10.0, 10.0, 5.0),
         n_blocks=(3, 3, 1),
+        default_density=2.70,
     )
     samples_xyz = np.array([
         [5.0, 5.0, 2.5],
@@ -1823,6 +2509,7 @@ def test_block_model_visualization_suite():
         origin=(0.0, 0.0, 0.0),
         block_size=(10.0, 10.0, 5.0),
         n_blocks=(4, 4, 3),  # 48 blocks
+        default_density=2.70,
     )
     bm["estimated_grade"] = np.linspace(0.2, 2.5, len(bm))
     bm["kriging_variance"] = np.linspace(0.1, 0.9, len(bm))
@@ -1942,5 +2629,686 @@ def test_block_model_visualization_suite():
         plot_block_model_3d_interactive(pd.DataFrame({"x": [1.0]}))
 
 
+def test_consistent_contained_metal_scaling():
+    """Validates Item 1.5: Consistent contained metal scaling across resources and reserves.
 
+    Tests both base metals (% Cu with metal_factor=0.01) and precious metals
+    (g/t Au with metal_factor=1e-6 for tonnes of metal, or metal_unit="koz").
+    """
+    # 1. Base metal scenario: 1 Mt @ 2.0% Cu
+    res_base = pd.DataFrame({
+        "category": ["Measured"],
+        "grade": [2.0],
+        "tonnes": [1_000_000.0],
+    })
+    # In-situ contained metal = 1_000_000 * 2.0 * 0.01 = 20,000 t = 20 kt
+    res_stmt_base = format_resource_statement(
+        res_base,
+        cutoff_grade=0.5,
+        tonnage_unit="Mt",
+        metal_unit="kt",
+        metal_factor=0.01,
+    )
+    # Row 0 (Measured): Contained Metal should be 20 kt
+    assert float(res_stmt_base.loc[res_stmt_base["Classification"] == "Measured", "Contained Metal (kt)"].iloc[0]) == pytest.approx(20.0)
+
+    # Convert to reserve with 0 dilution and 100% recovery
+    resv_base = convert_resource_to_reserve(
+        res_base,
+        mining_dilution_pct=0.0,
+        mining_recovery_pct=100.0,
+        cutoff_grade=0.5,
+        metal_factor=0.01,
+    )
+    assert resv_base["contained_metal"].iloc[0] == pytest.approx(20_000.0)
+
+    resv_stmt_base = format_reserve_statement(
+        resv_base,
+        cutoff_grade=0.5,
+        mining_dilution_pct=0.0,
+        mining_recovery_pct=100.0,
+        commodity_price="$4.00/lb Cu",
+        metallurgical_recovery=90.0,
+        tonnage_unit="Mt",
+        metal_unit="kt",
+        metal_factor=0.01,
+    )
+    # Contained metal in reserve statement should match resource exactly: 20 kt
+    assert float(resv_stmt_base.loc[resv_stmt_base["Classification"] == "Proven Reserve", "Contained Metal (kt)"].iloc[0]) == pytest.approx(20.0)
+
+    # 2. Precious metal scenario: 5 Mt @ 2.5 g/t Au
+    # 5,000,000 t * 2.5 g/t * 1e-6 = 12.5 tonnes of Au
+    # In koz: 12.5 tonnes / 0.0311035 tonnes/koz = 401.88 koz Au
+    res_gold = pd.DataFrame({
+        "category": ["Indicated"],
+        "grade": [2.5],
+        "tonnes": [5_000_000.0],
+    })
+    res_stmt_gold = format_resource_statement(
+        res_gold,
+        cutoff_grade=0.5,
+        grade_unit="g/t Au",
+        tonnage_unit="Mt",
+        metal_unit="koz",
+        metal_factor=1e-6,
+    )
+    # Contained metal in koz should be ~402 koz
+    gold_metal_res = float(res_stmt_gold.loc[res_stmt_gold["Classification"] == "Indicated", "Contained Metal (koz)"].iloc[0])
+    assert gold_metal_res == pytest.approx(12.5 / 0.0311035, rel=1e-2)
+
+    resv_gold = convert_resource_to_reserve(
+        res_gold,
+        mining_dilution_pct=0.0,
+        mining_recovery_pct=100.0,
+        cutoff_grade=0.5,
+        metal_factor=1e-6,
+    )
+    assert resv_gold["contained_metal"].iloc[0] == pytest.approx(12.5)
+
+    resv_stmt_gold = format_reserve_statement(
+        resv_gold,
+        cutoff_grade=0.5,
+        mining_dilution_pct=0.0,
+        mining_recovery_pct=100.0,
+        commodity_price="$2,000/oz Au",
+        metallurgical_recovery=92.0,
+        grade_unit="g/t Au",
+        tonnage_unit="Mt",
+        metal_unit="koz",
+        metal_factor=1e-6,
+    )
+    gold_metal_resv = float(resv_stmt_gold.loc[resv_stmt_gold["Classification"] == "Probable Reserve", "Contained Metal (koz)"].iloc[0])
+    assert gold_metal_resv == pytest.approx(gold_metal_res, rel=1e-2)
+
+
+# =============================================================================
+# SPATIAL ANISOTROPY (2D / 3D STRUCTURAL CONTINUITY - CIM MRMR §6.8/§6.9)
+# =============================================================================
+
+
+def test_anisotropy_rotation_matrix():
+    """Verifies 2D and 3D rotation matrix calculation, orthogonality, and axis projections."""
+    # 1. 2D rotation matrix
+    # Default (azimuth=0, North strike)
+    R2_0 = compute_anisotropy_rotation_matrix(dim=2, angles=0.0)
+    assert np.allclose(R2_0 @ R2_0.T, np.eye(2))
+    # Along North [0, 1] projects onto major axis [1, 0]
+    proj_north = R2_0 @ np.array([0.0, 1.0])
+    assert np.allclose(proj_north, [1.0, 0.0])
+    # Along East [1, 0] projects onto minor axis [0, 1]
+    proj_east = R2_0 @ np.array([1.0, 0.0])
+    assert np.allclose(proj_east, [0.0, 1.0])
+
+    # Azimuth 90 (East strike)
+    R2_90 = compute_anisotropy_rotation_matrix(dim=2, angles=90.0)
+    assert np.allclose(R2_90 @ R2_90.T, np.eye(2))
+    # Along East [1, 0] projects onto major axis [1, 0]
+    assert np.allclose(R2_90 @ np.array([1.0, 0.0]), [1.0, 0.0])
+
+    # Dict input in 2D
+    R2_dict = compute_anisotropy_rotation_matrix(dim=2, angles={"strike": 45.0})
+    assert np.allclose(R2_dict @ R2_dict.T, np.eye(2))
+    v_45 = np.array([1.0, 1.0]) / np.sqrt(2.0)
+    assert np.allclose(R2_dict @ v_45, [1.0, 0.0])
+
+    # 2. 3D rotation matrix
+    # Default (0, 0, 0)
+    R3_0 = compute_anisotropy_rotation_matrix(dim=3, angles=None)
+    assert np.allclose(R3_0 @ R3_0.T, np.eye(3))
+
+    # Dipping and plunging structure: azimuth=45, dip=30, plunge=15
+    R3_arb = compute_anisotropy_rotation_matrix(
+        dim=3, angles=(45.0, 30.0, 15.0)
+    )
+    assert np.allclose(R3_arb @ R3_arb.T, np.eye(3))
+
+    # Dict input in 3D
+    R3_dict = compute_anisotropy_rotation_matrix(
+        dim=3, angles={"azimuth": 90.0, "dip": 45.0, "plunge": 0.0}
+    )
+    assert np.allclose(R3_dict @ R3_dict.T, np.eye(3))
+
+    # Invalid dimension
+    with pytest.raises(ValueError, match="dim must be 2 or 3"):
+        compute_anisotropy_rotation_matrix(dim=4)
+
+
+def test_transform_anisotropic_coordinates():
+    """Verifies coordinate mapping into isotropic equivalent metric space."""
+    # 1. Isotropic coordinates return unmodified
+    pts2 = np.array([[10.0, 20.0], [30.0, 40.0]])
+    t_pts, r_maj = transform_anisotropic_coordinates(pts2, ranges=100.0)
+    assert np.allclose(t_pts, pts2)
+    assert r_maj == 100.0
+
+    # Equal ranges return unmodified
+    t_pts_eq, _ = transform_anisotropic_coordinates(pts2, ranges=(80.0, 80.0))
+    assert np.allclose(t_pts_eq, pts2)
+
+    # Empty array
+    t_empty, _ = transform_anisotropic_coordinates(np.empty((0, 2)), ranges=50.0)
+    assert len(t_empty) == 0
+
+    # 2. 2D Anisotropic scaling along strike (Azimuth = 0, North)
+    # Range major = 100m (along Y), Range minor = 20m (along X)
+    pts = np.array([
+        [0.0, 0.0],
+        [0.0, 50.0],   # 50m North (along strike)
+        [10.0, 0.0],   # 10m East (across strike)
+    ])
+    t_pts, a_maj = transform_anisotropic_coordinates(
+        pts, ranges=(100.0, 20.0), angles=0.0
+    )
+    assert a_maj == 100.0
+    # Along strike: 50m / 100m = 0.5 of range -> transformed distance is 50m
+    d_along = np.linalg.norm(t_pts[1] - t_pts[0])
+    assert d_along == pytest.approx(50.0)
+    # Across strike: 10m / 20m = 0.5 of range -> transformed distance is 10 * (100/20) = 50m
+    d_across = np.linalg.norm(t_pts[2] - t_pts[0])
+    assert d_across == pytest.approx(50.0)
+
+    # 3. 3D Anisotropic scaling
+    pts3 = np.array([
+        [0.0, 0.0, 0.0],
+        [0.0, 50.0, 0.0],  # Major (along North Y)
+        [25.0, 0.0, 0.0],  # Semi-major (along East X)
+        [0.0, 0.0, 10.0],  # Minor (along Elevation Z)
+    ])
+    t_pts3, a_maj3 = transform_anisotropic_coordinates(
+        pts3, ranges={"major": 100.0, "semi_major": 50.0, "minor": 20.0}, angles=(0, 0, 0)
+    )
+    assert a_maj3 == 100.0
+    # Major: 50m -> 50m
+    assert np.linalg.norm(t_pts3[1] - t_pts3[0]) == pytest.approx(50.0)
+    # Semi-major: 25m * (100/50) = 50m
+    assert np.linalg.norm(t_pts3[2] - t_pts3[0]) == pytest.approx(50.0)
+    # Minor: 10m * (100/20) = 50m
+    assert np.linalg.norm(t_pts3[3] - t_pts3[0]) == pytest.approx(50.0)
+
+    # 4. Error validations
+    with pytest.raises(ValueError, match="Coordinates must have last dimension 2 or 3"):
+        transform_anisotropic_coordinates(np.ones((5, 4)))
+    with pytest.raises(ValueError, match="2D anisotropy requires 2 ranges"):
+        transform_anisotropic_coordinates(pts2, ranges=[100.0, 20.0, 10.0][:1])
+    with pytest.raises(ValueError, match="3D anisotropy requires 3 ranges"):
+        transform_anisotropic_coordinates(pts3, ranges=[100.0, 50.0])
+
+
+def test_compute_anisotropic_distance():
+    """Verifies pairwise and difference vector anisotropic distance calculations."""
+    c1 = np.array([[0.0, 0.0], [0.0, 50.0]])
+    c2 = np.array([[0.0, 0.0], [10.0, 0.0]])
+    # Major=100 along North (azimuth=0), Minor=20
+    dists = compute_anisotropic_distance(c1, c2, ranges=(100.0, 20.0), angles=0.0)
+    assert dists.shape == (2, 2)
+    assert dists[0, 0] == pytest.approx(0.0)
+    assert dists[1, 0] == pytest.approx(50.0)
+    assert dists[0, 1] == pytest.approx(50.0)  # 10m across strike * 5 = 50m
+
+    # Single point c2
+    dists_single = compute_anisotropic_distance(c1, np.array([0.0, 0.0]), ranges=(100.0, 20.0), angles=0.0)
+    assert np.allclose(dists_single, [0.0, 50.0])
+
+    # Difference vectors
+    diffs = np.array([[0.0, 50.0], [10.0, 0.0]])
+    d_diffs = compute_anisotropic_distance(diffs, ranges=(100.0, 20.0), angles=0.0)
+    assert np.allclose(d_diffs, [50.0, 50.0])
+
+
+def test_theoretical_covariance_anisotropy():
+    """Verifies directional spatial covariance honoring structural anisotropy."""
+    # Coordinate differences of 30m along North (Y) and 30m along East (X)
+    diff_along = np.array([[0.0, 30.0]])  # along strike
+    diff_across = np.array([[30.0, 0.0]]) # across strike
+
+    # Strike = 0 (North), Major = 100m, Minor = 25m
+    cov_along = _theoretical_covariance(
+        diff_along,
+        model="spherical",
+        sill=1.0,
+        range_param=100.0,
+        anisotropy_ranges=(100.0, 25.0),
+        anisotropy_angles=0.0,
+    )
+    cov_across = _theoretical_covariance(
+        diff_across,
+        model="spherical",
+        sill=1.0,
+        range_param=100.0,
+        anisotropy_ranges=(100.0, 25.0),
+        anisotropy_angles=0.0,
+    )
+
+    # Along strike: 30m < 100m -> significant covariance
+    assert float(cov_along[0]) > 0.5
+    # Across strike: 30m > 25m (minor range) -> zero covariance
+    assert float(cov_across[0]) == pytest.approx(0.0)
+
+
+def test_idw_and_nn_anisotropy():
+    """Verifies Inverse Distance Weighting and Nearest Neighbor honor anisotropic search ellipsoids."""
+    target = np.array([[0.0, 0.0]])
+    # Sample A: 50m along strike (Azimuth=0, North [0, 50]), Grade = 10.0
+    # Sample B: 25m across strike (East [25, 0]), Grade = 2.0
+    samples = np.array([[0.0, 50.0], [25.0, 0.0]])
+    grades = np.array([10.0, 2.0])
+
+    # 1. Isotropic IDW: Sample B is closer (25m vs 50m), so grade is closer to 2.0
+    est_iso, _ = inverse_distance_weighting(samples, grades, target, power=2.0)
+    assert est_iso[0] < 5.0
+
+    # 2. Anisotropic IDW: Major range 100m (North), Minor range 20m (East)
+    # Sample A equivalent distance: 50m
+    # Sample B equivalent distance: 25m * (100/20) = 125m
+    # Sample A is now much closer in anisotropic metric space!
+    est_aniso, dist_aniso = inverse_distance_weighting(
+        samples, grades, target, power=2.0, anisotropy_ranges=(100.0, 20.0), anisotropy_angles=0.0
+    )
+    # Heavily weighted toward Sample A (10.0)
+    assert est_aniso[0] > 8.5
+    assert dist_aniso[0, 0] == pytest.approx(50.0)
+    assert dist_aniso[0, 1] == pytest.approx(125.0)
+
+    # 3. Nearest Neighbor with anisotropy
+    # Isotropic NN picks Sample B (grade 2.0)
+    nn_iso, _ = nearest_neighbor_grid_estimation(samples, grades, target)
+    assert nn_iso[0] == 2.0
+
+    # Anisotropic NN picks Sample A (grade 10.0)
+    nn_aniso, _ = nearest_neighbor_grid_estimation(
+        samples, grades, target, anisotropy_ranges=(100.0, 20.0), anisotropy_angles=0.0
+    )
+    assert nn_aniso[0] == 10.0
+
+    # 4. Domain-segregated IDW with anisotropy
+    samples_dom = np.array([[0.0, 50.0], [25.0, 0.0], [0.0, -40.0]])
+    grades_dom = np.array([10.0, 2.0, 7.0])
+    s_domains = ["Dom1", "Dom1", "Dom2"]
+    g_domains = ["Dom1"]
+    est_dom, _ = inverse_distance_weighting(
+        samples_dom,
+        grades_dom,
+        target,
+        sample_domains=s_domains,
+        grid_domains=g_domains,
+        anisotropy_ranges={"Dom1": (100.0, 20.0), "Dom2": (80.0, 40.0)},
+        anisotropy_angles={"Dom1": 0.0, "Dom2": 45.0},
+    )
+    assert est_dom[0] > 8.5
+
+
+def test_kriging_grid_estimation_anisotropy():
+    """Verifies Simple and Ordinary Kriging with 2D spatial anisotropy."""
+    target = np.array([[0.0, 0.0]])
+    # Sample 1: 40m along North (Y)
+    # Sample 2: 40m along East (X)
+    samples = np.array([[0.0, 40.0], [40.0, 0.0]])
+    grades = np.array([10.0, 2.0])
+
+    # 1. Isotropic Kriging: both samples are equidistant, receive equal weights (0.5 each) -> grade 6.0
+    est_ok_iso, var_ok_iso = ordinary_kriging_grid_estimation(
+        samples, grades, target, sill=1.0, range_param=100.0
+    )
+    assert est_ok_iso[0] == pytest.approx(6.0, rel=1e-3)
+
+    # Invariance: passing equal anisotropy ranges reproduces isotropic result exactly
+    est_ok_eq, var_ok_eq = ordinary_kriging_grid_estimation(
+        samples, grades, target, sill=1.0, range_param=100.0, anisotropy_ranges=(100.0, 100.0)
+    )
+    assert est_ok_eq[0] == pytest.approx(est_ok_iso[0], rel=1e-5)
+    assert var_ok_eq[0] == pytest.approx(var_ok_iso[0], rel=1e-5)
+
+    # 2. Anisotropic Ordinary Kriging: strike=0 (North), major=100m, minor=25m
+    est_ok_aniso, var_ok_aniso = ordinary_kriging_grid_estimation(
+        samples, grades, target, sill=1.0, range_param=100.0,
+        anisotropy_ranges=(100.0, 25.0), anisotropy_angles=0.0
+    )
+    # Sample 1 (North) is within major range (40m < 100m), Sample 2 (East) is beyond minor range (40m > 25m)
+    # Sample 1 receives majority of weight (w1=0.716 vs w2=0.284 in OK due to sum-to-1 constraint)
+    assert est_ok_aniso[0] == pytest.approx(7.728, abs=1e-2)
+    assert est_ok_aniso[0] > est_ok_iso[0] + 1.5
+
+    # 3. Anisotropic Simple Kriging
+    est_sk_aniso, var_sk_aniso = simple_kriging_grid_estimation(
+        samples, grades, target, mean=5.0, sill=1.0, range_param=100.0,
+        anisotropy_ranges=(100.0, 25.0), anisotropy_angles=0.0
+    )
+    assert est_sk_aniso[0] > 7.0
+
+    # Domain segregation in Ordinary Kriging with anisotropy
+    samples_d = np.array([[0.0, 40.0], [40.0, 0.0], [0.0, 30.0]])
+    grades_d = np.array([10.0, 2.0, 8.0])
+    est_d, _ = ordinary_kriging_grid_estimation(
+        samples_d, grades_d, target, sill=1.0, range_param=100.0,
+        sample_domains=["A", "A", "B"], grid_domains=["A"],
+        anisotropy_ranges={"A": (100.0, 25.0), "B": (80.0, 30.0)},
+        anisotropy_angles={"A": 0.0, "B": 90.0},
+    )
+    assert est_d[0] == pytest.approx(est_ok_aniso[0], rel=1e-4)
+
+
+def test_block_kriging_3d_anisotropy():
+    """Verifies 3D Block Kriging with dipping structural anisotropy."""
+    bm = create_block_model(
+        origin=(0.0, 0.0, 0.0),
+        block_size=(20.0, 20.0, 10.0),
+        n_blocks=(2, 2, 2),
+        default_density=2.70,
+    )
+    samples = np.array([
+        [10.0, 10.0, 5.0],
+        [10.0, 30.0, 5.0],
+        [30.0, 10.0, 5.0],
+        [30.0, 30.0, 5.0],
+    ])
+    grades = np.array([1.5, 2.0, 1.2, 2.5])
+
+    # 1. Isotropic baseline
+    est_iso, var_iso, disp_iso, _ = ordinary_kriging_block_estimation(
+        samples, grades, bm, sill=1.0, range_param=80.0, discretization=(2, 2, 2)
+    )
+    assert len(est_iso) == 8
+    assert np.all(np.isfinite(est_iso))
+    assert np.all(var_iso >= 0.0)
+
+    # 2. 3D Dipping Anisotropy: Azimuth=90 (East), Dip=30 deg, ranges=(100, 50, 20)
+    est_aniso, var_aniso, disp_aniso, _ = ordinary_kriging_block_estimation(
+        samples,
+        grades,
+        bm,
+        sill=1.0,
+        range_param=100.0,
+        discretization=(2, 2, 2),
+        anisotropy_ranges=(100.0, 50.0, 20.0),
+        anisotropy_angles=(90.0, 30.0, 0.0),
+    )
+    assert len(est_aniso) == 8
+    assert np.all(np.isfinite(est_aniso))
+    assert np.all(var_aniso >= 0.0)
+    assert disp_aniso > 0.0
+
+    # 3. Simple Block Kriging 3D Anisotropy
+    est_sk, var_sk, disp_sk = simple_kriging_block_estimation(
+        samples,
+        grades,
+        bm,
+        mean=1.8,
+        sill=1.0,
+        range_param=100.0,
+        discretization=(2, 2, 2),
+        anisotropy_ranges=(100.0, 50.0, 20.0),
+        anisotropy_angles=(90.0, 30.0, 0.0),
+    )
+    assert len(est_sk) == 8
+    assert np.all(np.isfinite(est_sk))
+    assert np.all(var_sk >= 0.0)
+
+
+def test_classification_by_drill_spacing_anisotropy():
+    """Verifies drillhole spacing classification using anisotropic search ellipsoids."""
+    grid_pts = np.array([[0.0, 0.0]])
+    # 3 drillholes located 45m along strike (North Y) and spaced 10m in X
+    samples = np.array([
+        [-10.0, 45.0],
+        [0.0, 45.0],
+        [10.0, 45.0],
+    ])
+
+    # 1. Under isotropic radius max_radius_measured=30m:
+    # Physical distance is ~45m > 30m, so it cannot qualify for Measured
+    cats_iso = classify_resources_by_drill_spacing(
+        grid_pts,
+        samples,
+        max_radius_measured=30.0,
+        max_radius_indicated=60.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+    )
+    assert cats_iso[0] == "Indicated"
+
+    # 2. Under anisotropic search ellipsoid: strike=0, major=60m, minor=25m
+    # 45m along strike is well within the 60m major axis
+    cats_aniso = classify_resources_by_drill_spacing(
+        grid_pts,
+        samples,
+        max_radius_measured=60.0,
+        max_radius_indicated=120.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        anisotropy_ranges=(60.0, 25.0),
+        anisotropy_angles=0.0,
+    )
+    assert cats_aniso[0] == "Measured"
+
+    # 3. Integrated classify_mineral_resources with anisotropy
+    cats_min_res = classify_mineral_resources(
+        grid_points=grid_pts,
+        samples_xy=samples,
+        max_radius_measured=60.0,
+        max_radius_indicated=120.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        anisotropy_ranges=(60.0, 25.0),
+        anisotropy_angles=0.0,
+    )
+    assert cats_min_res[0] == "Measured"
+
+
+def test_compositing_unassayed_gap_zero_treatment():
+    """Verifies that unassayed gaps are filled with zero/default grade to conserve metal."""
+    # Hole DH01:
+    # 0.0 - 1.0m: 10.0% grade (contained metal = 1.0 * 10 = 10 units)
+    # 1.0 - 2.5m: UNASSAYED GAP of 1.5m (e.g. unsampled waste or core loss)
+    # 2.5 - 3.0m: 4.0% grade (contained metal = 0.5 * 4 = 2 units)
+    # Total raw contained metal = 12 units
+    df = pd.DataFrame({
+        "hole_id": ["DH01", "DH01"],
+        "from_m": [0.0, 2.5],
+        "to_m": [1.0, 3.0],
+        "grade": [10.0, 4.0],
+        "x": [100.0, 100.0],
+        "y": [200.0, 200.0],
+    })
+
+    # 1. Default unassayed_treatment="zero" with 2.0m composites:
+    # Comp 1: [0.0, 2.0]: 1.0m @ 10.0% + 1.0m @ 0.0% -> grade = 5.0%
+    #   Contained metal = 2.0 * 5.0 = 10 units (conserved!)
+    #   sampled_length = 1.0m, coverage_ratio = 0.50
+    # Comp 2: [2.0, 3.0]: 0.5m @ 0.0% + 0.5m @ 4.0% -> grade = 2.0%
+    #   Contained metal = 1.0 * 2.0 = 2 units (conserved!)
+    #   sampled_length = 0.5m, coverage_ratio = 0.50
+    comp_df = composite_drillhole_intervals(
+        df,
+        composite_length=2.0,
+        min_length_ratio=0.50,
+        unassayed_treatment="zero",
+        unassayed_grade=0.0,
+    )
+    assert len(comp_df) == 2
+    assert comp_df.iloc[0]["grade"] == pytest.approx(5.0)
+    assert comp_df.iloc[0]["sampled_length"] == pytest.approx(1.0)
+    assert comp_df.iloc[0]["coverage_ratio"] == pytest.approx(0.50)
+    assert comp_df.iloc[1]["grade"] == pytest.approx(2.0)
+    assert comp_df.iloc[1]["sampled_length"] == pytest.approx(0.5)
+    assert comp_df.iloc[1]["coverage_ratio"] == pytest.approx(0.50)
+
+    # Total composite metal equals raw metal exactly (Zero dilution distortion)
+    tot_metal = float((comp_df["length"] * comp_df["grade"]).sum())
+    assert tot_metal == pytest.approx(12.0)
+    assert comp_df.attrs["unassayed_gaps_count"] == 1
+    assert comp_df.attrs["unassayed_gaps_total_length"] == pytest.approx(1.5)
+
+    # 2. Custom unassayed_grade (e.g. background threshold = 0.5%)
+    comp_bg = composite_drillhole_intervals(
+        df,
+        composite_length=2.0,
+        min_length_ratio=0.50,
+        unassayed_treatment="zero",
+        unassayed_grade=0.5,
+    )
+    # Comp 1: (1.0 * 10.0 + 1.0 * 0.5) / 2.0 = 5.25%
+    assert comp_bg.iloc[0]["grade"] == pytest.approx(5.25)
+
+
+def test_compositing_unassayed_gap_split_treatment():
+    """Verifies that unassayed gaps trigger run splits when unassayed_treatment='split'."""
+    df = pd.DataFrame({
+        "hole_id": ["DH01", "DH01"],
+        "from_m": [0.0, 2.5],
+        "to_m": [1.0, 3.5],
+        "grade": [10.0, 4.0],
+    })
+
+    # Under 'split', the 1.5m gap resets the run.
+    # Run 1: [0.0, 1.0] (1.0m length). With target 2.0m and min_length_ratio 0.50, kept as [0, 1] @ 10.0%
+    # Run 2: [2.5, 3.5] (1.0m length). Kept as [2.5, 3.5] @ 4.0%
+    # Neither composite spans the gap, and no zero-grade dilution occurs.
+    comp_split = composite_drillhole_intervals(
+        df,
+        composite_length=2.0,
+        min_length_ratio=0.50,
+        unassayed_treatment="split",
+    )
+    assert len(comp_split) == 2
+    assert comp_split.iloc[0]["from_m"] == pytest.approx(0.0)
+    assert comp_split.iloc[0]["to_m"] == pytest.approx(1.0)
+    assert comp_split.iloc[0]["grade"] == pytest.approx(10.0)
+    assert comp_split.iloc[0]["coverage_ratio"] == pytest.approx(1.0)
+
+    assert comp_split.iloc[1]["from_m"] == pytest.approx(2.5)
+    assert comp_split.iloc[1]["to_m"] == pytest.approx(3.5)
+    assert comp_split.iloc[1]["grade"] == pytest.approx(4.0)
+    assert comp_split.iloc[1]["coverage_ratio"] == pytest.approx(1.0)
+    assert comp_split.attrs["contiguous_runs_count"] == 2
+
+
+def test_compositing_missing_grade_codes_and_nan():
+    """Verifies handling of explicit NaN and negative missing assay codes."""
+    df = pd.DataFrame({
+        "hole_id": ["DH01", "DH01", "DH01", "DH01"],
+        "from_m": [0.0, 2.0, 4.0, 6.0],
+        "to_m": [2.0, 4.0, 6.0, 8.0],
+        "grade": [5.0, np.nan, -999.0, 3.0],
+    })
+
+    # 1. Under "zero": missing intervals are treated as 0.0%
+    comp_zero = composite_drillhole_intervals(
+        df,
+        composite_length=4.0,
+        unassayed_treatment="zero",
+        unassayed_grade=0.0,
+    )
+    assert len(comp_zero) == 2
+    # Comp 1 [0, 4]: 2m @ 5.0% + 2m @ 0.0% -> grade = 2.5%, sampled_length = 2.0m
+    assert comp_zero.iloc[0]["grade"] == pytest.approx(2.5)
+    assert comp_zero.iloc[0]["sampled_length"] == pytest.approx(2.0)
+    # Comp 2 [4, 8]: 2m @ 0.0% + 2m @ 3.0% -> grade = 1.5%, sampled_length = 2.0m
+    assert comp_zero.iloc[1]["grade"] == pytest.approx(1.5)
+
+    # 2. Under "split": missing rows break runs
+    comp_split = composite_drillhole_intervals(
+        df,
+        composite_length=2.0,
+        unassayed_treatment="split",
+    )
+    # Only interval [0, 2] and [6, 8] are valid sampled runs
+    assert len(comp_split) == 2
+    assert comp_split.iloc[0]["grade"] == pytest.approx(5.0)
+    assert comp_split.iloc[1]["grade"] == pytest.approx(3.0)
+
+
+def test_compositing_min_coverage_ratio():
+    """Verifies that composites with low assay coverage are discarded when min_coverage_ratio is set."""
+    # 0.5m sampled @ 8.0%, 1.5m gap -> 2m composite has coverage_ratio = 0.5 / 2.0 = 0.25
+    df = pd.DataFrame({
+        "hole_id": ["DH01", "DH01"],
+        "from_m": [0.0, 2.0],
+        "to_m": [0.5, 4.0],
+        "grade": [8.0, 2.0],
+    })
+
+    # min_coverage_ratio = 0.50 -> Comp 1 ([0, 2], coverage 0.25) must be discarded!
+    # Comp 2 ([2, 4], coverage 1.0) is retained.
+    comp_cov = composite_drillhole_intervals(
+        df,
+        composite_length=2.0,
+        unassayed_treatment="zero",
+        min_coverage_ratio=0.50,
+    )
+    assert len(comp_cov) == 1
+    assert comp_cov.iloc[0]["from_m"] == pytest.approx(2.0)
+    assert comp_cov.attrs["discarded_low_coverage_count"] == 1
+
+
+def test_compositing_non_contiguous_domain_repetition():
+    """Verifies that repeating domains (A -> B -> A) are treated as distinct runs without crossing contacts."""
+    df = pd.DataFrame({
+        "hole_id": ["DH01", "DH01", "DH01"],
+        "from_m": [0.0, 6.0, 10.0],
+        "to_m": [6.0, 10.0, 16.0],
+        "grade": [3.0, 0.2, 5.0],
+        "domain": ["Ore", "Waste", "Ore"],
+    })
+
+    comp_dom = composite_drillhole_intervals(
+        df,
+        composite_length=2.0,
+        domain_col="domain",
+    )
+    # Ore run 1: [0, 2], [2, 4], [4, 6] (3 composites)
+    # Waste run: [6, 8], [8, 10] (2 composites)
+    # Ore run 2: [10, 12], [12, 14], [14, 16] (3 composites)
+    assert len(comp_dom) == 8
+    assert list(comp_dom["domain"]) == [
+        "Ore", "Ore", "Ore", "Waste", "Waste", "Ore", "Ore", "Ore"
+    ]
+    # Check that Ore run 1 ends at 6.0 and Ore run 2 starts at 10.0
+    assert comp_dom.iloc[2]["to_m"] == pytest.approx(6.0)
+    assert comp_dom.iloc[5]["from_m"] == pytest.approx(10.0)
+    assert comp_dom.attrs["contiguous_runs_count"] == 3
+
+
+def test_compositing_error_and_validation():
+    """Verifies strict validation of invalid intervals and unassayed_treatment='error'."""
+    # 1. from >= to
+    df_inv = pd.DataFrame({
+        "hole_id": ["DH01"],
+        "from_m": [5.0],
+        "to_m": [3.0],
+        "grade": [1.0],
+    })
+    with pytest.raises(ValueError, match="from_m .* >= to_m"):
+        composite_drillhole_intervals(df_inv, composite_length=2.0)
+
+    # 2. Overlapping intervals
+    df_overlap = pd.DataFrame({
+        "hole_id": ["DH01", "DH01"],
+        "from_m": [0.0, 2.0],
+        "to_m": [3.0, 5.0],  # row 1 ends at 3.0, but row 2 starts at 2.0
+        "grade": [1.0, 2.0],
+    })
+    with pytest.raises(ValueError, match="Overlapping intervals detected"):
+        composite_drillhole_intervals(df_overlap, composite_length=2.0)
+
+    # 3. unassayed_treatment="error" raises on unassayed gap
+    df_gap = pd.DataFrame({
+        "hole_id": ["DH01", "DH01"],
+        "from_m": [0.0, 5.0],
+        "to_m": [2.0, 7.0],
+        "grade": [1.0, 2.0],
+    })
+    with pytest.raises(ValueError, match="Unassayed depth gap"):
+        composite_drillhole_intervals(
+            df_gap, composite_length=2.0, unassayed_treatment="error"
+        )
+
+    # 4. Invalid treatment or parameter
+    with pytest.raises(ValueError, match="unassayed_treatment must be"):
+        composite_drillhole_intervals(
+            df_gap, composite_length=2.0, unassayed_treatment="invalid"
+        )
+    with pytest.raises(ValueError, match="min_coverage_ratio must be in"):
+        composite_drillhole_intervals(
+            df_gap, composite_length=2.0, min_coverage_ratio=1.5
+        )
 

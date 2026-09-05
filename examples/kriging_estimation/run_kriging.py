@@ -402,8 +402,8 @@ def main():
     gt_disp = gt_models["Ordinary Kriging (OK)"].copy()
     gt_disp["ore_tonnes"] = gt_disp["ore_tonnes"].map(lambda x: f"{x:,.0f}")
     gt_disp["ore_grade"] = gt_disp["ore_grade"].map(lambda x: f"{x:.3f}%")
-    gt_disp["waste_tonnes"] = gt_disp["waste_tonnes"].map(lambda x: f"{x:,.0f}")
-    gt_disp["strip_ratio"] = gt_disp["strip_ratio"].map(lambda x: f"{x:.2f}")
+    gt_disp["internal_waste_tonnes"] = gt_disp["internal_waste_tonnes"].map(lambda x: f"{x:,.0f}")
+    gt_disp["internal_waste_ratio"] = gt_disp["internal_waste_ratio"].map(lambda x: f"{x:.2f}")
     gt_disp["ore_recovery_pct"] = gt_disp["ore_recovery_pct"].map(lambda x: f"{x:.1f}%")
     gt_disp["metal_recovery_pct"] = gt_disp["metal_recovery_pct"].map(
         lambda x: f"{x:.1f}%"
@@ -413,8 +413,8 @@ def main():
             [
                 "ore_tonnes",
                 "ore_grade",
-                "waste_tonnes",
-                "strip_ratio",
+                "internal_waste_tonnes",
+                "internal_waste_ratio",
                 "ore_recovery_pct",
                 "metal_recovery_pct",
             ]
@@ -470,6 +470,7 @@ def main():
     selling_cost = 0.35 # $/lb Cu deductions (smelting, refining, transport)
     royalty_pct = 2.0   # 2% Net Smelter Return (NSR) royalty
     met_rec = 88.0      # 88% plant recovery
+    pay_factor = 95.0   # 95% smelter payable metal factor (copper benchmark)
     lbs_per_pct_t = 22.0462  # 1% Cu = 22.0462 lbs Cu per metric tonne
 
     # Calculate engineering cut-off grades
@@ -478,6 +479,7 @@ def main():
         ga_cost=ga_cost,
         mining_cost=mining_cost,
         commodity_price=cu_price,
+        payable_metal_factor=pay_factor,
         selling_cost=selling_cost,
         royalty_pct=royalty_pct,
         metallurgical_recovery=met_rec,
@@ -488,6 +490,7 @@ def main():
         ga_cost=ga_cost,
         mining_cost=None,
         commodity_price=cu_price,
+        payable_metal_factor=pay_factor,
         selling_cost=selling_cost,
         royalty_pct=royalty_pct,
         metallurgical_recovery=met_rec,
@@ -495,7 +498,7 @@ def main():
     )
 
     print("\n--- Engineering Cut-Off Grade Determination (Modifying Factors) ---")
-    print(f"Breakeven Economic Cut-Off : {co_breakeven:.3f}% Cu (Covers Mining, Processing, G&A, Royalties)")
+    print(f"Breakeven Economic Cut-Off : {co_breakeven:.3f}% Cu (Covers Mining, Processing, G&A, Royalties, 95% Payability)")
     print(f"Marginal / Internal Cut-Off: {co_marginal:.3f}% Cu (Covers Processing, G&A, Royalties; Sunk Mining)")
 
     # Site-specific mining modifying factors
@@ -509,7 +512,6 @@ def main():
         mining_recovery_pct=recovery_pct,
         cutoff_grade=base_cutoff,
         dilution_grade=dilution_grade,
-        allow_inferred=False,  # Strict regulatory compliance: Inferred cannot be reserves!
     )
 
     reserve_stmt = format_reserve_statement(

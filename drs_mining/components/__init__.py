@@ -1,11 +1,11 @@
 from drs import Flow, Entity, blend_flows, split_flow, Storage, Processor
 from .geology import MaterialSource, autocorrelated_generator
-from .logistics import truck_haul_capacity
+from .logistics import truck_haul_capacity, truck_cycle_time_breakdown
 from .modes import OperatingMode, RequireDecision
 from .estimation import (
     polygonal_estimation,
-    polygonal_reserve_summary,
-    format_reserve_summary,
+    polygonal_resource_summary,
+    format_polygonal_summary,
     grade_tonnage_table,
     plot_polygonal_map,
     inverse_distance_weighting,
@@ -19,11 +19,13 @@ from .estimation import (
     classify_resources_by_drill_spacing,
     classify_resources_by_sor,
     classify_resources_by_kriging_variance,
+    smooth_resource_categories,
     classify_mineral_resources,
     format_resource_statement,
     plot_swath_analysis,
     plot_cell_declustering_curve,
     calculate_cut_off_grade,
+    cut_off_grade_breakdown,
     convert_resource_to_reserve,
     format_reserve_statement,
     plot_resource_to_reserve_waterfall,
@@ -49,6 +51,9 @@ from .estimation import (
     plot_block_model_3d_isometric,
     plot_block_model_3d_interactive,
     plot_block_model_grade_uncertainty,
+    compute_anisotropy_rotation_matrix,
+    transform_anisotropic_coordinates,
+    compute_anisotropic_distance,
 )
 
 __all__ = [
@@ -61,11 +66,12 @@ __all__ = [
     "MaterialSource",
     "autocorrelated_generator",
     "truck_haul_capacity",
+    "truck_cycle_time_breakdown",
     "OperatingMode",
     "RequireDecision",
     "polygonal_estimation",
-    "polygonal_reserve_summary",
-    "format_reserve_summary",
+    "polygonal_resource_summary",
+    "format_polygonal_summary",
     "grade_tonnage_table",
     "plot_polygonal_map",
     "inverse_distance_weighting",
@@ -79,11 +85,13 @@ __all__ = [
     "classify_resources_by_drill_spacing",
     "classify_resources_by_sor",
     "classify_resources_by_kriging_variance",
+    "smooth_resource_categories",
     "classify_mineral_resources",
     "format_resource_statement",
     "plot_swath_analysis",
     "plot_cell_declustering_curve",
     "calculate_cut_off_grade",
+    "cut_off_grade_breakdown",
     "convert_resource_to_reserve",
     "format_reserve_statement",
     "plot_resource_to_reserve_waterfall",
@@ -109,4 +117,7 @@ __all__ = [
     "plot_block_model_3d_isometric",
     "plot_block_model_3d_interactive",
     "plot_block_model_grade_uncertainty",
+    "compute_anisotropy_rotation_matrix",
+    "transform_anisotropic_coordinates",
+    "compute_anisotropic_distance",
 ]

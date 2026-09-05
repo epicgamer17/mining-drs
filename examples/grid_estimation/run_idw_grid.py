@@ -237,11 +237,11 @@ def main():
     gt_disp = gt_models["IDW² (Full Extrapolation)"].copy()
     gt_disp["ore_tonnes"] = gt_disp["ore_tonnes"].map(lambda x: f"{x:,.0f}")
     gt_disp["ore_grade"] = gt_disp["ore_grade"].map(lambda x: f"{x:.3f}%")
-    gt_disp["waste_tonnes"] = gt_disp["waste_tonnes"].map(lambda x: f"{x:,.0f}")
-    gt_disp["strip_ratio"] = gt_disp["strip_ratio"].map(lambda x: f"{x:.2f}")
+    gt_disp["internal_waste_tonnes"] = gt_disp["internal_waste_tonnes"].map(lambda x: f"{x:,.0f}")
+    gt_disp["internal_waste_ratio"] = gt_disp["internal_waste_ratio"].map(lambda x: f"{x:.2f}")
     gt_disp["ore_recovery_pct"] = gt_disp["ore_recovery_pct"].map(lambda x: f"{x:.1f}%")
     gt_disp["metal_recovery_pct"] = gt_disp["metal_recovery_pct"].map(lambda x: f"{x:.1f}%")
-    print(gt_disp[["ore_tonnes", "ore_grade", "waste_tonnes", "strip_ratio", "ore_recovery_pct", "metal_recovery_pct"]].to_string())
+    print(gt_disp[["ore_tonnes", "ore_grade", "internal_waste_tonnes", "internal_waste_ratio", "ore_recovery_pct", "metal_recovery_pct"]].to_string())
 
     # 9. Official Mineral Resource Statement (NI 43-101 / JORC Code Compliant)
     categories = classify_resources_by_drill_spacing(
@@ -293,7 +293,6 @@ def main():
         mining_recovery_pct=recovery_pct,
         cutoff_grade=base_cutoff,
         dilution_grade=dilution_grade,
-        allow_inferred=False,
     )
 
     reserve_stmt = format_reserve_statement(

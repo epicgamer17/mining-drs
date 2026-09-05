@@ -8,6 +8,7 @@ Demonstrates the complete industry-standard workflow complying with CIM / NI 43-
 5. Production Reconciliation: Harry Parker (2012) F1, F2, F3 Mine-to-Mill performance factors.
 """
 
+import argparse
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -22,7 +23,7 @@ from drs_mining.components.estimation import (
     plot_contact_profile,
     ordinary_kriging_grid_estimation,
     calculate_cut_off_grade,
-    classify_resources_by_kriging_variance,
+    classify_mineral_resources,
     convert_resource_to_reserve,
     format_resource_statement,
     format_reserve_statement,
@@ -84,6 +85,14 @@ def generate_synthetic_deposit() -> pd.DataFrame:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="End-to-End Resource Estimation Workflow")
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Disable figure generation and file saving",
+    )
+    args = parser.parse_args()
+
     print("\n" + "=" * 75)
     print("      END-TO-END RESOURCE ESTIMATION & PRODUCTION RECONCILIATION WORKFLOW")
     print("=" * 75)
@@ -145,18 +154,19 @@ def main():
         print(f"  • Preferential Drilling Bias: {eda_summary.attrs['clustering_bias_pct']:+.1f}%")
 
     # Generate 3-Panel EDA Distribution Plot
-    fig_eda, _ = plot_eda_distributions(
-        capped_df,
-        grade_col="grade",
-        capped_grade_col="capped_grade",
-        cap_grade=cap_sum["cap_grade"],
-        grade_unit="% Cu",
-        title="Deposit Exploratory Data Analysis & Capping Validation",
-    )
-    eda_plot_path = plots_dir / "workflow_eda_distribution.png"
-    fig_eda.savefig(eda_plot_path, dpi=180, bbox_inches="tight")
-    plt.close(fig_eda)
-    print(f"  • EDA distribution plot saved to: {eda_plot_path}")
+    if not args.no_plot:
+        fig_eda, _ = plot_eda_distributions(
+            capped_df,
+            grade_col="grade",
+            capped_grade_col="capped_grade",
+            cap_grade=cap_sum["cap_grade"],
+            grade_unit="% Cu",
+            title="Deposit Exploratory Data Analysis & Capping Validation",
+        )
+        eda_plot_path = plots_dir / "workflow_eda_distribution.png"
+        fig_eda.savefig(eda_plot_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_eda)
+        print(f"  • EDA distribution plot saved to: {eda_plot_path}")
 
     # -------------------------------------------------------------------------
     # STAGE 3: SPATIAL DOMAIN DELINEATION (CONTACT ANALYSIS)
@@ -177,17 +187,18 @@ def main():
     print(f"  • Boundary Decision: {contact_df.attrs['boundary_type']}")
     print(f"  • Recommendation: {contact_df.attrs['recommendation']}")
 
-    fig_contact, _ = plot_contact_profile(
-        contact_df,
-        domain_a_name="Skarn Wall Rock",
-        domain_b_name="Porphyry Core",
-        grade_unit="% Cu",
-        title="Boundary Contact Analysis: Skarn vs. Porphyry Contact",
-    )
-    contact_plot_path = plots_dir / "workflow_contact_profile.png"
-    fig_contact.savefig(contact_plot_path, dpi=180, bbox_inches="tight")
-    plt.close(fig_contact)
-    print(f"  • Contact profile plot saved to: {contact_plot_path}")
+    if not args.no_plot:
+        fig_contact, _ = plot_contact_profile(
+            contact_df,
+            domain_a_name="Skarn Wall Rock",
+            domain_b_name="Porphyry Core",
+            grade_unit="% Cu",
+            title="Boundary Contact Analysis: Skarn vs. Porphyry Contact",
+        )
+        contact_plot_path = plots_dir / "workflow_contact_profile.png"
+        fig_contact.savefig(contact_plot_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_contact)
+        print(f"  • Contact profile plot saved to: {contact_plot_path}")
 
     # -------------------------------------------------------------------------
     # STAGE 4: INTERPOLATION & RESERVE CONVERSION
@@ -224,6 +235,7 @@ def main():
         ga_cost=2.20,
         commodity_price=3.80,
         metallurgical_recovery=88.0,
+        payable_metal_factor=0.95,  # 95% smelter copper payability
         mining_cost=2.40,
         selling_cost=0.35,
         metal_conversion_factor=22.0462,  # % Cu to lbs/t
@@ -231,10 +243,17 @@ def main():
     print(f"  • Economic Breakeven Cut-Off Grade: {cog:.3f}% Cu.")
 
     block_tonnes = 5000.0  # 5,000 t per block
-    block_cats = classify_resources_by_kriging_variance(
+    block_cats = classify_mineral_resources(
+        grid_points=grid_pts,
+        samples_xy=samples_xy,
         kriging_variances=ok_vars,
         variance_threshold_measured=0.12,
-        variance_threshold_indicated=1e9,
+        variance_threshold_indicated=0.25,
+        max_radius_measured=45.0,
+        max_radius_indicated=90.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        smoothing_radius=25.0,
     )
 
     block_res_df = pd.DataFrame({
@@ -278,19 +297,20 @@ def main():
     print(res_stmt_table.to_string(index=False))
 
     # Save Waterfall Bridge
-    fig_wf, _ = plot_resource_to_reserve_waterfall(
-        block_res_df,
-        reserve_df,
-        cutoff_grade=cog,
-        mining_dilution_pct=6.0,
-        mining_recovery_pct=94.0,
-        dilution_grade=0.10,
-        grade_unit="% Cu",
-    )
-    wf_plot_path = plots_dir / "workflow_reserve_waterfall.png"
-    fig_wf.savefig(wf_plot_path, dpi=180, bbox_inches="tight")
-    plt.close(fig_wf)
-    print(f"  • Reserve reconciliation waterfall saved to: {wf_plot_path}")
+    if not args.no_plot:
+        fig_wf, _ = plot_resource_to_reserve_waterfall(
+            block_res_df,
+            reserve_df,
+            cutoff_grade=cog,
+            mining_dilution_pct=6.0,
+            mining_recovery_pct=94.0,
+            dilution_grade=0.10,
+            grade_unit="% Cu",
+        )
+        wf_plot_path = plots_dir / "workflow_reserve_waterfall.png"
+        fig_wf.savefig(wf_plot_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_wf)
+        print(f"  • Reserve reconciliation waterfall saved to: {wf_plot_path}")
 
     # -------------------------------------------------------------------------
     # STAGE 5: PRODUCTION RECONCILIATION (PARKER F1, F2, F3 FACTORS)
@@ -313,9 +333,22 @@ def main():
         gc_t = res_t * np.random.uniform(0.98, 1.04)
         gc_g = res_g * np.random.uniform(0.97, 1.03)
 
-        # Actual mill received (weightometer + mill head grade assay): operational dilution
-        mill_t = gc_t * np.random.uniform(0.99, 1.05)
-        mill_g = gc_g * np.random.uniform(0.96, 1.01)
+        # Operational intermediate ROM stockpile movements (buildup in dry months, drawdown in wet months)
+        # Months 1-4: pit dumps ~0.02 Mt into ROM stockpile buffer
+        # Months 7-9: mill reclaims ~0.02-0.03 Mt from ROM stockpile
+        if m in ("Jan", "Feb", "Mar", "Apr"):
+            sp_delta_t = 0.02 * 1e6
+            sp_delta_g = gc_g
+        elif m in ("Jul", "Aug", "Sep"):
+            sp_delta_t = -0.025 * 1e6
+            sp_delta_g = gc_g
+        else:
+            sp_delta_t = 0.00
+            sp_delta_g = gc_g
+
+        # Direct mill feed from pit = gc_t - sp_delta_t (plus minor milling operational noise)
+        mill_t = (gc_t - sp_delta_t) * np.random.uniform(0.99, 1.01)
+        mill_g = gc_g * np.random.uniform(0.98, 1.01)
 
         prod_records.append({
             "period": m,
@@ -325,6 +358,8 @@ def main():
             "gc_g": gc_g,
             "mill_t": mill_t / 1e6,
             "mill_g": mill_g,
+            "sp_delta_t": sp_delta_t / 1e6,
+            "sp_delta_g": sp_delta_g,
         })
     p_df = pd.DataFrame(prod_records)
 
@@ -332,6 +367,7 @@ def main():
         reserve_data=p_df[["period", "res_t", "res_g"]].rename(columns={"res_t": "tonnes", "res_g": "grade"}),
         plant_data=p_df[["period", "mill_t", "mill_g"]].rename(columns={"mill_t": "tonnes", "mill_g": "grade"}),
         grade_control_data=p_df[["period", "gc_t", "gc_g"]].rename(columns={"gc_t": "tonnes", "gc_g": "grade"}),
+        stockpile_data=p_df[["period", "sp_delta_t", "sp_delta_g"]].rename(columns={"sp_delta_t": "delta_tonnes", "sp_delta_g": "delta_grade"}),
         period_col="period",
         grade_unit="% Cu",
     )
@@ -339,27 +375,30 @@ def main():
     print("\n--- Harry Parker (2012) Mine-to-Mill Reconciliation Summary ---")
     cols_display = [
         "period",
-        "f1_tonnes_ratio", "f1_grade_ratio", "f1_metal_factor",
-        "f2_tonnes_ratio", "f2_grade_ratio", "f2_metal_factor",
-        "f3_metal_factor",
+        "f1_metal_factor",
+        "f2_metal_factor", "f2_adj_metal_factor",
+        "f3_metal_factor", "f3_adj_metal_factor",
     ]
     print(reconcile_df[cols_display].round(3).to_string(index=False))
-    print(f"\n  • System Health Diagnosis: {reconcile_df.attrs['health_status']}")
-    print(f"  • Cumulative F1 (Model to Mine) : {reconcile_df.attrs['f1_factor']:.3f}")
-    print(f"  • Cumulative F2 (Mine to Mill)  : {reconcile_df.attrs['f2_factor']:.3f}")
-    print(f"  • Cumulative F3 (Total Value)   : {reconcile_df.attrs['f3_factor']:.3f}")
+    print(f"\n  • Stockpile Accounting   : {reconcile_df.attrs['stockpile_mode']}")
+    print(f"  • System Health Diagnosis: {reconcile_df.attrs['health_status']}")
+    print(f"  • Cumulative F1 (Model to Mine)     : {reconcile_df.attrs['f1_factor']:.3f}")
+    print(f"  • Cumulative F2 (Direct Delivery)   : {reconcile_df.attrs['f2_unadjusted_factor']:.3f}")
+    print(f"  • Cumulative F2 (Stockpile-Adjusted): {reconcile_df.attrs['f2_adjusted_factor']:.3f}")
+    print(f"  • Cumulative F3 (Total Realization) : {reconcile_df.attrs['f3_factor']:.3f}")
 
-    fig_rec, _ = plot_production_reconciliation(
-        reconcile_df,
-        grade_unit="% Cu",
-        tonnage_unit="Mt",
-        metal_unit="kt",
-        title="12-Month Mine-to-Mill Production Reconciliation Dashboard (Parker F-Factors)",
-    )
-    rec_plot_path = plots_dir / "workflow_production_reconciliation.png"
-    fig_rec.savefig(rec_plot_path, dpi=180, bbox_inches="tight")
-    plt.close(fig_rec)
-    print(f"  • Reconciliation dashboard saved to: {rec_plot_path}")
+    if not args.no_plot:
+        fig_rec, _ = plot_production_reconciliation(
+            reconcile_df,
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            metal_unit="kt",
+            title="12-Month Mine-to-Mill Production Reconciliation Dashboard (Parker F-Factors & Stockpile Accounting)",
+        )
+        rec_plot_path = plots_dir / "workflow_production_reconciliation.png"
+        fig_rec.savefig(rec_plot_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_rec)
+        print(f"  • Reconciliation dashboard saved to: {rec_plot_path}")
 
     print("\n" + "=" * 75)
     print("                 WORKFLOW EXECUTION COMPLETE")

@@ -33,8 +33,9 @@ pip install mining-drs
 | PyTorch parallels | [Section 3](#3-the-pytorch-parallels-dictionary) |
 | Engine internals | [Section 4](#4-how-the-engine-works-the-core-logic) |
 | Your first simulator | [Section 5](#5-building-your-first-simulator) |
-| Design philosophy | [Section 6](#6-advanced-design-choices--philosophy) |
-| Roadmap | [Section 7](#7-whats-next-roadmap) |
+| Ready-to-run examples | [Section 6](#6-ready-to-run-examples--mining-toolsets) |
+| Design philosophy | [Section 7](#7-advanced-design-choices--philosophy) |
+| Roadmap | [Section 8](#8-whats-next-roadmap) |
 
 ---
 
@@ -188,7 +189,25 @@ dashboard.savefig("results.png")
 
 ---
 
-## 6. Advanced Design Choices & Philosophy
+## 6. Ready-to-Run Examples & Mining Toolsets
+
+The `examples/` directory contains complete, runnable engineering workflows with rich plotting dashboards and regulatory compliance outputs:
+
+| Domain | Script | What It Demonstrates |
+|---|---|---|
+| **Haulage & Logistics** | [`examples/haulage_fleet_sizing/run_haulage.py`](examples/haulage_fleet_sizing/run_haulage.py) | Open-pit haul truck cycle time breakdown (fixed, loaded haul, empty return, congestion queueing), fleet sizing for target throughput, and pit deepening / payload class sensitivities (SME Handbook §9.2). |
+| **End-to-End Workflow** | [`examples/resource_estimation_workflow/run_workflow.py`](examples/resource_estimation_workflow/run_workflow.py) | Complete 5-stage workflow: regular down-hole compositing with domain contact constraints, P99 high-grade capping, EDA with declustering, contact profile analysis (hard vs. soft boundaries), multi-domain Ordinary Kriging, RPEEE resource & reserve statements, and Harry Parker (2012) $F_1, F_2, F_3$ reconciliation with stockpile accounting. |
+| **3D Block Kriging** | [`examples/block_model_kriging/run_block_kriging.py`](examples/block_model_kriging/run_block_kriging.py) | 3D Selective Mining Unit (SMU) block model estimation, point discretization support effect, Kriging Neighborhood Analysis (SoR and KE), multi-criteria classification, and the 4 visualization archetypes (orthogonal slices, multi-bench gallery, 3D isometric view, dual uncertainty audit). |
+| **2D Kriging & Variography** | [`examples/kriging_estimation/run_kriging.py`](examples/kriging_estimation/run_kriging.py) | 2D geostatistical Ordinary Kriging vs. Simple Kriging, spherical variography, convex hull extrapolation auditing, and grade-tonnage sensitivity. |
+| **2D Grid & IDW** | [`examples/grid_estimation/run_idw_grid.py`](examples/grid_estimation/run_idw_grid.py) | Spatial interpolation comparing Nearest Neighbor, IDW² ($p=2$), and IDW¹ ($p=1$), cell declustering, swath analysis, and resource/reserve conversion. |
+| **Polygonal Estimation** | [`examples/polygonal_estimation/run_estimation.py`](examples/polygonal_estimation/run_estimation.py) | Geometric Voronoi polygons of influence, concession boundary clipping, in-situ resource summary, and NI 43-101 / JORC reporting. |
+| **Supply Chain & Blending** | [`examples/blending_modes/simulation.py`](examples/blending_modes/simulation.py) & [`examples/navarra_tactical/simulation.py`](examples/navarra_tactical/simulation.py) | Discrete rate simulation, dynamic operational blending modes, and tactical mine scheduling. |
+
+All scripts support headless execution via `--no-plot` for continuous integration and automated pipeline testing.
+
+---
+
+## 7. Advanced Design Choices & Philosophy
 
 If you are a developer looking under the hood, here is why we built Mining-DRS this way, along with the pros and cons of these decisions:
 
@@ -219,7 +238,7 @@ The system is built to support parallel execution for Monte Carlo simulations.
 
 ---
 
-## 7. What's Next? (Roadmap)
+## 8. What's Next? (Roadmap)
 
 We have big plans for the future of Mining-DRS:
 - **Visual Interface:** A web-based, Arena-style drag-and-drop UI where non-programmers can build physical flow networks visually, which automatically translates into Python code (and vice versa).
