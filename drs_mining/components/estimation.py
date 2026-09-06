@@ -835,6 +835,144 @@ def compute_anisotropic_distance(
         return np.linalg.norm(c1_t, axis=-1)
 
 
+def _resolve_domain_parameter(param: Any, domain: Any, default: Any = None) -> Any:
+    """Resolves a parameter that may be a mapping per domain or a global scalar/sequence."""
+    if isinstance(param, Mapping):
+        if domain in param:
+            return param[domain]
+        return default if default is not None else param
+    return param
+
+
+def _validate_domain_pairing(
+    sample_domains: Optional[Sequence[Any]],
+    grid_domains: Optional[Sequence[Any]],
+    n_samples: int,
+    n_grid: int,
+    sample_name: str = "samples_xy",
+    grid_name: str = "grid_points",
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Validates that sample and grid domain arrays are paired and match sample/grid lengths."""
+    if (sample_domains is None) != (grid_domains is None):
+        raise ValueError(
+            "Both sample_domains and grid_domains must be provided together."
+        )
+    if sample_domains is not None and grid_domains is not None:
+        s_dom = np.asarray(sample_domains)
+        g_dom = np.asarray(grid_domains)
+        if len(s_dom) != n_samples:
+            raise ValueError(
+                f"sample_domains length ({len(s_dom)}) must match {sample_name} ({n_samples})."
+            )
+        if len(g_dom) != n_grid:
+            raise ValueError(
+                f"grid_domains length ({len(g_dom)}) must match {grid_name} ({n_grid})."
+            )
+        return s_dom, g_dom
+    return None, None
+
+
+def _generate_block_discretization_offsets(
+    discretization: Tuple[int, int, int],
+    block_size: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> np.ndarray:
+    """Generates 3D internal discretization sub-points relative to block centroid."""
+    nx, ny, nz = discretization
+    dx, dy, dz = block_size
+    if nx == 1 and ny == 1 and nz == 1:
+        return np.zeros((1, 3), dtype=float)
+    x_offsets = ((np.arange(nx) + 0.5) / nx - 0.5) * dx
+    y_offsets = ((np.arange(ny) + 0.5) / ny - 0.5) * dy
+    z_offsets = ((np.arange(nz) + 0.5) / nz - 0.5) * dz
+    xx, yy, zz = np.meshgrid(x_offsets, y_offsets, z_offsets, indexing="ij")
+    return np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+
+
+def _deduplicate_collocated_samples(
+    coords: np.ndarray,
+    grades: np.ndarray,
+    target_point: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Deduplicates collocated sample coordinates by averaging grades to avoid singular Kriging matrices.
+
+    Returns
+    -------
+    coords : np.ndarray
+        Unique sample coordinates of shape (k, dim).
+    grades : np.ndarray
+        Averaged sample grades of shape (k,).
+    h_matrix : np.ndarray
+        Inter-sample distance matrix of shape (k, k) with 0.0 on diagonal.
+    d_target : np.ndarray, optional
+        Distances from samples to target_point if provided.
+    """
+    k = len(coords)
+    if k <= 1:
+        diff_matrix = coords[:, None, :] - coords[None, :, :]
+        h_matrix = np.linalg.norm(diff_matrix, axis=2)
+        d_target = (
+            np.linalg.norm(coords - target_point, axis=1)
+            if target_point is not None
+            else None
+        )
+        return coords, grades, h_matrix, d_target
+
+    diff_matrix = coords[:, None, :] - coords[None, :, :]
+    h_matrix = np.linalg.norm(diff_matrix, axis=2)
+    np.fill_diagonal(h_matrix, np.inf)
+    d_target = (
+        np.linalg.norm(coords - target_point, axis=1)
+        if target_point is not None
+        else None
+    )
+
+    if np.any(h_matrix < 1e-6):
+        unique_coords, inverse_indices = np.unique(
+            coords.round(decimals=5), axis=0, return_inverse=True
+        )
+        if len(unique_coords) < k:
+            new_grades = np.zeros(len(unique_coords), dtype=float)
+            for u_idx in range(len(unique_coords)):
+                new_grades[u_idx] = grades[inverse_indices == u_idx].mean()
+            coords = unique_coords
+            grades = new_grades
+            if target_point is not None:
+                d_target = np.linalg.norm(coords - target_point, axis=1)
+            diff_matrix = coords[:, None, :] - coords[None, :, :]
+            h_matrix = np.linalg.norm(diff_matrix, axis=2)
+
+    np.fill_diagonal(h_matrix, 0.0)
+    return coords, grades, h_matrix, d_target
+
+
+def _solve_ordinary_kriging_system(
+    K: np.ndarray,
+    k0: np.ndarray,
+) -> Tuple[np.ndarray, float]:
+    """Solves the augmented Ordinary Kriging linear system for weights and Lagrange multiplier.
+
+    [ K   1 ] [ lambda ] = [ k0 ]
+    [ 1^T 0 ] [   mu   ]   [  1 ]
+
+    Returns
+    -------
+    weights : np.ndarray
+        Ordinary Kriging weights lambda of shape (k,) summing to 1.0.
+    mu : float
+        Lagrange multiplier.
+    """
+    k = len(k0)
+    A = np.ones((k + 1, k + 1), dtype=float)
+    A[:k, :k] = K
+    A[k, k] = 0.0
+
+    rhs = np.ones(k + 1, dtype=float)
+    rhs[:k] = k0
+
+    solution = np.linalg.solve(A, rhs)
+    return solution[:k], float(solution[k])
+
+
 # TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
 # Current status: Point-support interpolation (V -> 0) on coordinate arrays.
 # Guidelines from CONTRIBUTING.md to adhere to:
@@ -902,24 +1040,12 @@ def inverse_distance_weighting(
     distances : np.ndarray
         Distances to informing samples. Shape (M,) if k=1, else (M, k).
     """
-    if (sample_domains is None) != (grid_domains is None):
-        raise ValueError(
-            "Both sample_domains and grid_domains must be provided together."
-        )
+    s_dom, g_dom = _validate_domain_pairing(
+        sample_domains, grid_domains, len(samples_xy), len(grid_points)
+    )
 
     # Handle domain-segregated estimation
-    if sample_domains is not None and grid_domains is not None:
-        s_dom = np.asarray(sample_domains)
-        g_dom = np.asarray(grid_domains)
-        if len(s_dom) != len(samples_xy):
-            raise ValueError(
-                f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)})."
-            )
-        if len(g_dom) != len(grid_points):
-            raise ValueError(
-                f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)})."
-            )
-
+    if s_dom is not None and g_dom is not None:
         estimated_grades = np.full(len(grid_points), np.nan)
         dist_shape = (
             (len(grid_points),) if k_neighbors == 1 else (len(grid_points), k_neighbors)
@@ -931,16 +1057,8 @@ def inverse_distance_weighting(
             s_mask = s_dom == dom
             if not np.any(s_mask):
                 continue
-            dom_aniso_ranges = (
-                anisotropy_ranges[dom]
-                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
-                else anisotropy_ranges
-            )
-            dom_aniso_angles = (
-                anisotropy_angles[dom]
-                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
-                else anisotropy_angles
-            )
+            dom_aniso_ranges = _resolve_domain_parameter(anisotropy_ranges, dom)
+            dom_aniso_angles = _resolve_domain_parameter(anisotropy_angles, dom)
             est_dom, dist_dom = inverse_distance_weighting(
                 samples_xy[s_mask],
                 sample_grades[s_mask],
@@ -1609,46 +1727,24 @@ def simple_kriging_grid_estimation(
     kriging_variance : np.ndarray
         Estimation variance sigma_SK^2 of shape (M,).
     """
-    if (sample_domains is None) != (grid_domains is None):
-        raise ValueError(
-            "Both sample_domains and grid_domains must be provided together."
-        )
+    s_dom, g_dom = _validate_domain_pairing(
+        sample_domains, grid_domains, len(samples_xy), len(grid_points)
+    )
 
     # Handle domain-segregated estimation
-    if sample_domains is not None and grid_domains is not None:
-        s_dom = np.asarray(sample_domains)
-        g_dom = np.asarray(grid_domains)
-        if len(s_dom) != len(samples_xy):
-            raise ValueError(
-                f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)})."
-            )
-        if len(g_dom) != len(grid_points):
-            raise ValueError(
-                f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)})."
-            )
-
+    if s_dom is not None and g_dom is not None:
         estimates = np.full(len(grid_points), np.nan)
         variances = np.full(len(grid_points), np.nan)
 
         for dom in np.unique(g_dom):
             g_mask = g_dom == dom
             s_mask = s_dom == dom
-            dom_mean = mean[dom] if isinstance(mean, Mapping) else mean
-            dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
-            dom_range = (
-                range_param[dom] if isinstance(range_param, Mapping) else range_param
-            )
-            dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
-            dom_aniso_ranges = (
-                anisotropy_ranges[dom]
-                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
-                else anisotropy_ranges
-            )
-            dom_aniso_angles = (
-                anisotropy_angles[dom]
-                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
-                else anisotropy_angles
-            )
+            dom_mean = _resolve_domain_parameter(mean, dom)
+            dom_sill = _resolve_domain_parameter(sill, dom)
+            dom_range = _resolve_domain_parameter(range_param, dom)
+            dom_nugget = _resolve_domain_parameter(nugget, dom)
+            dom_aniso_ranges = _resolve_domain_parameter(anisotropy_ranges, dom)
+            dom_aniso_angles = _resolve_domain_parameter(anisotropy_angles, dom)
 
             if not np.any(s_mask):
                 estimates[g_mask] = dom_mean
@@ -1745,28 +1841,12 @@ def simple_kriging_grid_estimation(
         grades_m = sample_grades[idx_m]
 
         # Deduplicate identical sample coordinates (e.g. twin drillholes or duplicate assays)
-        if k_m > 1:
-            diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
-            h_matrix = np.linalg.norm(diff_matrix, axis=2)
-            np.fill_diagonal(h_matrix, np.inf)
-            if np.any(h_matrix < 1e-6):
-                unique_coords, inverse_indices = np.unique(
-                    coords_m.round(decimals=5), axis=0, return_inverse=True
-                )
-                if len(unique_coords) < k_m:
-                    new_grades = np.zeros(len(unique_coords), dtype=float)
-                    for u_idx in range(len(unique_coords)):
-                        new_grades[u_idx] = grades_m[inverse_indices == u_idx].mean()
-                    coords_m = unique_coords
-                    grades_m = new_grades
-                    d_m = np.linalg.norm(coords_m - grid_t[m], axis=1)
-                    k_m = len(coords_m)
-                    diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
-                    h_matrix = np.linalg.norm(diff_matrix, axis=2)
-            np.fill_diagonal(h_matrix, 0.0)
-        else:
-            diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
-            h_matrix = np.linalg.norm(diff_matrix, axis=2)
+        coords_m, grades_m, h_matrix, d_m_new = _deduplicate_collocated_samples(
+            coords_m, grades_m, target_point=grid_t[m]
+        )
+        if d_m_new is not None:
+            d_m = d_m_new
+        k_m = len(coords_m)
 
         K_m = _theoretical_covariance(
             h_matrix, variogram_model, base_nugget, base_sill, eff_range
@@ -1863,23 +1943,11 @@ def ordinary_kriging_grid_estimation(
     kriging_variance : np.ndarray
         Estimation variance sigma_OK^2 of shape (M,).
     """
-    if (sample_domains is None) != (grid_domains is None):
-        raise ValueError(
-            "Both sample_domains and grid_domains must be provided together."
-        )
-
     # Handle domain-segregated estimation
-    if sample_domains is not None and grid_domains is not None:
-        s_dom = np.asarray(sample_domains)
-        g_dom = np.asarray(grid_domains)
-        if len(s_dom) != len(samples_xy):
-            raise ValueError(
-                f"sample_domains length ({len(s_dom)}) must match samples_xy ({len(samples_xy)})."
-            )
-        if len(g_dom) != len(grid_points):
-            raise ValueError(
-                f"grid_domains length ({len(g_dom)}) must match grid_points ({len(grid_points)})."
-            )
+    if sample_domains is not None or grid_domains is not None:
+        s_dom, g_dom = _validate_domain_pairing(
+            sample_domains, grid_domains, len(samples_xy), len(grid_points)
+        )
 
         estimates = np.full(len(grid_points), np.nan)
         variances = np.full(len(grid_points), np.nan)
@@ -1887,20 +1955,14 @@ def ordinary_kriging_grid_estimation(
         for dom in np.unique(g_dom):
             g_mask = g_dom == dom
             s_mask = s_dom == dom
-            dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
-            dom_range = (
-                range_param[dom] if isinstance(range_param, Mapping) else range_param
+            dom_sill = _resolve_domain_parameter(sill, dom, sill)
+            dom_range = _resolve_domain_parameter(range_param, dom, range_param)
+            dom_nugget = _resolve_domain_parameter(nugget, dom, nugget)
+            dom_aniso_ranges = _resolve_domain_parameter(
+                anisotropy_ranges, dom, anisotropy_ranges
             )
-            dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
-            dom_aniso_ranges = (
-                anisotropy_ranges[dom]
-                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
-                else anisotropy_ranges
-            )
-            dom_aniso_angles = (
-                anisotropy_angles[dom]
-                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
-                else anisotropy_angles
+            dom_aniso_angles = _resolve_domain_parameter(
+                anisotropy_angles, dom, anisotropy_angles
             )
 
             if not np.any(s_mask):
@@ -1981,7 +2043,6 @@ def ordinary_kriging_grid_estimation(
 
         d_m = distances[m][valid_mask]
         idx_m = indices[m][valid_mask]
-        k_m = len(idx_m)
 
         # Exact collocation: if target lies directly on a sample point
         if d_m[0] < 1e-6:
@@ -1994,28 +2055,12 @@ def ordinary_kriging_grid_estimation(
         grades_m = sample_grades[idx_m]
 
         # Deduplicate identical sample coordinates (e.g. twin drillholes or duplicate assays)
-        if k_m > 1:
-            diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
-            h_matrix = np.linalg.norm(diff_matrix, axis=2)
-            np.fill_diagonal(h_matrix, np.inf)
-            if np.any(h_matrix < 1e-6):
-                unique_coords, inverse_indices = np.unique(
-                    coords_m.round(decimals=5), axis=0, return_inverse=True
-                )
-                if len(unique_coords) < k_m:
-                    new_grades = np.zeros(len(unique_coords), dtype=float)
-                    for u_idx in range(len(unique_coords)):
-                        new_grades[u_idx] = grades_m[inverse_indices == u_idx].mean()
-                    coords_m = unique_coords
-                    grades_m = new_grades
-                    d_m = np.linalg.norm(coords_m - grid_t[m], axis=1)
-                    k_m = len(coords_m)
-                    diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
-                    h_matrix = np.linalg.norm(diff_matrix, axis=2)
-            np.fill_diagonal(h_matrix, 0.0)
-        else:
-            diff_matrix = coords_m[:, None, :] - coords_m[None, :, :]
-            h_matrix = np.linalg.norm(diff_matrix, axis=2)
+        coords_m, grades_m, h_matrix, d_target_m = _deduplicate_collocated_samples(
+            coords_m, grades_m, target_point=grid_t[m]
+        )
+        if d_target_m is not None:
+            d_m = d_target_m
+        k_m = len(coords_m)
 
         K_m = _theoretical_covariance(
             h_matrix, variogram_model, base_nugget, base_sill, eff_range
@@ -2027,24 +2072,8 @@ def ordinary_kriging_grid_estimation(
             d_m, variogram_model, base_nugget, base_sill, eff_range
         )
 
-        # Build augmented Ordinary Kriging matrix K_aug of shape (k_m + 1, k_m + 1):
-        # [ K_m   1 ]
-        # [ 1^T   0 ]
-        K_aug = np.ones((k_m + 1, k_m + 1))
-        K_aug[:k_m, :k_m] = K_m
-        K_aug[k_m, k_m] = 0.0
-
-        # Build augmented target vector k0_aug of shape (k_m + 1,):
-        # [ k0_m ]
-        # [  1   ]
-        k0_aug = np.ones(k_m + 1)
-        k0_aug[:k_m] = k0_m
-        k0_aug[k_m] = 1.0
-
         # Solve linear system: K_aug * [lambda; mu_lagrange] = k0_aug
-        solution = np.linalg.solve(K_aug, k0_aug)
-        weights_m = solution[:k_m]
-        mu_lagrange = solution[k_m]
+        weights_m, mu_lagrange = _solve_ordinary_kriging_system(K_m, k0_m)
 
         # Ordinary Kriging estimate: Z*_OK = sum_i lambda_i * Z(x_i)
         estimates[m] = np.sum(weights_m * grades_m)
@@ -2065,6 +2094,69 @@ def ordinary_kriging_grid_estimation(
 # =============================================================================
 # 3D BLOCK MODELING & BLOCK KRIGING (SUPPORT EFFECT & DISCRETIZATION)
 # =============================================================================
+
+
+def compute_block_dispersion_variance(
+    block_size: Tuple[float, float, float],
+    discretization: Tuple[int, int, int],
+    variogram_model: str,
+    sill: float,
+    range_param: Union[float, Sequence[float], Mapping[str, float]],
+    nugget: float = 0.0,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
+) -> float:
+    """Computes block self-covariance / dispersion variance C_bar(V, V) via internal point discretization.
+
+    In accordance with geostatistical support effect principles (CIM MRMR Guidelines §6.9,
+    SME Mining Engineering Handbook §4.5, and JORC Code Table 1) (TODO: Manually Verify),
+    evaluates average point-to-point covariance within an SMU block:
+    C_bar(V, V) = (1 / M^2) * sum_{i=1}^M sum_{j=1}^M C(u_i - u_j).
+
+    Parameters
+    ----------
+    block_size : tuple of (float, float, float)
+        Physical SMU block dimensions (dx, dy, dz).
+    discretization : tuple of (int, int, int)
+        Internal point discretization grid (nx, ny, nz) per block.
+    variogram_model : str
+        Spatial covariance model ("spherical", "exponential", "gaussian").
+    sill : float
+        Partial sill variance.
+    range_param : float, Sequence[float], or Mapping
+        Spatial correlation range.
+    nugget : float, default 0.0
+        Nugget variance.
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional search/variogram ranges in 3D.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth, dip, plunge) in 3D.
+
+    Returns
+    -------
+    float
+        Block dispersion variance / self-covariance C_bar(V, V).
+    """
+    disc_offsets = _generate_block_discretization_offsets(discretization, block_size)
+    eff_ranges = (
+        anisotropy_ranges
+        if anisotropy_ranges is not None
+        else (
+            range_param if isinstance(range_param, (Sequence, Mapping)) else range_param
+        )
+    )
+    disc_offsets_t, eff_range = transform_anisotropic_coordinates(
+        disc_offsets, ranges=eff_ranges, angles=anisotropy_angles
+    )
+    internal_diffs = disc_offsets_t[:, None, :] - disc_offsets_t[None, :, :]
+    internal_dists = np.linalg.norm(internal_diffs, axis=2)
+    internal_covs = _theoretical_covariance(
+        internal_dists, variogram_model, nugget, sill, eff_range
+    )
+    c_vv = float(np.mean(internal_covs))
+    return max(0.0, c_vv)
 
 
 def create_block_model(
@@ -2233,20 +2325,14 @@ def ordinary_kriging_block_estimation(
         for dom in np.unique(b_dom_arr):
             b_mask = b_dom_arr == dom
             s_mask = s_dom_arr == dom
-            dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
-            dom_range = (
-                range_param[dom] if isinstance(range_param, Mapping) else range_param
+            dom_sill = _resolve_domain_parameter(sill, dom, sill)
+            dom_range = _resolve_domain_parameter(range_param, dom, range_param)
+            dom_nugget = _resolve_domain_parameter(nugget, dom, nugget)
+            dom_aniso_ranges = _resolve_domain_parameter(
+                anisotropy_ranges, dom, anisotropy_ranges
             )
-            dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
-            dom_aniso_ranges = (
-                anisotropy_ranges[dom]
-                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
-                else anisotropy_ranges
-            )
-            dom_aniso_angles = (
-                anisotropy_angles[dom]
-                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
-                else anisotropy_angles
+            dom_aniso_angles = _resolve_domain_parameter(
+                anisotropy_angles, dom, anisotropy_angles
             )
 
             if not np.any(s_mask):
@@ -2295,16 +2381,21 @@ def ordinary_kriging_block_estimation(
     dy = float(block_model["dy"].iloc[0])
     dz = float(block_model["dz"].iloc[0])
 
-    # 1. Compute 1D offset positions centered at 0 within [-dx/2, +dx/2]
-    x_offsets = ((np.arange(nx) + 0.5) / nx - 0.5) * dx
-    y_offsets = ((np.arange(ny) + 0.5) / ny - 0.5) * dy
-    z_offsets = ((np.arange(nz) + 0.5) / nz - 0.5) * dz
+    c_vv = compute_block_dispersion_variance(
+        block_size=(dx, dy, dz),
+        discretization=discretization,
+        variogram_model=variogram_model,
+        sill=base_sill,
+        range_param=base_range,
+        nugget=base_nugget,
+        anisotropy_ranges=anisotropy_ranges,
+        anisotropy_angles=anisotropy_angles,
+    )
+    block_dispersion_var = c_vv
 
-    # 2. Meshgrid to create all 3D relative coordinate combinations
-    xx, yy, zz = np.meshgrid(x_offsets, y_offsets, z_offsets, indexing="ij")
-    disc_offsets = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
-
-    # 3. Anisotropy Transformation
+    disc_offsets = _generate_block_discretization_offsets(
+        discretization, (dx, dy, dz)
+    )
     eff_ranges = (
         anisotropy_ranges
         if anisotropy_ranges is not None
@@ -2315,15 +2406,6 @@ def ordinary_kriging_block_estimation(
     disc_offsets_t, eff_range = transform_anisotropic_coordinates(
         disc_offsets, ranges=eff_ranges, angles=anisotropy_angles
     )
-
-    # 4. Compute Block Self-Covariance C_bar(V, V) in transformed space
-    internal_diffs = disc_offsets_t[:, None, :] - disc_offsets_t[None, :, :]
-    internal_dists = np.linalg.norm(internal_diffs, axis=2)
-    internal_covs = _theoretical_covariance(
-        internal_dists, variogram_model, base_nugget, base_sill, eff_range
-    )
-    c_vv = float(np.mean(internal_covs))
-    block_dispersion_var = max(0.0, c_vv)
 
     # 5. Neighbor Search Setup & Spatial Query in transformed space
     upper_bound = max_radius if max_radius is not None else float("inf")
@@ -2397,18 +2479,8 @@ def ordinary_kriging_block_estimation(
         # Regularize diagonal to avoid singularity from collocated/close samples
         K_mat[np.diag_indices(k_active)] += 1e-9
 
-        # e. Assemble (k+1) x (k+1) Ordinary Kriging system:
-        A = np.ones((k_active + 1, k_active + 1), dtype=float)
-        A[:k_active, :k_active] = K_mat
-        A[k_active, k_active] = 0.0
-
-        rhs = np.ones(k_active + 1, dtype=float)
-        rhs[:k_active] = k0_block
-
         try:
-            solution = np.linalg.solve(A, rhs)
-            weights = solution[:k_active]
-            mu = solution[k_active]
+            weights, mu = _solve_ordinary_kriging_system(K_mat, k0_block)
             # Block Grade Estimate: Z*(V) = sum(lambda_i * Z_i)
             block_estimates[b] = float(np.sum(weights * grades_active))
             # Block Kriging Variance: sigma_OK^2 = C_bar(V, V) - sum(lambda_i * C_bar(x_i, V)) - mu
@@ -2518,21 +2590,15 @@ def simple_kriging_block_estimation(
         for dom in np.unique(b_dom_arr):
             b_mask = b_dom_arr == dom
             s_mask = s_dom_arr == dom
-            dom_mean = mean[dom] if isinstance(mean, Mapping) else mean
-            dom_sill = sill[dom] if isinstance(sill, Mapping) else sill
-            dom_range = (
-                range_param[dom] if isinstance(range_param, Mapping) else range_param
+            dom_mean = _resolve_domain_parameter(mean, dom, mean)
+            dom_sill = _resolve_domain_parameter(sill, dom, sill)
+            dom_range = _resolve_domain_parameter(range_param, dom, range_param)
+            dom_nugget = _resolve_domain_parameter(nugget, dom, nugget)
+            dom_aniso_ranges = _resolve_domain_parameter(
+                anisotropy_ranges, dom, anisotropy_ranges
             )
-            dom_nugget = nugget[dom] if isinstance(nugget, Mapping) else nugget
-            dom_aniso_ranges = (
-                anisotropy_ranges[dom]
-                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
-                else anisotropy_ranges
-            )
-            dom_aniso_angles = (
-                anisotropy_angles[dom]
-                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
-                else anisotropy_angles
+            dom_aniso_angles = _resolve_domain_parameter(
+                anisotropy_angles, dom, anisotropy_angles
             )
 
             if not np.any(s_mask):
@@ -2574,20 +2640,24 @@ def simple_kriging_block_estimation(
         else list(range_param.values())[0]
     )
 
-    # Discretization resolution along each axis
-    nx, ny, nz = discretization
-
     dx = float(block_model["dx"].iloc[0])
     dy = float(block_model["dy"].iloc[0])
     dz = float(block_model["dz"].iloc[0])
+    block_size = (dx, dy, dz)
 
-    x_offsets = ((np.arange(nx) + 0.5) / nx - 0.5) * dx
-    y_offsets = ((np.arange(ny) + 0.5) / ny - 0.5) * dy
-    z_offsets = ((np.arange(nz) + 0.5) / nz - 0.5) * dz
+    c_vv = compute_block_dispersion_variance(
+        block_size=block_size,
+        discretization=discretization,
+        variogram_model=variogram_model,
+        sill=base_sill,
+        range_param=base_range,
+        nugget=base_nugget,
+        anisotropy_ranges=anisotropy_ranges,
+        anisotropy_angles=anisotropy_angles,
+    )
+    block_dispersion_var = max(0.0, c_vv)
 
-    xx, yy, zz = np.meshgrid(x_offsets, y_offsets, z_offsets, indexing="ij")
-    disc_offsets = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
-
+    disc_offsets = _generate_block_discretization_offsets(discretization, block_size)
     eff_ranges = (
         anisotropy_ranges
         if anisotropy_ranges is not None
@@ -2598,14 +2668,6 @@ def simple_kriging_block_estimation(
     disc_offsets_t, eff_range = transform_anisotropic_coordinates(
         disc_offsets, ranges=eff_ranges, angles=anisotropy_angles
     )
-
-    internal_diffs = disc_offsets_t[:, None, :] - disc_offsets_t[None, :, :]
-    internal_dists = np.linalg.norm(internal_diffs, axis=2)
-    internal_covs = _theoretical_covariance(
-        internal_dists, variogram_model, base_nugget, base_sill, eff_range
-    )
-    c_vv = float(np.mean(internal_covs))
-    block_dispersion_var = max(0.0, c_vv)
 
     upper_bound = max_radius if max_radius is not None else float("inf")
     block_coords = block_model[["x", "y", "z"]].to_numpy(dtype=float)
@@ -4324,8 +4386,21 @@ def classify_mineral_resources(
     return final_cats
 
 
-def _round_sig_figs(value: float, sig_figs: int) -> float:
-    """Rounds a numeric value to a specified number of significant figures."""
+def round_significant_figures(value: float, sig_figs: int) -> float:
+    """Rounds a numeric value to a specified number of significant figures.
+
+    Parameters
+    ----------
+    value : float
+        The number to round.
+    sig_figs : int
+        Number of significant figures (must be >= 1).
+
+    Returns
+    -------
+    float
+        The rounded value.
+    """
     if value == 0.0 or np.isnan(value) or np.isinf(value):
         return 0.0
     return float(round(value, -int(np.floor(np.log10(abs(value)))) + (sig_figs - 1)))
@@ -4506,9 +4581,9 @@ def format_resource_statement(
         g_val = stats["grade"]
         m_val = stats["metal"] / m_scale
 
-        t_rnd = _round_sig_figs(t_val, t_sf)
-        g_rnd = _round_sig_figs(g_val, g_sf)
-        m_rnd = _round_sig_figs(m_val, m_sf)
+        t_rnd = round_significant_figures(t_val, t_sf)
+        g_rnd = round_significant_figures(g_val, g_sf)
+        m_rnd = round_significant_figures(m_val, m_sf)
 
         rows.append(
             {
@@ -5647,9 +5722,11 @@ def format_reserve_statement(
             {
                 "Classification": cat_name,
                 f"Cutoff ({grade_unit})": f"{cutoff_grade:.2f}",
-                f"Tonnage ({tonnage_unit})": _round_sig_figs(t_val / t_scale, n_sf),
-                f"Grade ({grade_unit})": _round_sig_figs(g_val, n_sf),
-                f"Contained Metal ({metal_unit})": _round_sig_figs(
+                f"Tonnage ({tonnage_unit})": round_significant_figures(
+                    t_val / t_scale, n_sf
+                ),
+                f"Grade ({grade_unit})": round_significant_figures(g_val, n_sf),
+                f"Contained Metal ({metal_unit})": round_significant_figures(
                     m_val / m_scale, n_sf
                 ),
             }
@@ -5973,6 +6050,75 @@ def plot_resource_to_reserve_waterfall(
     return fig, (ax_t, ax_m)
 
 
+def _filter_bench_slice(
+    block_model: pd.DataFrame,
+    bench_z: Optional[float] = None,
+    elevation_tolerance: float = 5.0,
+    z_col: str = "z",
+) -> pd.DataFrame:
+    """Filters a block model DataFrame to a horizontal elevation bench slice."""
+    if bench_z is None:
+        return block_model
+    if z_col not in block_model.columns:
+        raise ValueError(
+            f"z_col '{z_col}' not found in block_model for bench filtering."
+        )
+    df_plot = block_model[
+        (block_model[z_col] >= bench_z - elevation_tolerance)
+        & (block_model[z_col] <= bench_z + elevation_tolerance)
+    ].copy()
+    if len(df_plot) == 0:
+        raise ValueError(
+            f"No blocks found within elevation {bench_z} ± {elevation_tolerance} m."
+        )
+    return df_plot
+
+
+def _validate_orthogonal_views(
+    cross_section_view: str, long_section_view: str
+) -> Tuple[str, str]:
+    """Validates and standardizes viewing directions for orthogonal cross- and long-sections."""
+    csv = cross_section_view.lower()
+    if csv not in ["north", "south"]:
+        raise ValueError("cross_section_view must be 'north' or 'south'.")
+    lsv = long_section_view.lower()
+    if lsv not in ["west", "east"]:
+        raise ValueError("long_section_view must be 'west' or 'east'.")
+    return csv, lsv
+
+
+def _find_nearest_slice_coords(
+    block_model: pd.DataFrame,
+    bench_z: Optional[float] = None,
+    section_y: Optional[float] = None,
+    section_x: Optional[float] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+) -> Tuple[float, float, float]:
+    """Finds exact nearest centroid coordinate values for orthogonal slices (bench_z, section_y, section_x)."""
+    unique_z = np.sort(block_model[z_col].unique())
+    unique_y = np.sort(block_model[y_col].unique())
+    unique_x = np.sort(block_model[x_col].unique())
+
+    target_z = (
+        float(unique_z[np.argmin(np.abs(unique_z - bench_z))])
+        if bench_z is not None
+        else float(unique_z[len(unique_z) // 2])
+    )
+    target_y = (
+        float(unique_y[np.argmin(np.abs(unique_y - section_y))])
+        if section_y is not None
+        else float(unique_y[len(unique_y) // 2])
+    )
+    target_x = (
+        float(unique_x[np.argmin(np.abs(unique_x - section_x))])
+        if section_x is not None
+        else float(unique_x[len(unique_x) // 2])
+    )
+    return target_z, target_y, target_x
+
+
 # TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
 # Current status: 2D plan scatter plot of block centroids.
 # Guidelines from CONTRIBUTING.md to adhere to:
@@ -6044,21 +6190,12 @@ def plot_reserve_classification_map(
     else:
         fig = ax.figure
 
-    if bench_z is not None:
-        if z_col not in block_model.columns:
-            raise ValueError(
-                f"z_col '{z_col}' not found in block_model for bench filtering."
-            )
-        df_plot = block_model[
-            (block_model[z_col] >= bench_z - elevation_tolerance)
-            & (block_model[z_col] <= bench_z + elevation_tolerance)
-        ].copy()
-        if len(df_plot) == 0:
-            raise ValueError(
-                f"No blocks found within elevation {bench_z} ± {elevation_tolerance} m."
-            )
-    else:
-        df_plot = block_model
+    df_plot = _filter_bench_slice(
+        block_model=block_model,
+        bench_z=bench_z,
+        elevation_tolerance=elevation_tolerance,
+        z_col=z_col,
+    )
 
     color_palette = {
         "Proven Reserve": "#2ca02c",  # Forest green
@@ -6194,21 +6331,12 @@ def plot_resource_classification_map(
     else:
         fig = ax.figure
 
-    if bench_z is not None:
-        if z_col not in block_model.columns:
-            raise ValueError(
-                f"z_col '{z_col}' not found in block_model for bench filtering."
-            )
-        df_plot = block_model[
-            (block_model[z_col] >= bench_z - elevation_tolerance)
-            & (block_model[z_col] <= bench_z + elevation_tolerance)
-        ].copy()
-        if len(df_plot) == 0:
-            raise ValueError(
-                f"No blocks found within elevation {bench_z} ± {elevation_tolerance} m."
-            )
-    else:
-        df_plot = block_model
+    df_plot = _filter_bench_slice(
+        block_model=block_model,
+        bench_z=bench_z,
+        elevation_tolerance=elevation_tolerance,
+        z_col=z_col,
+    )
 
     color_palette = {
         "Measured": "#2ca02c",  # Forest green
@@ -6354,12 +6482,9 @@ def plot_resource_classification_orthogonal_slices(
     if block_model.empty:
         raise ValueError("block_model cannot be empty.")
 
-    cross_section_view = cross_section_view.lower()
-    if cross_section_view not in ["north", "south"]:
-        raise ValueError("cross_section_view must be 'north' or 'south'.")
-    long_section_view = long_section_view.lower()
-    if long_section_view not in ["west", "east"]:
-        raise ValueError("long_section_view must be 'west' or 'east'.")
+    cross_section_view, long_section_view = _validate_orthogonal_views(
+        cross_section_view, long_section_view
+    )
 
     for req in [x_col, y_col, z_col]:
         if req not in block_model.columns:
@@ -6397,24 +6522,14 @@ def plot_resource_classification_orthogonal_slices(
     norm_cat = mcolors.BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], ncolors=4)
 
     # Pick exact centroid coordinate slices
-    unique_z = np.sort(bm[z_col].unique())
-    unique_y = np.sort(bm[y_col].unique())
-    unique_x = np.sort(bm[x_col].unique())
-
-    target_z = (
-        unique_z[np.argmin(np.abs(unique_z - bench_z))]
-        if bench_z is not None
-        else unique_z[len(unique_z) // 2]
-    )
-    target_y = (
-        unique_y[np.argmin(np.abs(unique_y - section_y))]
-        if section_y is not None
-        else unique_y[len(unique_y) // 2]
-    )
-    target_x = (
-        unique_x[np.argmin(np.abs(unique_x - section_x))]
-        if section_x is not None
-        else unique_x[len(unique_x) // 2]
+    target_z, target_y, target_x = _find_nearest_slice_coords(
+        bm,
+        bench_z=bench_z,
+        section_y=section_y,
+        section_x=section_x,
+        x_col=x_col,
+        y_col=y_col,
+        z_col=z_col,
     )
 
     fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
@@ -9255,12 +9370,9 @@ def plot_block_model_orthogonal_slices(
     Tuple[plt.Figure, Sequence[plt.Axes]]
         Matplotlib figure and sequence of 3 axes.
     """
-    cross_section_view = cross_section_view.lower()
-    if cross_section_view not in ["north", "south"]:
-        raise ValueError("cross_section_view must be 'north' or 'south'.")
-    long_section_view = long_section_view.lower()
-    if long_section_view not in ["west", "east"]:
-        raise ValueError("long_section_view must be 'west' or 'east'.")
+    cross_section_view, long_section_view = _validate_orthogonal_views(
+        cross_section_view, long_section_view
+    )
 
     for req in ["x", "y", "z", "dx", "dy", "dz"]:
         if req not in block_model.columns:
@@ -9269,24 +9381,14 @@ def plot_block_model_orthogonal_slices(
         raise ValueError(f"block_model is missing grade column '{grade_col}'.")
 
     # Pick exact centroid coordinate slices
-    unique_z = np.sort(block_model["z"].unique())
-    unique_y = np.sort(block_model["y"].unique())
-    unique_x = np.sort(block_model["x"].unique())
-
-    target_z = (
-        unique_z[np.argmin(np.abs(unique_z - bench_z))]
-        if bench_z is not None
-        else unique_z[len(unique_z) // 2]
-    )
-    target_y = (
-        unique_y[np.argmin(np.abs(unique_y - section_y))]
-        if section_y is not None
-        else unique_y[len(unique_y) // 2]
-    )
-    target_x = (
-        unique_x[np.argmin(np.abs(unique_x - section_x))]
-        if section_x is not None
-        else unique_x[len(unique_x) // 2]
+    target_z, target_y, target_x = _find_nearest_slice_coords(
+        block_model,
+        bench_z=bench_z,
+        section_y=section_y,
+        section_x=section_x,
+        x_col="x",
+        y_col="y",
+        z_col="z",
     )
 
     # Shared normalization and colormap ensuring IDENTICAL scaling between blocks and drillholes

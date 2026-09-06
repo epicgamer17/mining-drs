@@ -4,6 +4,8 @@ from .components import (
     autocorrelated_generator,
     truck_haul_capacity,
     truck_cycle_time_breakdown,
+    truck_travel_time,
+    truck_cycle_time,
     OperatingMode,
     RequireDecision,
     polygonal_estimation,
@@ -61,6 +63,8 @@ from .components import (
     compute_anisotropy_rotation_matrix,
     transform_anisotropic_coordinates,
     compute_anisotropic_distance,
+    compute_block_dispersion_variance,
+    round_significant_figures,
 )
 
 __all__ = [
@@ -73,6 +77,8 @@ __all__ = [
     "MaterialSource",
     "truck_haul_capacity",
     "truck_cycle_time_breakdown",
+    "truck_travel_time",
+    "truck_cycle_time",
     "OperatingMode",
     "RequireDecision",
     "polygonal_estimation",
@@ -130,4 +136,6 @@ __all__ = [
     "compute_anisotropy_rotation_matrix",
     "transform_anisotropic_coordinates",
     "compute_anisotropic_distance",
+    "compute_block_dispersion_variance",
+    "round_significant_figures",
 ]

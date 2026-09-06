@@ -2,7 +2,114 @@
 
 from __future__ import annotations
 
-from typing import Optional, Mapping, Any
+from typing import Optional, Tuple
+
+
+def truck_travel_time(
+    distance_km: float,
+    haul_speed_kmh: Optional[float] = None,
+    return_speed_kmh: Optional[float] = None,
+    variable_time_per_km_min: Optional[float] = None,
+) -> Tuple[float, float, float]:
+    """Calculates loaded haul travel, empty return travel, and total travel time in minutes.
+
+    Parameters
+    ----------
+    distance_km : float
+        One-way haul distance from loading face to dump location (km).
+    haul_speed_kmh : float, optional
+        Average loaded haul speed in km/h.
+    return_speed_kmh : float, optional
+        Average empty return speed in km/h.
+    variable_time_per_km_min : float, optional
+        Explicit round-trip travel time in minutes per km.
+
+    Returns
+    -------
+    Tuple[float, float, float]
+        (haul_travel_min, return_travel_min, total_travel_min).
+    """
+    if distance_km <= 0:
+        return 0.0, 0.0, 0.0
+
+    if variable_time_per_km_min is not None:
+        if variable_time_per_km_min <= 0:
+            raise ValueError(
+                f"variable_time_per_km_min must be positive, got {variable_time_per_km_min}"
+            )
+        haul_travel = distance_km * (variable_time_per_km_min / 2.0)
+        return_travel = distance_km * (variable_time_per_km_min / 2.0)
+        return haul_travel, return_travel, distance_km * variable_time_per_km_min
+
+    if haul_speed_kmh is None or return_speed_kmh is None:
+        raise ValueError(
+            "Must provide either variable_time_per_km_min or both (haul_speed_kmh, return_speed_kmh)."
+        )
+    if haul_speed_kmh <= 0 or return_speed_kmh <= 0:
+        raise ValueError("Haul and return speeds must be strictly positive.")
+
+    haul_travel = distance_km * (60.0 / haul_speed_kmh)
+    return_travel = distance_km * (60.0 / return_speed_kmh)
+    return haul_travel, return_travel, haul_travel + return_travel
+
+
+def truck_cycle_time(
+    distance_km: float,
+    num_trucks: int,
+    fixed_cycle_time_min: float,
+    haul_speed_kmh: Optional[float] = None,
+    return_speed_kmh: Optional[float] = None,
+    variable_time_per_km_min: Optional[float] = None,
+    congestion_factor: float = 0.05,
+) -> float:
+    """Calculates effective haul truck cycle time (minutes) including queueing congestion.
+
+    In accordance with the SME Mining Engineering Handbook (§9.2) (TODO: Manually Verify) and
+    Caterpillar Performance Handbook (TODO: Manually Verify), open-pit haul truck cycle time consists of:
+    1. Fixed time (spot at shovel + load + turn/spot at dump + dump + delays).
+    2. Variable travel time (loaded haul travel + empty return travel).
+    3. Congestion multiplier due to bunching and queueing.
+
+    Parameters
+    ----------
+    distance_km : float
+        One-way haul distance from loading face to dump location (km).
+    num_trucks : int
+        Number of active haul trucks allocated to the circuit.
+    fixed_cycle_time_min : float
+        Fixed cycle time in minutes (spot at shovel, loading passes, turn & dump, delays).
+    haul_speed_kmh : float, optional
+        Average loaded haul speed in km/h.
+    return_speed_kmh : float, optional
+        Average empty return speed in km/h.
+    variable_time_per_km_min : float, optional
+        Explicit round-trip travel time in minutes per km.
+    congestion_factor : float, default 0.05
+        Incremental cycle time expansion per additional truck due to queueing.
+
+    Returns
+    -------
+    float
+        Total effective cycle time in minutes (minimum 1.0 min).
+    """
+    if distance_km <= 0 or num_trucks <= 0:
+        return 0.0
+
+    if fixed_cycle_time_min < 0:
+        raise ValueError(
+            f"fixed_cycle_time_min must be non-negative, got {fixed_cycle_time_min}"
+        )
+
+    _, _, travel_time = truck_travel_time(
+        distance_km=distance_km,
+        haul_speed_kmh=haul_speed_kmh,
+        return_speed_kmh=return_speed_kmh,
+        variable_time_per_km_min=variable_time_per_km_min,
+    )
+
+    base_cycle = fixed_cycle_time_min + travel_time
+    congestion = 1.0 + congestion_factor * max(0, num_trucks - 1)
+    return float(max(1.0, base_cycle * congestion))
 
 
 def truck_haul_capacity(
@@ -34,10 +141,9 @@ def truck_haul_capacity(
     truck_payload_tonnes : float
         Nominal payload capacity per truck (tonnes).
     mechanical_availability : float
-        Fleet mechanical availability fraction (e.g., 0.85 for 85%). Required without default
-        to prevent unrealistic nominal assumptions.
+        Fleet mechanical availability fraction (e.g., 0.85 for 85%).
     operator_efficiency : float
-        Job operational efficiency fraction (e.g., 0.90 for 90%). Required without default.
+        Job operational efficiency fraction (e.g., 0.90 for 90%).
     fixed_cycle_time_min : float
         Fixed cycle time in minutes (spot at shovel, loading passes, turn & dump, delays).
         Required without default because shovel bucket-pass match, spotting conditions,
@@ -64,28 +170,15 @@ def truck_haul_capacity(
     if num_trucks <= 0 or distance_km <= 0 or truck_payload_tonnes <= 0:
         return 0.0
 
-    if fixed_cycle_time_min < 0:
-        raise ValueError(
-            f"fixed_cycle_time_min must be non-negative, got {fixed_cycle_time_min}"
-        )
-    if variable_time_per_km_min is not None:
-        if variable_time_per_km_min <= 0:
-            raise ValueError(
-                f"variable_time_per_km_min must be positive, got {variable_time_per_km_min}"
-            )
-        travel_time = distance_km * variable_time_per_km_min
-    else:
-        if haul_speed_kmh is None or return_speed_kmh is None:
-            raise ValueError(
-                "Must provide either variable_time_per_km_min or both (haul_speed_kmh, return_speed_kmh)."
-            )
-        if haul_speed_kmh <= 0 or return_speed_kmh <= 0:
-            raise ValueError("Haul and return speeds must be strictly positive.")
-        travel_time = distance_km * (60.0 / haul_speed_kmh + 60.0 / return_speed_kmh)
-
-    base_cycle = fixed_cycle_time_min + travel_time
-    congestion = 1.0 + congestion_factor * max(0, num_trucks - 1)
-    cycle_time = max(1.0, base_cycle * congestion)
+    cycle_time = truck_cycle_time(
+        distance_km=distance_km,
+        num_trucks=num_trucks,
+        fixed_cycle_time_min=fixed_cycle_time_min,
+        haul_speed_kmh=haul_speed_kmh,
+        return_speed_kmh=return_speed_kmh,
+        variable_time_per_km_min=variable_time_per_km_min,
+        congestion_factor=congestion_factor,
+    )
 
     trips_per_truck = (operating_hours_per_day * 60.0) / cycle_time
     effective_utilization = max(0.0, mechanical_availability) * max(
@@ -146,33 +239,41 @@ def truck_cycle_time_breakdown(
             f"fixed_cycle_time_min must be non-negative, got {fixed_cycle_time_min}"
         )
 
-    if variable_time_per_km_min is not None:
-        if variable_time_per_km_min <= 0:
-            raise ValueError(
-                f"variable_time_per_km_min must be positive, got {variable_time_per_km_min}"
-            )
-        haul_travel = distance_km * (variable_time_per_km_min / 2.0)
-        return_travel = distance_km * (variable_time_per_km_min / 2.0)
-        travel_time = distance_km * variable_time_per_km_min
-    else:
-        if haul_speed_kmh is None or return_speed_kmh is None:
-            raise ValueError(
-                "Must provide either variable_time_per_km_min or both (haul_speed_kmh, return_speed_kmh)."
-            )
-        if haul_speed_kmh <= 0 or return_speed_kmh <= 0:
-            raise ValueError("Haul and return speeds must be strictly positive.")
-        haul_travel = distance_km * (60.0 / haul_speed_kmh)
-        return_travel = distance_km * (60.0 / return_speed_kmh)
-        travel_time = haul_travel + return_travel
+    haul_travel, return_travel, travel_time = truck_travel_time(
+        distance_km=distance_km,
+        haul_speed_kmh=haul_speed_kmh,
+        return_speed_kmh=return_speed_kmh,
+        variable_time_per_km_min=variable_time_per_km_min,
+    )
+
+    cycle_time = truck_cycle_time(
+        distance_km=distance_km,
+        num_trucks=num_trucks,
+        fixed_cycle_time_min=fixed_cycle_time_min,
+        haul_speed_kmh=haul_speed_kmh,
+        return_speed_kmh=return_speed_kmh,
+        variable_time_per_km_min=variable_time_per_km_min,
+        congestion_factor=congestion_factor,
+    )
+
+    fleet_tonnes = truck_haul_capacity(
+        distance_km=distance_km,
+        num_trucks=num_trucks,
+        truck_payload_tonnes=truck_payload_tonnes,
+        mechanical_availability=mechanical_availability,
+        operator_efficiency=operator_efficiency,
+        fixed_cycle_time_min=fixed_cycle_time_min,
+        haul_speed_kmh=haul_speed_kmh,
+        return_speed_kmh=return_speed_kmh,
+        variable_time_per_km_min=variable_time_per_km_min,
+        congestion_factor=congestion_factor,
+        operating_hours_per_day=operating_hours_per_day,
+    )
 
     base_cycle = fixed_cycle_time_min + travel_time
     congestion = 1.0 + congestion_factor * max(0, num_trucks - 1)
-    cycle_time = max(1.0, base_cycle * congestion)
-
     trips_per_truck = (operating_hours_per_day * 60.0) / cycle_time
-    effective_util = max(0.0, mechanical_availability) * max(0.0, operator_efficiency)
-    daily_tonnes_truck = trips_per_truck * truck_payload_tonnes * effective_util
-    fleet_tonnes = num_trucks * daily_tonnes_truck
+    daily_tonnes_truck = fleet_tonnes / num_trucks
 
     return {
         "fixed_time_min": float(fixed_cycle_time_min),

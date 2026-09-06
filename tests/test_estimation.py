@@ -4280,6 +4280,87 @@ def test_plot_resource_classification_orthogonal_slices_validations():
         plot_resource_classification_orthogonal_slices(valid_bm, long_section_view="down")
 
 
+def test_compute_block_dispersion_variance():
+    from drs_mining import compute_block_dispersion_variance
+
+    # 1. Point support (1, 1, 1): covariance at distance 0 is nugget + sill
+    c_point = compute_block_dispersion_variance(
+        block_size=(10.0, 10.0, 5.0),
+        discretization=(1, 1, 1),
+        variogram_model="spherical",
+        sill=2.0,
+        range_param=100.0,
+        nugget=0.5,
+    )
+    assert c_point == pytest.approx(2.5)
+
+    # 2. Block volume average: internal distances > 0, so self-covariance is strictly less than total sill
+    c_block = compute_block_dispersion_variance(
+        block_size=(10.0, 10.0, 5.0),
+        discretization=(4, 4, 2),
+        variogram_model="spherical",
+        sill=2.0,
+        range_param=100.0,
+        nugget=0.5,
+    )
+    assert 0.0 < c_block < 2.5
+
+
+def test_round_significant_figures():
+    from drs_mining import round_significant_figures
+
+    assert round_significant_figures(1234.56, 3) == 1230.0
+    assert round_significant_figures(0.0123456, 2) == 0.012
+    assert round_significant_figures(0.0, 4) == 0.0
+    assert round_significant_figures(float("nan"), 3) == 0.0
+    assert round_significant_figures(float("inf"), 3) == 0.0
+    assert round_significant_figures(-987.65, 2) == -990.0
+
+
+def test_visualization_slice_helpers():
+    from drs_mining.components.estimation import (
+        _filter_bench_slice,
+        _validate_orthogonal_views,
+        _find_nearest_slice_coords,
+    )
+
+    df = pd.DataFrame({
+        "x": [10.0, 20.0, 30.0],
+        "y": [100.0, 110.0, 120.0],
+        "z": [50.0, 60.0, 70.0],
+    })
+
+    # _filter_bench_slice
+    assert len(_filter_bench_slice(df, bench_z=None)) == 3
+    bench_60 = _filter_bench_slice(df, bench_z=60.0, elevation_tolerance=5.0)
+    assert len(bench_60) == 1
+    assert bench_60["z"].iloc[0] == 60.0
+
+    with pytest.raises(ValueError, match="z_col 'elevation' not found"):
+        _filter_bench_slice(df, bench_z=60.0, z_col="elevation")
+
+    with pytest.raises(ValueError, match="No blocks found within elevation"):
+        _filter_bench_slice(df, bench_z=100.0, elevation_tolerance=5.0)
+
+    # _validate_orthogonal_views
+    csv, lsv = _validate_orthogonal_views("North", "WEST")
+    assert csv == "north"
+    assert lsv == "west"
+
+    with pytest.raises(ValueError, match="cross_section_view must be 'north' or 'south'"):
+        _validate_orthogonal_views("diagonal", "west")
+
+    with pytest.raises(ValueError, match="long_section_view must be 'west' or 'east'"):
+        _validate_orthogonal_views("north", "diagonal")
+
+    # _find_nearest_slice_coords
+    tz, ty, tx = _find_nearest_slice_coords(df, bench_z=58.0, section_y=118.0, section_x=22.0)
+    assert tz == 60.0
+    assert ty == 120.0
+    assert tx == 20.0
+
+
+
 
 
 

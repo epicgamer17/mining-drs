@@ -187,3 +187,52 @@ def test_truck_haulage_validation():
             fixed_cycle_time_min=4.0,
             variable_time_per_km_min=10.0,
         )
+
+
+def test_truck_travel_and_cycle_time():
+    """Verifies standalone truck_travel_time and truck_cycle_time calculations."""
+    from drs_mining.components import truck_travel_time, truck_cycle_time
+
+    # 1. Travel time calculation
+    haul, ret, tot = truck_travel_time(
+        distance_km=2.0,
+        haul_speed_kmh=25.0,
+        return_speed_kmh=40.0,
+    )
+    assert haul == pytest.approx(4.8)
+    assert ret == pytest.approx(3.0)
+    assert tot == pytest.approx(7.8)
+
+    # Direct variable rate
+    h_dir, r_dir, t_dir = truck_travel_time(
+        distance_km=2.0,
+        variable_time_per_km_min=3.9,
+    )
+    assert t_dir == pytest.approx(7.8)
+
+    # 0 distance returns zeros
+    assert truck_travel_time(0.0, haul_speed_kmh=25.0, return_speed_kmh=40.0) == (0.0, 0.0, 0.0)
+
+    # 2. Cycle time with congestion
+    # 1 truck: 4.2 min fixed + 7.8 min travel = 12.0 min
+    ct_1 = truck_cycle_time(
+        distance_km=2.0,
+        num_trucks=1,
+        fixed_cycle_time_min=4.2,
+        haul_speed_kmh=25.0,
+        return_speed_kmh=40.0,
+        congestion_factor=0.05,
+    )
+    assert ct_1 == pytest.approx(12.0)
+
+    # 3 trucks: 12.0 * (1 + 2 * 0.05) = 12.0 * 1.10 = 13.2 min
+    ct_3 = truck_cycle_time(
+        distance_km=2.0,
+        num_trucks=3,
+        fixed_cycle_time_min=4.2,
+        haul_speed_kmh=25.0,
+        return_speed_kmh=40.0,
+        congestion_factor=0.05,
+    )
+    assert ct_3 == pytest.approx(13.2)
+
