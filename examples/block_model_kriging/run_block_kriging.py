@@ -31,17 +31,22 @@ import numpy as np
 import pandas as pd
 
 from drs_mining.components.estimation import (
+    cell_declustering,
     create_block_model,
     ordinary_kriging_block_estimation,
+    inverse_distance_weighting_block_estimation,
+    nearest_neighbor_block_estimation,
     kriging_quality_metrics,
     classify_resources_by_sor,
     classify_mineral_resources,
     plot_resource_classification_map,
+    plot_resource_classification_orthogonal_slices,
     plot_block_model_orthogonal_slices,
     plot_block_model_bench_gallery,
     plot_block_model_3d_isometric,
     plot_block_model_3d_interactive,
     plot_block_model_grade_uncertainty,
+    plot_swath_analysis_3axis,
     grade_tonnage_table,
     plot_grade_tonnage_curve,
 )
@@ -160,6 +165,34 @@ def main():
     )
 
     # -------------------------------------------------------------------------
+    # 1b. 3D Cell Declustering (CIM MRMR §4.2 / JORC Table 1)
+    # -------------------------------------------------------------------------
+    print("\n[Step 1b] Running 3D Cell Declustering on Exploration Composites...")
+    z_aspect = 0.5
+    declust_weights, declust_summary, opt_cell = cell_declustering(
+        df_dh,
+        grade_col="grade",
+        x_col="x",
+        y_col="y",
+        z_col="z",
+        z_aspect_ratio=z_aspect,  # Vertical aspect ratio for 5m downhole composites vs horizontal spacing
+        cell_sizes=np.linspace(20.0, 150.0, 14),
+    )
+    raw_mean = float(df_dh["grade"].mean())
+    declust_mean = float(np.average(df_dh["grade"], weights=declust_weights))
+    opt_cell_tuple = (
+        (opt_cell[0], opt_cell[1], opt_cell[2])
+        if isinstance(opt_cell, (tuple, list, np.ndarray))
+        else (float(opt_cell), float(opt_cell), float(opt_cell) * z_aspect)
+    )
+    print(
+        f"  • Optimal 3D cell size: {opt_cell_tuple[0]:.1f}m x {opt_cell_tuple[1]:.1f}m x {opt_cell_tuple[2]:.1f}m"
+    )
+    print(
+        f"  • Raw composite mean: {raw_mean:.3f}% Cu -> Declustered mean: {declust_mean:.3f}% Cu (clustering bias: {raw_mean - declust_mean:+.3f}%)"
+    )
+
+    # -------------------------------------------------------------------------
     # 2. Construct 3D Block Model Grid (SMUs)
     # -------------------------------------------------------------------------
     print("\n[Step 2] Constructing 3D Block Model Selective Mining Units (SMUs)...")
@@ -259,10 +292,11 @@ def main():
         f"  • Moderate Confidence Blocks (0.50 ≤ SoR < 0.80, KE > 0, Indicated candidate): {pct_indicated:.1f}%"
     )
 
-    # Multi-criteria Resource Classification (Spacing + SoR + KE)
+    # Multi-criteria Resource Classification (Multi-hole independence + Spacing + SoR + KE)
     resource_categories = classify_mineral_resources(
         grid_points=block_model[["x", "y", "z"]].values,
         samples_xy=samples_xyz,
+        sample_hole_ids=df_dh["hole_id"].tolist(),
         max_radius_measured=45.0,
         max_radius_indicated=90.0,
         min_holes_measured=3,
@@ -275,6 +309,30 @@ def main():
         min_kriging_efficiency=0.0,
     )
     block_model["category"] = resource_categories
+
+    # -------------------------------------------------------------------------
+    # 3b. Comparative 3D Block IDW & Nearest Neighbor Benchmark Estimation
+    # -------------------------------------------------------------------------
+    print("\n[Step 3b] Running Comparative 3D IDW² and 3D Nearest Neighbor Benchmark Models...")
+    idw_estimates, _ = inverse_distance_weighting_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=block_model,
+        power=2.0,
+        discretization=(4, 4, 2),
+        max_radius=110.0,
+    )
+    nn_estimates = nearest_neighbor_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=block_model,
+        max_radius=110.0,
+    )
+    block_model["idw_grade"] = idw_estimates
+    block_model["nn_grade"] = nn_estimates
+    print(f"  • 3D IDW² mean block grade: {np.nanmean(idw_estimates):.3f}% Cu")
+    print(f"  • 3D NN declustered polygonal benchmark mean: {np.nanmean(nn_estimates):.3f}% Cu")
+    print(f"  • 3D Ordinary Kriging mean block grade: {np.nanmean(estimates):.3f}% Cu")
 
     # -------------------------------------------------------------------------
     # 4. Generate Grade-Tonnage Sensitivity Table
@@ -384,21 +442,57 @@ def main():
         print(f"  -> Saved: {fig5_path}")
 
         print(
-            "\n[Step 8b] Generating Mineral Resource Classification Map (Central Bench)..."
+            "\n[Step 8b] Generating Mineral Resource Classification Map (Central Bench Z=47.5m)..."
         )
-        bench_blocks = block_model[block_model["z"] == 47.5].copy()
         dh_df = pd.DataFrame(
             {"x": samples_xyz[:, 0], "y": samples_xyz[:, 1]}
         ).drop_duplicates()
         fig_res_map, _ = plot_resource_classification_map(
-            bench_blocks,
+            block_model,
             drillholes=dh_df,
+            bench_z=47.5,
+            elevation_tolerance=2.5,
             title="3D Block Kriging: CIM / JORC Mineral Resource Classification (Bench Z = 47.5m)",
         )
         fig_res_path = output_dir / "block_kriging_resource_classification_map.png"
         fig_res_map.savefig(fig_res_path, dpi=200, bbox_inches="tight")
         plt.close(fig_res_map)
         print(f"  -> Saved: {fig_res_path}")
+
+        print("\n[Step 8c] Generating 3-Axis Swath Local Bias Validation Suite...")
+        fig_swath, _ = plot_swath_analysis_3axis(
+            block_model=block_model,
+            drillholes=df_dh,
+            bin_widths=(20.0, 20.0, 10.0),
+            grade_col="estimated_grade",
+            validation_grade_col="nn_grade",
+            drillhole_grade_col="grade",
+            tonnes_col="tonnes",
+            model_name="Ordinary Kriging",
+            validation_model_name="Nearest Neighbor (Benchmark)",
+            grade_unit="% Cu",
+            tonnage_unit="Mt",
+            title="3-Axis Swath Validation: Ordinary Kriging vs. Nearest Neighbor Benchmark",
+        )
+        fig_swath_path = output_dir / "block_kriging_swath_analysis_3axis.png"
+        fig_swath.savefig(fig_swath_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_swath)
+        print(f"  -> Saved: {fig_swath_path}")
+
+        print("\n[Step 8d] Generating 3-View Orthogonal Resource Classification Projections...")
+        fig_ortho_class, _ = plot_resource_classification_orthogonal_slices(
+            block_model=block_model,
+            category_col="category",
+            bench_z=47.5,
+            section_y=205.0,
+            section_x=205.0,
+            samples_xyz=samples_xyz,
+            title="CIM / JORC Mineral Resource Classification: Synchronized Orthogonal Projections",
+        )
+        fig_ortho_path = output_dir / "block_kriging_resource_orthogonal_slices.png"
+        fig_ortho_class.savefig(fig_ortho_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_ortho_class)
+        print(f"  -> Saved: {fig_ortho_path}")
     else:
         print("\n[Plotting skipped via --no-plot]")
 

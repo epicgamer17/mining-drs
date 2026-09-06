@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 import warnings
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.lines as mlines
 from matplotlib.patches import Polygon as MplPolygon, Rectangle as MplRectangle
 from matplotlib.widgets import Slider, Button
 from mpl_toolkits.mplot3d import Axes3D
@@ -1028,15 +1030,6 @@ def inverse_distance_weighting(
     return estimated_grades, dist_out
 
 
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Current status: 2D/3D point nearest neighbor.
-# Guidelines from CONTRIBUTING.md to adhere to:
-# - Core standard: 3D Nearest Neighbor on the block model is the mandatory declustered benchmark
-#   proxy for swath plot local bias audits (`plot_swath_analysis`) and comparative grade-tonnage
-#   audits (`plot_grade_tonnage_curve`) per JORC Table 1 and NI 43-101 (TODO: Manually Verify).
-# - Domain segregation: respect domain boundaries (`sample_domains`, `grid_domains`).
-# - Extrapolation control: enforce `mask_extrapolation` and `max_radius`.
-# - No fallback layers: direct functional block model routine accepting DataFrame and returning DataFrame.
 def nearest_neighbor_grid_estimation(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
@@ -1064,6 +1057,384 @@ def nearest_neighbor_grid_estimation(
         anisotropy_ranges=anisotropy_ranges,
         anisotropy_angles=anisotropy_angles,
     )
+
+
+def inverse_distance_weighting_block_estimation(
+    samples_xyz: np.ndarray,
+    sample_grades: np.ndarray,
+    block_model: pd.DataFrame,
+    power: float = 2.0,
+    k_neighbors: int = 16,
+    max_radius: Optional[float] = None,
+    discretization: Tuple[int, int, int] = (4, 4, 2),
+    mask_extrapolation: bool = False,
+    domain_col: Optional[str] = None,
+    sample_domains: Optional[Sequence[Any]] = None,
+    sample_domain_col: Optional[Union[str, Sequence[Any]]] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Estimates 3D block grades using Inverse Distance Weighting (IDW) with internal volume discretization.
+
+    Supports volume support averaging, geological domain boundaries, and 3D spatial anisotropy
+    under international reporting standards (CIM Definition Standards 2014, CIM MRMR Guidelines §6.8/§6.9,
+    JORC Code 2012 Table 1, and NI 43-101) (TODO: Manually Verify):
+    - Volume Support Discretization: discretizes each 3D SMU block into (nx, ny, nz) internal points,
+      evaluates IDW at each internal sub-point, and averages sub-point estimates to represent volume-averaged
+      block grade Z*(V) (discretization=(1, 1, 1) evaluates directly at block centroids).
+    - Anisotropic Distance Metric: evaluates distances in rotated 3D search ellipsoids when
+      `anisotropy_ranges` and/or `anisotropy_angles` are supplied.
+    - Domain Segregation: restricts search and estimation strictly within geological domains
+      defined by `domain_col` and `sample_domains`.
+
+    Parameters
+    ----------
+    samples_xyz : np.ndarray
+        Sample coordinates of shape (N, 3).
+    sample_grades : np.ndarray
+        Assay grades of shape (N,).
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z) and dimensions (dx, dy, dz).
+    power : float, default 2.0
+        Inverse distance weighting exponent p (e.g. 2.0 for IDW2, 3.0 for IDW3).
+    k_neighbors : int, default 16
+        Maximum number of informing samples queried per block.
+    max_radius : float, optional
+        Maximum search radius. Blocks with no samples within this distance are set to NaN.
+    discretization : tuple of (int, int, int), default (4, 4, 2)
+        Number of internal discretization sub-points (nx, ny, nz) per block for volume support averaging.
+        Use (1, 1, 1) for centroid-only estimation.
+    mask_extrapolation : bool, default False
+        If True, blocks whose centroids lie outside the 3D convex hull of samples are set to NaN.
+    domain_col : str, optional
+        Geological domain column in `block_model`.
+    sample_domains : Sequence[Any], optional
+        Geological domain identifiers for conditioning samples.
+    sample_domain_col : str or Sequence[Any], optional
+        Alias for `sample_domains`.
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional search ranges (major, semi-major, minor) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to ranges.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth, dip, plunge) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to angles.
+
+    Returns
+    -------
+    estimated_grades : np.ndarray
+        Interpolated block grades of shape (n_blocks,).
+    mean_distances : np.ndarray
+        Mean physical distance from block centroid to informing samples of shape (n_blocks,).
+    """
+    n_blocks = len(block_model)
+    if n_blocks == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    req_cols = {"x", "y", "z", "dx", "dy", "dz"}
+    missing = req_cols - set(block_model.columns)
+    if missing:
+        raise ValueError(
+            f"block_model is missing required columns: {sorted(list(missing))}."
+        )
+
+    if power < 0:
+        raise ValueError(f"power must be non-negative, got {power}.")
+
+    if k_neighbors < 1:
+        raise ValueError(f"k_neighbors must be at least 1, got {k_neighbors}.")
+
+    if max_radius is not None and max_radius <= 0:
+        raise ValueError(f"max_radius must be positive, got {max_radius}.")
+
+    if (
+        not isinstance(discretization, (tuple, list))
+        or len(discretization) != 3
+        or any(n <= 0 for n in discretization)
+    ):
+        raise ValueError(
+            f"discretization must be a tuple of 3 positive integers, got {discretization}."
+        )
+
+    samples_xyz_arr = np.asarray(samples_xyz, dtype=float)
+    sample_grades_arr = np.asarray(sample_grades, dtype=float)
+
+    if len(samples_xyz_arr) != len(sample_grades_arr):
+        raise ValueError(
+            f"Length of sample_grades ({len(sample_grades_arr)}) must match samples_xyz ({len(samples_xyz_arr)})."
+        )
+
+    if samples_xyz_arr.size > 0 and (
+        samples_xyz_arr.ndim != 2 or samples_xyz_arr.shape[1] != 3
+    ):
+        raise ValueError(
+            f"samples_xyz must have shape (N, 3), got {samples_xyz_arr.shape}."
+        )
+
+    # Handle domain-segregated estimation
+    s_dom = sample_domains if sample_domains is not None else sample_domain_col
+    if (domain_col is None) != (s_dom is None):
+        raise ValueError(
+            "Both domain_col and sample_domains must be provided together."
+        )
+
+    if domain_col is not None and s_dom is not None:
+        if domain_col not in block_model.columns:
+            raise ValueError(f"domain_col '{domain_col}' not found in block_model.")
+        s_dom_arr = np.asarray(s_dom)
+        b_dom_arr = np.asarray(block_model[domain_col])
+        if len(s_dom_arr) != len(samples_xyz_arr):
+            raise ValueError(
+                f"sample_domains length ({len(s_dom_arr)}) must match samples_xyz ({len(samples_xyz_arr)})."
+            )
+
+        block_estimates = np.full(n_blocks, np.nan, dtype=float)
+        mean_distances = np.full(n_blocks, np.nan, dtype=float)
+
+        for dom in np.unique(b_dom_arr):
+            b_mask = b_dom_arr == dom
+            s_mask = s_dom_arr == dom
+            if not np.any(s_mask):
+                continue
+
+            dom_aniso_ranges = (
+                anisotropy_ranges[dom]
+                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
+                else anisotropy_ranges
+            )
+            dom_aniso_angles = (
+                anisotropy_angles[dom]
+                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
+                else anisotropy_angles
+            )
+
+            sub_bm = block_model[b_mask].copy()
+            est_dom, dist_dom = inverse_distance_weighting_block_estimation(
+                samples_xyz=samples_xyz_arr[s_mask],
+                sample_grades=sample_grades_arr[s_mask],
+                block_model=sub_bm,
+                power=power,
+                k_neighbors=k_neighbors,
+                max_radius=max_radius,
+                discretization=discretization,
+                mask_extrapolation=mask_extrapolation,
+                domain_col=None,
+                sample_domains=None,
+                anisotropy_ranges=dom_aniso_ranges,
+                anisotropy_angles=dom_aniso_angles,
+            )
+            block_estimates[b_mask] = est_dom
+            mean_distances[b_mask] = dist_dom
+
+        return block_estimates, mean_distances
+
+    block_coords = block_model[["x", "y", "z"]].to_numpy(dtype=float)
+    dx = block_model["dx"].to_numpy(dtype=float)
+    dy = block_model["dy"].to_numpy(dtype=float)
+    dz = block_model["dz"].to_numpy(dtype=float)
+
+    # If no samples, return all NaNs
+    if len(samples_xyz_arr) == 0:
+        return np.full(n_blocks, np.nan, dtype=float), np.full(n_blocks, np.nan, dtype=float)
+
+    # Discretization unit offsets centered at 0 within [-0.5, 0.5]
+    nx, ny, nz = discretization
+    if nx == 1 and ny == 1 and nz == 1:
+        unit_offsets = np.zeros((1, 3), dtype=float)
+    else:
+        x_offsets = (np.arange(nx) + 0.5) / nx - 0.5
+        y_offsets = (np.arange(ny) + 0.5) / ny - 0.5
+        z_offsets = (np.arange(nz) + 0.5) / nz - 0.5
+        xx, yy, zz = np.meshgrid(x_offsets, y_offsets, z_offsets, indexing="ij")
+        unit_offsets = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+
+    uniform_dims = (
+        np.allclose(dx, dx[0]) and np.allclose(dy, dy[0]) and np.allclose(dz, dz[0])
+    )
+    if uniform_dims and not (nx == 1 and ny == 1 and nz == 1):
+        base_disc_offsets = unit_offsets * np.array([dx[0], dy[0], dz[0]])
+        base_disc_offsets_t, _ = transform_anisotropic_coordinates(
+            base_disc_offsets, ranges=anisotropy_ranges, angles=anisotropy_angles
+        )
+
+    # Transform coordinates to anisotropic space
+    samples_xyz_t, _ = transform_anisotropic_coordinates(
+        samples_xyz_arr, ranges=anisotropy_ranges, angles=anisotropy_angles
+    )
+    block_coords_t, _ = transform_anisotropic_coordinates(
+        block_coords, ranges=anisotropy_ranges, angles=anisotropy_angles
+    )
+
+    upper_bound = max_radius if max_radius is not None else float("inf")
+    tree = KDTree(samples_xyz_t)
+    k_query = min(k_neighbors, len(samples_xyz_arr))
+
+    distances_t, indices = tree.query(
+        block_coords_t,
+        k=k_query,
+        distance_upper_bound=upper_bound,
+    )
+
+    if k_query == 1:
+        distances_t = distances_t[:, None]
+        indices = indices[:, None]
+
+    block_estimates = np.full(n_blocks, np.nan, dtype=float)
+    mean_distances = np.full(n_blocks, np.nan, dtype=float)
+
+    for b in range(n_blocks):
+        valid_mask = np.isfinite(distances_t[b]) & (distances_t[b] <= upper_bound)
+        if not np.any(valid_mask):
+            continue
+
+        active_indices = indices[b][valid_mask]
+        coords_active_t = samples_xyz_t[active_indices]  # shape (k, 3)
+        grades_active = sample_grades_arr[active_indices]  # shape (k,)
+
+        # Physical mean distance from block centroid to informing samples
+        phys_diffs = samples_xyz_arr[active_indices] - block_coords[b]
+        phys_dists = np.linalg.norm(phys_diffs, axis=1)
+        mean_distances[b] = float(np.mean(phys_dists))
+
+        if nx == 1 and ny == 1 and nz == 1:
+            # Centroid-only IDW in transformed anisotropic space
+            d_t = distances_t[b][valid_mask]
+            exact_match = d_t < 1e-6
+            if np.any(exact_match):
+                first_exact = np.argmax(exact_match)
+                block_estimates[b] = float(grades_active[first_exact])
+            else:
+                safe_d = np.maximum(d_t, 1e-12)
+                raw_w = 1.0 / np.power(safe_d, power)
+                tot_w = np.sum(raw_w)
+                if tot_w > 0:
+                    block_estimates[b] = float(np.sum((raw_w / tot_w) * grades_active))
+        else:
+            # Discretized sub-points
+            if uniform_dims:
+                disc_offsets_t = base_disc_offsets_t
+            else:
+                block_disc = unit_offsets * np.array([dx[b], dy[b], dz[b]])
+                disc_offsets_t, _ = transform_anisotropic_coordinates(
+                    block_disc, ranges=anisotropy_ranges, angles=anisotropy_angles
+                )
+
+            # Block sub-points in transformed anisotropic space: shape (M, 3)
+            sub_points_t = block_coords_t[b] + disc_offsets_t
+            # Pairwise distances from active samples to sub-points: shape (k, M)
+            diffs = coords_active_t[:, None, :] - sub_points_t[None, :, :]
+            sub_dists = np.linalg.norm(diffs, axis=2)
+
+            is_exact = sub_dists < 1e-6
+            has_exact = np.any(is_exact, axis=0)  # (M,)
+
+            safe_d = np.maximum(sub_dists, 1e-12)
+            raw_w = np.where(~is_exact, 1.0 / np.power(safe_d, power), 0.0)
+            tot_w = np.sum(raw_w, axis=0, keepdims=True)
+
+            norm_w = np.divide(
+                raw_w, tot_w, out=np.zeros_like(raw_w), where=tot_w > 0.0
+            )
+            sub_grades = np.sum(norm_w * grades_active[:, None], axis=0)
+
+            if np.any(has_exact):
+                first_exact_idx = np.argmax(is_exact[:, has_exact], axis=0)
+                sub_grades[has_exact] = grades_active[first_exact_idx]
+
+            block_estimates[b] = float(np.mean(sub_grades))
+
+    if mask_extrapolation:
+        if len(samples_xyz_arr) < 4:
+            raise ValueError(
+                "mask_extrapolation=True requires at least 4 non-coplanar 3D samples to compute a convex hull."
+            )
+        try:
+            inside_hull = is_within_convex_hull(samples_xyz_arr, block_coords)
+        except Exception as e:
+            raise ValueError(
+                f"Failed to compute 3D convex hull for extrapolation masking (samples may be coplanar): {e}"
+            ) from e
+        block_estimates[~inside_hull] = np.nan
+        mean_distances[~inside_hull] = np.nan
+
+    return block_estimates, mean_distances
+
+
+def nearest_neighbor_block_estimation(
+    samples_xyz: np.ndarray,
+    sample_grades: np.ndarray,
+    block_model: pd.DataFrame,
+    max_radius: Optional[float] = None,
+    mask_extrapolation: bool = False,
+    domain_col: Optional[str] = None,
+    sample_domains: Optional[Sequence[Any]] = None,
+    sample_domain_col: Optional[Union[str, Sequence[Any]]] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
+    return_distances: bool = False,
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    """Estimates 3D block grades using Nearest Neighbor assignment.
+
+    Assigns each block to the nearest informing sample composite in 3D (or rotated anisotropic 3D space).
+    Serves as the mandatory declustered 3D polygonal/Voronoi benchmark proxy for swath plot
+    local bias validation (`plot_swath_analysis`) and global grade-tonnage audits (`plot_grade_tonnage_curve`)
+    under CIM Definition Standards (2014), CIM MRMR Guidelines §6.8/§6.9, and JORC Code (2012) Table 1
+    (TODO: Manually Verify).
+
+    Parameters
+    ----------
+    samples_xyz : np.ndarray
+        Sample coordinates of shape (N, 3).
+    sample_grades : np.ndarray
+        Assay grades of shape (N,).
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z) and dimensions (dx, dy, dz).
+    max_radius : float, optional
+        Maximum search radius. Blocks with no samples within this distance are set to NaN.
+    mask_extrapolation : bool, default False
+        If True, blocks whose centroids lie outside the 3D convex hull of samples are set to NaN.
+    domain_col : str, optional
+        Geological domain column in `block_model`.
+    sample_domains : Sequence[Any], optional
+        Geological domain identifiers for conditioning samples.
+    sample_domain_col : str or Sequence[Any], optional
+        Alias for `sample_domains`.
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional search ranges (major, semi-major, minor) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to ranges.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth, dip, plunge) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to angles.
+    return_distances : bool, default False
+        If True, returns a tuple `(estimated_grades, distances)`.
+
+    Returns
+    -------
+    estimated_grades : np.ndarray
+        Array of estimated block grades of shape (n_blocks,).
+        If `return_distances=True`, returns `(estimated_grades, distances)`.
+    """
+    est_grades, dists = inverse_distance_weighting_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=block_model,
+        power=1.0,
+        k_neighbors=1,
+        max_radius=max_radius,
+        discretization=(1, 1, 1),
+        mask_extrapolation=mask_extrapolation,
+        domain_col=domain_col,
+        sample_domains=sample_domains,
+        sample_domain_col=sample_domain_col,
+        anisotropy_ranges=anisotropy_ranges,
+        anisotropy_angles=anisotropy_angles,
+    )
+    if return_distances:
+        return est_grades, dists
+    return est_grades
 
 
 def _theoretical_covariance(
@@ -2444,14 +2815,19 @@ def plot_grade_tonnage_curve(
 # - No backwards-compatibility fallbacks: cleanly extend the signature rather than adding shim layers.
 def cell_declustering(
     drillholes: pd.DataFrame,
-    cell_sizes: Optional[Union[float, Sequence[float]]] = None,
+    cell_sizes: Optional[
+        Union[float, Sequence[float], Sequence[Tuple[float, float, float]]]
+    ] = None,
     grade_col: str = "grade",
     x_col: str = "x",
     y_col: str = "y",
+    z_col: Optional[str] = None,
+    z_aspect_ratio: float = 1.0,
+    domain_col: Optional[str] = None,
     n_offsets: int = 8,
     min_mean: bool = True,
 ) -> Tuple[np.ndarray, pd.DataFrame, float]:
-    """Calculates spatial declustering weights and cell size sensitivity.
+    """Calculates spatial declustering weights and cell size sensitivity in 2D or 3D.
 
     In exploration drilling, geologists cluster drillholes preferentially in high-grade
     zones, causing naive sample averages to overestimate global deposit grade.
@@ -2459,25 +2835,39 @@ def cell_declustering(
     superimposes a regular grid over the data and assigns weights inversely proportional
     to the number of samples sharing each cell.
 
-    To eliminate cell boundary edge artifacts, the grid origin is shifted across
-    `n_offsets` x `n_offsets` sub-grid increments and the resulting weights are averaged.
+    In 3D exploration drillholes, sampling along the borehole trajectory is typically dense
+    (e.g., 1–2m assays or 5m composites) compared to wide lateral drillhole spacing (e.g., 50–100m).
+    Providing `z_col` activates full 3D cell declustering with anisotropic cell dimensions
+    (Lx, Ly, Lz = Lx * z_aspect_ratio), properly resolving both lateral and vertical clustering
+    in accordance with CIM MRMR Best Practice Guidelines (§4.2) (TODO: Manually Verify).
 
     Parameters
     ----------
     drillholes : pd.DataFrame
         Table of drillholes containing spatial coordinates and grades.
-    cell_sizes : float or Sequence[float], optional
-        Single cell dimension or sequence of cell dimensions (m) to test.
+    cell_sizes : float, Sequence[float], or Sequence[Tuple[float, float, float]], optional
+        Single cell dimension, sequence of lateral dimensions, or sequence of (Lx, Ly, Lz) tuples.
         If None, automatically determines a comprehensive range from below the minimum
-        drillhole spacing up to 3.5x the deposit extent, guaranteeing a complete U-shaped curve.
+        spacing up to 3.5x the deposit extent, guaranteeing a complete U-shaped curve.
     grade_col : str, default "grade"
         Grade column name in drillholes.
     x_col : str, default "x"
-        X coordinate column name.
+        X coordinate column name (Easting).
     y_col : str, default "y"
-        Y coordinate column name.
-    n_offsets : int, default 4
+        Y coordinate column name (Northing).
+    z_col : str, optional
+        Z coordinate column name (Elevation). If provided, performs 3D cell declustering.
+    z_aspect_ratio : float, default 1.0
+        Vertical-to-horizontal cell dimension ratio (Lz / Lx) when generating 3D cell sizes.
+        For deposits drilled vertically on a 50m grid with 10m benches, z_aspect_ratio=0.20.
+    domain_col : str, optional
+        Geological domain column in drillholes. If provided, samples are strictly segregated
+        by domain and declustered independently within their respective spatial volumes
+        in compliance with CIM MRMR domain segregation rules (TODO: Manually Verify).
+    n_offsets : int, default 8
         Number of origin offset increments per axis to average out boundary jumps.
+        In 3D, offset counts are automatically balanced (up to 4 per axis, giving 64 shifts)
+        to maintain rapid calculation.
     min_mean : bool, default True
         If True, selects the optimal cell size at the minimum declustered mean (standard
         for deposits drilled preferentially in high-grade ore). If False, selects maximum.
@@ -2486,85 +2876,242 @@ def cell_declustering(
     -------
     Tuple[np.ndarray, pd.DataFrame, float]
         - weights: 1D array of normalized sample weights for the optimal cell size (sum to 1.0).
-        - sensitivity_df: DataFrame of columns ['cell_size', 'declustered_mean', 'declustered_variance'].
-        - optimal_cell_size: The chosen cell dimension (float).
+        - sensitivity_df: DataFrame of columns ['cell_size', 'declustered_mean', 'declustered_variance']
+          (plus 'cell_size_x', 'cell_size_y', 'cell_size_z' in 3D).
+        - optimal_cell_size: The chosen lateral cell dimension (float). The full 3D dimensions
+          are accessible in sensitivity_df.attrs['optimal_cell_size_3d'] when in 3D.
     """
     if len(drillholes) == 0:
         raise ValueError("Drillholes DataFrame cannot be empty.")
 
+    if x_col not in drillholes.columns:
+        raise ValueError(f"X coordinate column '{x_col}' not found in DataFrame.")
+    if y_col not in drillholes.columns:
+        raise ValueError(f"Y coordinate column '{y_col}' not found in DataFrame.")
+    if grade_col not in drillholes.columns:
+        raise ValueError(f"Grade column '{grade_col}' not found in DataFrame.")
+    if z_col is not None and z_col not in drillholes.columns:
+        raise ValueError(f"Z coordinate column '{z_col}' not found in DataFrame.")
+    if z_aspect_ratio <= 0:
+        raise ValueError(
+            f"z_aspect_ratio must be strictly positive, got {z_aspect_ratio}"
+        )
+
+    # Domain-segregated declustering
+    if domain_col is not None:
+        if domain_col not in drillholes.columns:
+            raise ValueError(f"Domain column '{domain_col}' not found in DataFrame.")
+
+        unique_domains = drillholes[domain_col].unique()
+        if len(unique_domains) > 1:
+            weights = np.zeros(len(drillholes), dtype=float)
+            domain_dfs = []
+            for dom in unique_domains:
+                mask = (drillholes[domain_col] == dom).to_numpy()
+                sub_df = drillholes.loc[mask]
+                sub_w, sub_sens, _ = cell_declustering(
+                    sub_df,
+                    cell_sizes=cell_sizes,
+                    grade_col=grade_col,
+                    x_col=x_col,
+                    y_col=y_col,
+                    z_col=z_col,
+                    z_aspect_ratio=z_aspect_ratio,
+                    domain_col=None,
+                    n_offsets=n_offsets,
+                    min_mean=min_mean,
+                )
+                domain_frac = len(sub_df) / len(drillholes)
+                weights[mask] = sub_w * domain_frac
+                sub_sens_copy = sub_sens.copy()
+                sub_sens_copy["domain"] = dom
+                domain_dfs.append(sub_sens_copy)
+
+            combined_sens = pd.concat(domain_dfs, ignore_index=True)
+            # Weighted average per cell size across domains
+            summary_rows = []
+            for cs, group in combined_sens.groupby("cell_size"):
+                dom_weights = [
+                    len(drillholes[drillholes[domain_col] == d])
+                    for d in group["domain"]
+                ]
+                w_mean = float(np.average(group["declustered_mean"], weights=dom_weights))
+                w_var = float(
+                    np.average(group["declustered_variance"], weights=dom_weights)
+                )
+                row_dict = {
+                    "cell_size": cs,
+                    "declustered_mean": w_mean,
+                    "declustered_variance": w_var,
+                }
+                if "cell_size_z" in group.columns:
+                    row_dict["cell_size_z"] = group["cell_size_z"].iloc[0]
+                summary_rows.append(row_dict)
+
+            summary_sens = pd.DataFrame(summary_rows)
+            if min_mean:
+                opt_idx = int(summary_sens["declustered_mean"].idxmin())
+            else:
+                opt_idx = int(summary_sens["declustered_mean"].idxmax())
+
+            opt_cell_size = float(summary_sens.loc[opt_idx, "cell_size"])
+            w_sum = weights.sum()
+            if w_sum > 0:
+                weights /= w_sum
+
+            return weights, summary_sens, opt_cell_size
+
+    is_3d = z_col is not None
     x = np.asarray(drillholes[x_col], dtype=float)
     y = np.asarray(drillholes[y_col], dtype=float)
-    z = np.asarray(drillholes[grade_col], dtype=float)
+    z = np.asarray(drillholes[z_col], dtype=float) if is_3d else None
+    grades = np.asarray(drillholes[grade_col], dtype=float)
     n_samples = len(x)
 
     if cell_sizes is None:
         dx = float(x.max() - x.min())
         dy = float(y.max() - y.min())
-        diag = float(np.hypot(dx, dy))
-        if n_samples > 1:
-            pts = np.column_stack([x, y])
-            diffs = pts[:, None, :] - pts[None, :, :]
-            dists = np.linalg.norm(diffs, axis=2)
-            np.fill_diagonal(dists, np.inf)
-            min_dist = float(dists.min())
-            min_cs = max(min_dist * 0.5, 1e-3)
+        if is_3d:
+            dz = float(z.max() - z.min())
+            diag = float(np.sqrt(dx**2 + dy**2 + (dz / z_aspect_ratio) ** 2))
+            if n_samples > 1:
+                pts = np.column_stack([x, y, z / z_aspect_ratio])
+                diffs = pts[:, None, :] - pts[None, :, :]
+                dists = np.linalg.norm(diffs, axis=2)
+                np.fill_diagonal(dists, np.inf)
+                min_dist = float(dists.min())
+                min_cs = max(min_dist * 0.5, 1e-3)
+            else:
+                min_cs = 1.0
+            max_cs = max(diag * 7.0, min_cs * 15.0)
+            lateral_sizes = list(np.linspace(min_cs, max_cs, 45))
+            cell_dims_list = [(cs, cs, cs * z_aspect_ratio) for cs in lateral_sizes]
         else:
-            min_cs = 1.0
-        max_cs = max(diag * 7.0, min_cs * 15.0)
-        cell_sizes_list = list(np.linspace(min_cs, max_cs, 45))
+            diag = float(np.hypot(dx, dy))
+            if n_samples > 1:
+                pts = np.column_stack([x, y])
+                diffs = pts[:, None, :] - pts[None, :, :]
+                dists = np.linalg.norm(diffs, axis=2)
+                np.fill_diagonal(dists, np.inf)
+                min_dist = float(dists.min())
+                min_cs = max(min_dist * 0.5, 1e-3)
+            else:
+                min_cs = 1.0
+            max_cs = max(diag * 7.0, min_cs * 15.0)
+            lateral_sizes = list(np.linspace(min_cs, max_cs, 45))
+            cell_dims_list = [(cs, cs) for cs in lateral_sizes]
     elif isinstance(cell_sizes, (int, float)):
-        cell_sizes_list = [float(cell_sizes)]
+        cs = float(cell_sizes)
+        lateral_sizes = [cs]
+        cell_dims_list = [(cs, cs, cs * z_aspect_ratio)] if is_3d else [(cs, cs)]
     else:
-        cell_sizes_list = [float(cs) for cs in cell_sizes]
+        cell_dims_list = []
+        lateral_sizes = []
+        for item in cell_sizes:
+            if isinstance(item, (tuple, list)):
+                if len(item) == 3:
+                    cell_dims_list.append(
+                        (float(item[0]), float(item[1]), float(item[2]))
+                    )
+                    lateral_sizes.append(float(item[0]))
+                elif len(item) == 2:
+                    cell_dims_list.append((float(item[0]), float(item[1])))
+                    lateral_sizes.append(float(item[0]))
+                else:
+                    raise ValueError(
+                        f"Cell size tuple must have 2 or 3 elements, got {item}"
+                    )
+            else:
+                cs = float(item)
+                lateral_sizes.append(cs)
+                if is_3d:
+                    cell_dims_list.append((cs, cs, cs * z_aspect_ratio))
+                else:
+                    cell_dims_list.append((cs, cs))
 
-    n_offsets = max(1, int(n_offsets))
-    total_shifts = n_offsets * n_offsets
-    x_min, y_min = float(x.min()), float(y.min())
+    if is_3d:
+        nx_off = max(1, min(int(n_offsets), 4))
+        ny_off = max(1, min(int(n_offsets), 4))
+        nz_off = max(1, min(int(n_offsets), 4))
+        total_shifts = nx_off * ny_off * nz_off
+        x_min, y_min, z_min = float(x.min()), float(y.min()), float(z.min())
+    else:
+        n_off = max(1, int(n_offsets))
+        total_shifts = n_off * n_off
+        x_min, y_min = float(x.min()), float(y.min())
 
     weights_by_cell = []
     means = []
     variances = []
 
-    for cs in cell_sizes_list:
-        if cs <= 0:
-            raise ValueError(f"Cell size must be strictly positive, got {cs}")
+    for c_dim in cell_dims_list:
+        cs_x = c_dim[0]
+        cs_y = c_dim[1]
+        cs_z = c_dim[2] if is_3d else None
+        if cs_x <= 0 or cs_y <= 0 or (is_3d and cs_z <= 0):
+            raise ValueError(
+                f"Cell dimensions must be strictly positive, got {c_dim}"
+            )
 
         weights_sum = np.zeros(n_samples, dtype=float)
 
-        for ox in range(n_offsets):
-            shift_x = x_min - (ox / n_offsets) * cs
-            for oy in range(n_offsets):
-                shift_y = y_min - (oy / n_offsets) * cs
+        if is_3d:
+            for ox in range(nx_off):
+                shift_x = x_min - (ox / nx_off) * cs_x
+                for oy in range(ny_off):
+                    shift_y = y_min - (oy / ny_off) * cs_y
+                    for oz in range(nz_off):
+                        shift_z = z_min - (oz / nz_off) * cs_z
 
-                idx_x = np.floor((x - shift_x) / cs).astype(np.int64)
-                idx_y = np.floor((y - shift_y) / cs).astype(np.int64)
+                        idx_x = np.floor((x - shift_x) / cs_x).astype(np.int64)
+                        idx_y = np.floor((y - shift_y) / cs_y).astype(np.int64)
+                        idx_z = np.floor((z - shift_z) / cs_z).astype(np.int64)
 
-                cell_keys = list(zip(idx_x, idx_y))
-                counts = Counter(cell_keys)
-                n_occupied = len(counts)
+                        cell_keys = list(zip(idx_x, idx_y, idx_z))
+                        counts = Counter(cell_keys)
+                        n_occupied = len(counts)
 
-                for i, ck in enumerate(cell_keys):
-                    weights_sum[i] += 1.0 / (n_occupied * counts[ck])
+                        for i, ck in enumerate(cell_keys):
+                            weights_sum[i] += 1.0 / (n_occupied * counts[ck])
+        else:
+            for ox in range(n_off):
+                shift_x = x_min - (ox / n_off) * cs_x
+                for oy in range(n_off):
+                    shift_y = y_min - (oy / n_off) * cs_y
+
+                    idx_x = np.floor((x - shift_x) / cs_x).astype(np.int64)
+                    idx_y = np.floor((y - shift_y) / cs_y).astype(np.int64)
+
+                    cell_keys = list(zip(idx_x, idx_y))
+                    counts = Counter(cell_keys)
+                    n_occupied = len(counts)
+
+                    for i, ck in enumerate(cell_keys):
+                        weights_sum[i] += 1.0 / (n_occupied * counts[ck])
 
         w = weights_sum / total_shifts
         w_sum = w.sum()
         if w_sum > 0:
             w /= w_sum
 
-        mean_val = float(np.sum(w * z))
-        var_val = float(np.sum(w * ((z - mean_val) ** 2)))
+        mean_val = float(np.sum(w * grades))
+        var_val = float(np.sum(w * ((grades - mean_val) ** 2)))
 
         weights_by_cell.append(w)
         means.append(mean_val)
         variances.append(var_val)
 
-    sensitivity_df = pd.DataFrame(
-        {
-            "cell_size": cell_sizes_list,
-            "declustered_mean": means,
-            "declustered_variance": variances,
-        }
-    )
+    sens_dict = {
+        "cell_size": lateral_sizes,
+        "declustered_mean": means,
+        "declustered_variance": variances,
+    }
+    if is_3d:
+        sens_dict["cell_size_x"] = [c[0] for c in cell_dims_list]
+        sens_dict["cell_size_y"] = [c[1] for c in cell_dims_list]
+        sens_dict["cell_size_z"] = [c[2] for c in cell_dims_list]
+
+    sensitivity_df = pd.DataFrame(sens_dict)
 
     if min_mean:
         opt_idx = int(sensitivity_df["declustered_mean"].idxmin())
@@ -2574,7 +3121,11 @@ def cell_declustering(
     optimal_cell_size = float(sensitivity_df.loc[opt_idx, "cell_size"])
     optimal_weights = weights_by_cell[opt_idx]
 
+    if is_3d:
+        sensitivity_df.attrs["optimal_cell_size_3d"] = cell_dims_list[opt_idx]
+
     return optimal_weights, sensitivity_df, optimal_cell_size
+
 
 
 def plot_cell_declustering_curve(
@@ -2788,18 +3339,8 @@ def kriging_quality_metrics(
     return kriging_efficiency, slope_of_regression
 
 
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Current status: Euclidean k-d tree point distance queries.
-# Guidelines from CONTRIBUTING.md to adhere to:
-# - Reporting Standards (CIM 2014/2019, JORC 2012, NI 43-101) (TODO: Manually Verify): multi-hole confidence criteria
-#   for Measured/Indicated must demonstrate continuity between INDEPENDENT drillholes.
-#   In 3D block models informed by downhole composites, multiple points along the same borehole
-#   must not falsely satisfy multi-hole requirements. Accept `hole_id_col` or collar locations.
-# - Domain boundaries: spacing classification must be segregated by geological domain.
-# - Data Support Separation: separate legal concession `boundary` from drillhole support envelope.
-# - Functional design: transparent DataFrame/array inputs and string category outputs.
 def classify_resources_by_drill_spacing(
-    grid_points: np.ndarray,
+    grid_points: Union[np.ndarray, pd.DataFrame],
     samples_xy: np.ndarray,
     max_radius_measured: float,
     max_radius_indicated: float,
@@ -2807,19 +3348,35 @@ def classify_resources_by_drill_spacing(
     min_holes_indicated: int = 2,
     max_radius_inferred: Optional[float] = None,
     is_interpolated: Optional[np.ndarray] = None,
-    anisotropy_ranges: Optional[Union[float, Sequence[float], Mapping[str, float]]] = None,
-    anisotropy_angles: Optional[Union[float, Sequence[float], Mapping[str, float]]] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+    domain_col: Optional[str] = None,
+    sample_domains: Optional[Sequence[Any]] = None,
+    grid_domains: Optional[Sequence[Any]] = None,
+    anisotropy_ranges: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
 ) -> np.ndarray:
     """Classifies resource blocks into confidence categories based on drillhole spacing and hole counts.
 
     In accordance with CIM Definition Standards (2014) and JORC Code (2012) principles (TODO: Manually Verify):
-    - Measured: Dense drillhole spacing where at least `min_holes_measured` informing
+    - Measured: Dense drillhole spacing where at least `min_holes_measured` independent informing
       drillholes lie within `max_radius_measured`, demonstrating high geological and grade continuity.
-    - Indicated: Moderate drillhole spacing where at least `min_holes_indicated` informing
+    - Indicated: Moderate drillhole spacing where at least `min_holes_indicated` independent informing
       drillholes lie within `max_radius_indicated`, supporting reasonable assumptions of continuity.
     - Inferred: Wider spacing or extrapolated blocks where geological continuity can be implied
       (within `max_radius_inferred` if specified).
     - Unclassified: Blocks beyond the maximum inferred search radius or lacking sufficient data.
+
+    Multi-Hole Independence & Geological Domain Boundary Rules:
+    - Multi-Hole Independence: When `sample_hole_ids` is provided, confidence criteria (Measured/Indicated)
+      strictly evaluate the count of UNIQUE boreholes within the search volume. Multiple downhole
+      composites along the same borehole are collapsed to a single borehole count, preventing false
+      high-confidence classification along isolated drillholes (CIM MRMR Guidelines §6.11) (TODO: Manually Verify).
+    - Domain Segregation: When `sample_domains` and `grid_domains` (or `domain_col`) are supplied,
+      spacing queries are strictly isolated within each geological domain without smearing across boundaries.
 
     Supports 2D and 3D geometric anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify): when `anisotropy_ranges`
     and/or `anisotropy_angles` are supplied, search distances are evaluated along the
@@ -2827,8 +3384,8 @@ def classify_resources_by_drill_spacing(
 
     Parameters
     ----------
-    grid_points : np.ndarray
-        Array of block centers of shape (M, 2) or (M, 3).
+    grid_points : np.ndarray or pd.DataFrame
+        Array of block centers of shape (M, 2) or (M, 3), or DataFrame containing 'x', 'y' (and optional 'z') columns.
     samples_xy : np.ndarray
         Array of informing drillhole coordinates of shape (N, 2) or (N, 3).
     max_radius_measured : float
@@ -2838,9 +3395,9 @@ def classify_resources_by_drill_spacing(
         Maximum search radius to qualify for Indicated classification.
         Site-specific parameter required without default.
     min_holes_measured : int, default 3
-        Minimum informing drillholes within `max_radius_measured` for Measured.
+        Minimum informing independent drillholes within `max_radius_measured` for Measured.
     min_holes_indicated : int, default 2
-        Minimum informing drillholes within `max_radius_indicated` for Indicated.
+        Minimum informing independent drillholes within `max_radius_indicated` for Indicated.
     max_radius_inferred : float, optional
         Maximum search radius to qualify for Inferred classification. If None,
         all blocks not meeting Measured or Indicated default to Inferred.
@@ -2848,17 +3405,46 @@ def classify_resources_by_drill_spacing(
         Boolean mask of shape (M,) indicating whether each block lies within the
         convex hull / domain interpolation volume. Blocks where `is_interpolated`
         is False cannot be classified as Measured or Indicated (capped at Inferred).
+    sample_hole_ids : Sequence[Any], optional
+        Identifiers of the drillhole (borehole ID) for each sample in `samples_xy` of shape (N,).
+        When provided, counts of informing holes strictly reflect unique borehole IDs.
+    domain_col : str, optional
+        Geological domain column if `grid_points` is a DataFrame.
+    sample_domains : Sequence[Any], optional
+        Geological domain identifiers for conditioning samples of shape (N,).
+    grid_domains : Sequence[Any], optional
+        Geological domain identifiers for target blocks of shape (M,).
     anisotropy_ranges : float, Sequence[float], or Mapping, optional
         Directional ranges (major, minor) in 2D or (major, semi-major, minor) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to ranges.
     anisotropy_angles : float, Sequence[float], or Mapping, optional
         Rotation angles (azimuth in 2D, or azimuth, dip, plunge in 3D).
+        Can be supplied per-domain as a dict mapping domain identifier to angles.
 
     Returns
     -------
     np.ndarray
         Array of category strings ("Measured", "Indicated", "Inferred", or "Unclassified") of shape (M,).
     """
-    pts = np.asarray(grid_points, dtype=float)
+    if isinstance(grid_points, pd.DataFrame):
+        if "z" in grid_points.columns:
+            pts = grid_points[["x", "y", "z"]].to_numpy(dtype=float)
+        elif "x" in grid_points.columns and "y" in grid_points.columns:
+            pts = grid_points[["x", "y"]].to_numpy(dtype=float)
+        else:
+            raise ValueError(
+                "grid_points DataFrame must contain 'x', 'y' (and optional 'z') columns."
+            )
+        if domain_col is not None and domain_col in grid_points.columns:
+            g_dom = grid_points[domain_col].to_numpy()
+        elif grid_domains is not None:
+            g_dom = np.asarray(grid_domains)
+        else:
+            g_dom = None
+    else:
+        pts = np.asarray(grid_points, dtype=float)
+        g_dom = np.asarray(grid_domains) if grid_domains is not None else None
+
     if pts.size == 0:
         return np.empty(0, dtype=object)
     if pts.ndim != 2 or pts.shape[1] not in (2, 3):
@@ -2901,6 +3487,73 @@ def classify_resources_by_drill_spacing(
     else:
         interp_mask = None
 
+    if sample_hole_ids is not None:
+        hole_ids_arr = np.asarray(sample_hole_ids)
+        if len(hole_ids_arr) != N:
+            raise ValueError(
+                f"sample_hole_ids length ({len(hole_ids_arr)}) must match samples_xy length ({N})."
+            )
+    else:
+        hole_ids_arr = None
+
+    # Handle domain-segregated classification
+    if (sample_domains is None) != (g_dom is None):
+        raise ValueError(
+            "Both sample_domains and grid_domains (or domain_col in grid_points) must be provided together."
+        )
+
+    if sample_domains is not None and g_dom is not None:
+        s_dom = np.asarray(sample_domains)
+        if len(s_dom) != N:
+            raise ValueError(
+                f"sample_domains length ({len(s_dom)}) must match samples_xy length ({N})."
+            )
+        if len(g_dom) != M:
+            raise ValueError(
+                f"grid_domains length ({len(g_dom)}) must match grid_points length ({M})."
+            )
+
+        categories = np.full(M, "Unclassified", dtype=object)
+
+        for dom in np.unique(g_dom):
+            g_mask = g_dom == dom
+            s_mask = s_dom == dom
+            if not np.any(s_mask):
+                continue
+
+            dom_aniso_ranges = (
+                anisotropy_ranges[dom]
+                if isinstance(anisotropy_ranges, Mapping) and dom in anisotropy_ranges
+                else anisotropy_ranges
+            )
+            dom_aniso_angles = (
+                anisotropy_angles[dom]
+                if isinstance(anisotropy_angles, Mapping) and dom in anisotropy_angles
+                else anisotropy_angles
+            )
+
+            interp_sub = interp_mask[g_mask] if interp_mask is not None else None
+            hole_sub = hole_ids_arr[s_mask] if hole_ids_arr is not None else None
+
+            categories[g_mask] = classify_resources_by_drill_spacing(
+                grid_points=pts[g_mask],
+                samples_xy=samples[s_mask],
+                max_radius_measured=max_radius_measured,
+                max_radius_indicated=max_radius_indicated,
+                min_holes_measured=min_holes_measured,
+                min_holes_indicated=min_holes_indicated,
+                max_radius_inferred=max_radius_inferred,
+                is_interpolated=interp_sub,
+                sample_hole_ids=hole_sub,
+                domain_col=None,
+                sample_domains=None,
+                grid_domains=None,
+                anisotropy_ranges=dom_aniso_ranges,
+                anisotropy_angles=dom_aniso_angles,
+            )
+
+        return categories
+
     if N == 0:
         return np.full(M, "Unclassified", dtype=object)
 
@@ -2913,28 +3566,46 @@ def classify_resources_by_drill_spacing(
 
     tree = KDTree(samples_t)
 
-    # Check Measured criteria
-    if N >= min_holes_measured:
-        d_meas, _ = tree.query(pts_t, k=min_holes_measured)
-        dist_meas = d_meas if min_holes_measured == 1 else d_meas[:, -1]
-        has_measured = dist_meas <= max_radius_measured
-    else:
-        has_measured = np.zeros(M, dtype=bool)
+    if hole_ids_arr is not None:
+        # Multi-hole independence: query ball point and count unique hole IDs
+        meas_balls = tree.query_ball_point(pts_t, r=max_radius_measured)
+        meas_counts = np.array(
+            [len(set(hole_ids_arr[b])) for b in meas_balls], dtype=int
+        )
+        has_measured = meas_counts >= min_holes_measured
 
-    # Check Indicated criteria
-    if N >= min_holes_indicated:
-        d_ind, _ = tree.query(pts_t, k=min_holes_indicated)
-        dist_ind = d_ind if min_holes_indicated == 1 else d_ind[:, -1]
-        has_indicated = dist_ind <= max_radius_indicated
-    else:
-        has_indicated = np.zeros(M, dtype=bool)
+        ind_balls = tree.query_ball_point(pts_t, r=max_radius_indicated)
+        ind_counts = np.array(
+            [len(set(hole_ids_arr[b])) for b in ind_balls], dtype=int
+        )
+        has_indicated = ind_counts >= min_holes_indicated
 
-    # Check Inferred criteria
-    if max_radius_inferred is not None:
-        d_inf, _ = tree.query(pts_t, k=1)
-        has_inferred = d_inf <= max_radius_inferred
+        if max_radius_inferred is not None:
+            inf_balls = tree.query_ball_point(pts_t, r=max_radius_inferred)
+            has_inferred = np.array([len(b) > 0 for b in inf_balls], dtype=bool)
+        else:
+            has_inferred = np.ones(M, dtype=bool)
     else:
-        has_inferred = np.ones(M, dtype=bool)
+        # Standard sample point count query
+        if N >= min_holes_measured:
+            d_meas, _ = tree.query(pts_t, k=min_holes_measured)
+            dist_meas = d_meas if min_holes_measured == 1 else d_meas[:, -1]
+            has_measured = dist_meas <= max_radius_measured
+        else:
+            has_measured = np.zeros(M, dtype=bool)
+
+        if N >= min_holes_indicated:
+            d_ind, _ = tree.query(pts_t, k=min_holes_indicated)
+            dist_ind = d_ind if min_holes_indicated == 1 else d_ind[:, -1]
+            has_indicated = dist_ind <= max_radius_indicated
+        else:
+            has_indicated = np.zeros(M, dtype=bool)
+
+        if max_radius_inferred is not None:
+            d_inf, _ = tree.query(pts_t, k=1)
+            has_inferred = d_inf <= max_radius_inferred
+        else:
+            has_inferred = np.ones(M, dtype=bool)
 
     categories = np.full(M, "Unclassified", dtype=object)
 
@@ -3041,12 +3712,14 @@ def classify_resources_by_sor(
 
 
 def smooth_resource_categories(
-    grid_points: np.ndarray,
+    grid_points: Union[np.ndarray, pd.DataFrame],
     categories: Sequence[str] | np.ndarray,
     smoothing_radius: Optional[float] = None,
     k_neighbors: Optional[int] = None,
     min_cluster_size: int = 1,
     downgrade_isolated: bool = True,
+    domain_col: Optional[str] = None,
+    grid_domains: Optional[Sequence[Any]] = None,
 ) -> np.ndarray:
     """Eliminates the 'spotted dog' artifact by spatially smoothing block classifications.
 
@@ -3072,11 +3745,15 @@ def smooth_resource_categories(
        or 'Indicated' with fewer than `min_cluster_size` contiguous blocks are downgraded
        to the next lower category, ensuring that reported resources meet minimum selective
        mining unit (SMU) or stope panel volume requirements.
+    3. Geological Domain Isolation:
+       When `grid_domains` or `domain_col` is supplied, smoothing operations are strictly
+       confined within each geological domain, preventing category smearing across lithological
+       contacts, faults, or structural boundaries.
 
     Parameters
     ----------
-    grid_points : np.ndarray
-        Coordinates of block centers of shape (M, 2) or (M, 3).
+    grid_points : np.ndarray or pd.DataFrame
+        Coordinates of block centers of shape (M, 2) or (M, 3), or DataFrame containing 'x', 'y' (and optional 'z') columns.
     categories : Sequence[str] or np.ndarray
         Array of category strings ("Measured", "Indicated", "Inferred", or "Unclassified") of shape (M,).
     smoothing_radius : float, optional
@@ -3090,13 +3767,35 @@ def smooth_resource_categories(
     downgrade_isolated : bool, default True
         If True (conservative principle), isolated high-confidence blocks are downgraded,
         preventing un-drilled areas from being upgraded. If False, standard majority vote is applied.
+    domain_col : str, optional
+        Geological domain column if `grid_points` is a DataFrame.
+    grid_domains : Sequence[Any], optional
+        Geological domain identifiers for target blocks of shape (M,).
 
     Returns
     -------
     np.ndarray
         Smoothed category array of shape (M,).
     """
-    pts = np.asarray(grid_points, dtype=float)
+    if isinstance(grid_points, pd.DataFrame):
+        if "z" in grid_points.columns:
+            pts = grid_points[["x", "y", "z"]].to_numpy(dtype=float)
+        elif "x" in grid_points.columns and "y" in grid_points.columns:
+            pts = grid_points[["x", "y"]].to_numpy(dtype=float)
+        else:
+            raise ValueError(
+                "grid_points DataFrame must contain 'x', 'y' (and optional 'z') columns."
+            )
+        if domain_col is not None and domain_col in grid_points.columns:
+            g_dom = grid_points[domain_col].to_numpy()
+        elif grid_domains is not None:
+            g_dom = np.asarray(grid_domains)
+        else:
+            g_dom = None
+    else:
+        pts = np.asarray(grid_points, dtype=float)
+        g_dom = np.asarray(grid_domains) if grid_domains is not None else None
+
     cats = np.asarray(categories, dtype=object).copy()
     M = len(pts)
     if M == 0:
@@ -3105,6 +3804,26 @@ def smooth_resource_categories(
         raise ValueError(
             f"Shape mismatch: grid_points length ({M}) does not match categories length ({len(cats)})."
         )
+
+    if g_dom is not None:
+        if len(g_dom) != M:
+            raise ValueError(
+                f"grid_domains length ({len(g_dom)}) must match grid_points length ({M})."
+            )
+        out_cats = np.full(M, "Unclassified", dtype=object)
+        for dom in np.unique(g_dom):
+            mask = g_dom == dom
+            out_cats[mask] = smooth_resource_categories(
+                grid_points=pts[mask],
+                categories=cats[mask],
+                smoothing_radius=smoothing_radius,
+                k_neighbors=k_neighbors,
+                min_cluster_size=min_cluster_size,
+                downgrade_isolated=downgrade_isolated,
+                domain_col=None,
+                grid_domains=None,
+            )
+        return out_cats
 
     if smoothing_radius is not None and smoothing_radius <= 0.0:
         raise ValueError(
@@ -3328,7 +4047,7 @@ def classify_resources_by_kriging_variance(
 
 
 def classify_mineral_resources(
-    grid_points: np.ndarray,
+    grid_points: Union[np.ndarray, pd.DataFrame],
     samples_xy: Optional[np.ndarray] = None,
     kriging_variances: Optional[np.ndarray] = None,
     max_radius_measured: Optional[float] = None,
@@ -3346,15 +4065,19 @@ def classify_mineral_resources(
     min_kriging_efficiency: Optional[float] = 0.0,
     max_radius_inferred: Optional[float] = None,
     is_interpolated: Optional[np.ndarray] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+    domain_col: Optional[str] = None,
+    sample_domains: Optional[Sequence[Any]] = None,
+    grid_domains: Optional[Sequence[Any]] = None,
     smoothing_radius: Optional[float] = None,
     k_neighbors_smoothing: Optional[int] = None,
     min_cluster_size: int = 1,
     downgrade_isolated: bool = True,
     anisotropy_ranges: Optional[
-        Union[float, Sequence[float], Mapping[str, float]]
+        Union[float, Sequence[float], Mapping[Any, Any]]
     ] = None,
     anisotropy_angles: Optional[
-        Union[float, Sequence[float], Mapping[str, float]]
+        Union[float, Sequence[float], Mapping[Any, Any]]
     ] = None,
 ) -> np.ndarray:
     """Classifies mineral resources into Measured, Indicated, and Inferred using multi-criteria standard practice.
@@ -3381,8 +4104,8 @@ def classify_mineral_resources(
 
     Parameters
     ----------
-    grid_points : np.ndarray
-        Array of block centers of shape (M, 2) or (M, 3).
+    grid_points : np.ndarray or pd.DataFrame
+        Array of block centers of shape (M, 2) or (M, 3), or DataFrame containing 'x', 'y' (and optional 'z') columns.
     samples_xy : np.ndarray, optional
         Array of informing drillhole coordinates of shape (N, 2) or (N, 3).
         If provided, drillhole spacing and hole count criteria are evaluated.
@@ -3393,9 +4116,9 @@ def classify_mineral_resources(
     max_radius_indicated : float, optional
         Nominal drillhole spacing radius for Indicated classification. Required if samples_xy is provided.
     min_holes_measured : int, default 3
-        Minimum informing drillholes within search radius for Measured.
+        Minimum informing independent drillholes within search radius for Measured.
     min_holes_indicated : int, default 2
-        Minimum informing drillholes within search radius for Indicated.
+        Minimum informing independent drillholes within search radius for Indicated.
     variance_threshold_measured : float, optional
         Maximum Kriging variance allowed for Measured classification.
     variance_threshold_indicated : float, optional
@@ -3419,6 +4142,15 @@ def classify_mineral_resources(
     is_interpolated : np.ndarray of bool, optional
         Boolean mask indicating whether each block lies within the interpolation hull.
         Blocks outside the hull are restricted to Inferred or Unclassified.
+    sample_hole_ids : Sequence[Any], optional
+        Identifiers of the drillhole (borehole ID) for each sample in `samples_xy` of shape (N,).
+        When provided, counts of informing holes strictly reflect unique borehole IDs.
+    domain_col : str, optional
+        Geological domain column if `grid_points` is a DataFrame.
+    sample_domains : Sequence[Any], optional
+        Geological domain identifiers for conditioning samples of shape (N,).
+    grid_domains : Sequence[Any], optional
+        Geological domain identifiers for target blocks of shape (M,).
     smoothing_radius : float, optional
         Search radius for spatial majority smoothing to remove isolated 'spotted dog' blocks.
     k_neighbors_smoothing : int, optional
@@ -3429,15 +4161,28 @@ def classify_mineral_resources(
         Conservative principle: isolated high-confidence blocks are downgraded.
     anisotropy_ranges : float, Sequence[float], or Mapping, optional
         Directional ranges (major, minor) in 2D or (major, semi-major, minor) in 3D.
+        Can be supplied per-domain as a dict mapping domain identifier to ranges.
     anisotropy_angles : float, Sequence[float], or Mapping, optional
         Rotation angles (azimuth in 2D, or azimuth, dip, plunge in 3D).
+        Can be supplied per-domain as a dict mapping domain identifier to angles.
 
     Returns
     -------
     np.ndarray
         Array of category strings ("Measured", "Indicated", "Inferred", or "Unclassified") of shape (M,).
     """
-    pts = np.asarray(grid_points)
+    if isinstance(grid_points, pd.DataFrame):
+        if "z" in grid_points.columns:
+            pts = grid_points[["x", "y", "z"]].to_numpy(dtype=float)
+        elif "x" in grid_points.columns and "y" in grid_points.columns:
+            pts = grid_points[["x", "y"]].to_numpy(dtype=float)
+        else:
+            raise ValueError(
+                "grid_points DataFrame must contain 'x', 'y' (and optional 'z') columns."
+            )
+    else:
+        pts = np.asarray(grid_points, dtype=float)
+
     if pts.size == 0:
         return np.empty(0, dtype=object)
 
@@ -3452,7 +4197,7 @@ def classify_mineral_resources(
                 "max_radius_measured and max_radius_indicated must be explicitly specified."
             )
         cats_spacing = classify_resources_by_drill_spacing(
-            grid_points=pts,
+            grid_points=grid_points,
             samples_xy=samples_xy,
             max_radius_measured=max_radius_measured,
             max_radius_indicated=max_radius_indicated,
@@ -3460,6 +4205,10 @@ def classify_mineral_resources(
             min_holes_indicated=min_holes_indicated,
             max_radius_inferred=max_radius_inferred,
             is_interpolated=is_interpolated,
+            sample_hole_ids=sample_hole_ids,
+            domain_col=domain_col,
+            sample_domains=sample_domains,
+            grid_domains=grid_domains,
             anisotropy_ranges=anisotropy_ranges,
             anisotropy_angles=anisotropy_angles,
         )
@@ -3562,12 +4311,14 @@ def classify_mineral_resources(
         or min_cluster_size > 1
     ):
         final_cats = smooth_resource_categories(
-            grid_points=pts,
+            grid_points=grid_points,
             categories=final_cats,
             smoothing_radius=smoothing_radius,
             k_neighbors=k_neighbors_smoothing,
             min_cluster_size=min_cluster_size,
             downgrade_isolated=downgrade_isolated,
+            domain_col=domain_col,
+            grid_domains=grid_domains,
         )
 
     return final_cats
@@ -3986,8 +4737,8 @@ def plot_swath_analysis(
     if ax is None:
         fig, ax1 = plt.subplots(figsize=figsize)
     else:
-        fig = ax1.figure
         ax1 = ax
+        fig = ax1.figure
 
     ax2 = ax1.twinx()
 
@@ -4078,6 +4829,151 @@ def plot_swath_analysis(
 
     fig.tight_layout()
     return fig, ax1
+
+
+def plot_swath_analysis_3axis(
+    block_model: pd.DataFrame,
+    drillholes: Optional[pd.DataFrame] = None,
+    bin_widths: Union[float, Tuple[float, float, float], Sequence[float]] = (
+        50.0,
+        50.0,
+        10.0,
+    ),
+    grade_col: str = "estimated_grade",
+    validation_grade_col: Optional[str] = None,
+    drillhole_grade_col: str = "grade",
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    tonnes_col: Optional[str] = "tonnes",
+    model_name: str = "Ordinary Kriging",
+    validation_model_name: str = "Nearest Neighbor (Declustered)",
+    grade_unit: str = "% Cu",
+    tonnage_unit: str = "Mt",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (16.0, 12.0),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Generates a synchronized 3-axis swath plot suite across Easting, Northing, and Elevation.
+
+    Mandated by international reporting codes (NI 43-101 and JORC Code 2012 Table 1) (TODO: Manually Verify)
+    to demonstrate local unbiasedness of the 3D resource estimate across all spatial directions.
+    Plots primary estimated grades, declustered validation grades (e.g. Nearest Neighbor), and informing
+    drillhole composite grades along Cartesian slices, with secondary Y-axis tonnage bars:
+    - Panel 1: Easting (X corridor swaths)
+    - Panel 2: Northing (Y corridor swaths)
+    - Panel 3: Elevation (Z bench swaths)
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of block model estimates with coordinates and estimated grade.
+    drillholes : pd.DataFrame, optional
+        Table of drillhole composites with coordinates and assay grades.
+    bin_widths : float or tuple of (float, float, float), default (50.0, 50.0, 10.0)
+        Swath slice widths in meters for (Easting, Northing, Elevation).
+    grade_col : str, default "estimated_grade"
+        Primary grade estimate column in `block_model`. Falls back to 'grade' if 'estimated_grade' is absent.
+    validation_grade_col : str, optional
+        Declustered benchmark model column in `block_model` (e.g. NN grade).
+    drillhole_grade_col : str, default "grade"
+        Grade column name in `drillholes`.
+    x_col : str, default "x"
+        Easting coordinate column name.
+    y_col : str, default "y"
+        Northing coordinate column name.
+    z_col : str, default "z"
+        Elevation coordinate column name.
+    tonnes_col : str, optional, default "tonnes"
+        Tonnage column name in `block_model`.
+    model_name : str, default "Ordinary Kriging"
+        Label for the primary estimator being validated.
+    validation_model_name : str, default "Nearest Neighbor (Declustered)"
+        Label for the declustered benchmark model.
+    grade_unit : str, default "% Cu"
+        Unit label for mineral grade.
+    tonnage_unit : str, default "Mt"
+        Unit label for slice ore tonnage.
+    title : str, optional
+        Overall figure super-title.
+    figsize : Tuple[float, float], default (16.0, 12.0)
+        Figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Matplotlib Figure and sequence of 3 primary Axes (Easting, Northing, Elevation).
+    """
+    if block_model.empty:
+        raise ValueError("block_model cannot be empty.")
+
+    # Resolve primary grade column fallback if default 'estimated_grade' is not in block_model but 'grade' is
+    eff_grade_col = grade_col
+    if eff_grade_col not in block_model.columns and "grade" in block_model.columns:
+        eff_grade_col = "grade"
+    elif eff_grade_col not in block_model.columns:
+        raise ValueError(
+            f"grade_col '{grade_col}' not found in block_model columns: {list(block_model.columns)}."
+        )
+
+    # Resolve bin widths
+    if isinstance(bin_widths, (int, float)):
+        bw_x = bw_y = bw_z = float(bin_widths)
+    elif len(bin_widths) == 3:
+        bw_x, bw_y, bw_z = float(bin_widths[0]), float(bin_widths[1]), float(bin_widths[2])
+    else:
+        raise ValueError(
+            f"bin_widths must be a float or a sequence of 3 floats, got {bin_widths}."
+        )
+
+    if bw_x <= 0.0 or bw_y <= 0.0 or bw_z <= 0.0:
+        raise ValueError("All bin_widths must be strictly positive.")
+
+    # Check required coordinate columns
+    for col, name in [(x_col, "x"), (y_col, "y"), (z_col, "z")]:
+        if col not in block_model.columns:
+            raise ValueError(
+                f"Required coordinate column '{col}' ({name}) not found in block_model."
+            )
+
+    fig, axes = plt.subplots(3, 1, figsize=figsize)
+
+    axes_configs = [
+        ("x", bw_x, axes[0], "Easting (X Swaths)"),
+        ("y", bw_y, axes[1], "Northing (Y Swaths)"),
+        ("z", bw_z, axes[2], "Elevation (Z Benches)"),
+    ]
+
+    for axis_dir, bw, ax, panel_name in axes_configs:
+        plot_swath_analysis(
+            block_model=block_model,
+            drillholes=drillholes,
+            axis=axis_dir,
+            bin_width=bw,
+            grade_col=eff_grade_col,
+            validation_grade_col=validation_grade_col,
+            drillhole_grade_col=drillhole_grade_col,
+            x_col=x_col,
+            y_col=y_col,
+            z_col=z_col,
+            tonnes_col=tonnes_col,
+            model_name=model_name,
+            validation_model_name=validation_model_name,
+            grade_unit=grade_unit,
+            tonnage_unit=tonnage_unit,
+            title=f"Local Drift Validation Along {panel_name}",
+            ax=ax,
+        )
+
+    sup_title = (
+        title
+        if title is not None
+        else f"3-Axis Swath Plot Validation: {model_name}"
+        + (f" vs. {validation_model_name}" if validation_grade_col is not None else "")
+    )
+    fig.suptitle(sup_title, fontsize=14, fontweight="bold", y=0.995)
+    fig.tight_layout()
+
+    return fig, (axes[0], axes[1], axes[2])
 
 
 # =============================================================================
@@ -5093,9 +5989,12 @@ def plot_reserve_classification_map(
     boundary: Optional[Sequence[tuple[float, float]]] = None,
     drillholes: Optional[pd.DataFrame] = None,
     status_col: str = "status",
+    bench_z: Optional[float] = None,
+    elevation_tolerance: float = 5.0,
     x_col: str = "x",
     y_col: str = "y",
-    title: str = "Mineral Reserve & Resource Classification Map",
+    z_col: str = "z",
+    title: Optional[str] = None,
     ax: Optional[plt.Axes] = None,
     figsize: tuple[float, float] = (10, 8),
 ) -> tuple[plt.Figure, plt.Axes]:
@@ -5107,6 +6006,9 @@ def plot_reserve_classification_map(
     - Inferred Resource (Excluded): Purple / Magenta (#9467bd)
     - Sub-Economic / Waste (< Cutoff): Light Grey (#d3d3d3)
 
+    Supports horizontal bench slice filtering via `bench_z` and `elevation_tolerance`
+    to prevent 3D block overplotting on 2D mine plans.
+
     Parameters
     ----------
     block_model : pd.DataFrame
@@ -5117,9 +6019,16 @@ def plot_reserve_classification_map(
         Collar coordinates table with 'x' and 'y' columns.
     status_col : str, default "status"
         Column containing status string.
+    bench_z : float, optional
+        Target elevation for horizontal bench slice. If specified, isolates blocks within
+        elevation_tolerance of bench_z to eliminate 3D overplotting.
+    elevation_tolerance : float, default 5.0
+        Half-thickness (± meters) for bench slice filtering.
     x_col, y_col : str, default "x", "y"
         Coordinate column names.
-    title : str, default "Mineral Reserve & Resource Classification Map"
+    z_col : str, default "z"
+        Elevation coordinate column name (required if bench_z is provided).
+    title : str, optional
         Plot title.
     ax : plt.Axes, optional
         Existing axes to draw on.
@@ -5135,6 +6044,22 @@ def plot_reserve_classification_map(
     else:
         fig = ax.figure
 
+    if bench_z is not None:
+        if z_col not in block_model.columns:
+            raise ValueError(
+                f"z_col '{z_col}' not found in block_model for bench filtering."
+            )
+        df_plot = block_model[
+            (block_model[z_col] >= bench_z - elevation_tolerance)
+            & (block_model[z_col] <= bench_z + elevation_tolerance)
+        ].copy()
+        if len(df_plot) == 0:
+            raise ValueError(
+                f"No blocks found within elevation {bench_z} ± {elevation_tolerance} m."
+            )
+    else:
+        df_plot = block_model
+
     color_palette = {
         "Proven Reserve": "#2ca02c",  # Forest green
         "Probable Reserve": "#1f77b4",  # Blue
@@ -5144,8 +6069,8 @@ def plot_reserve_classification_map(
 
     # Draw blocks grouped by status
     for status_name, color in color_palette.items():
-        sub = block_model[
-            block_model[status_col].astype(str).str.strip().str.lower()
+        sub = df_plot[
+            df_plot[status_col].astype(str).str.strip().str.lower()
             == status_name.lower()
         ]
         if len(sub) > 0:
@@ -5185,7 +6110,12 @@ def plot_reserve_classification_map(
 
     ax.set_xlabel("Easting (m)", fontsize=11, fontweight="bold")
     ax.set_ylabel("Northing (m)", fontsize=11, fontweight="bold")
-    ax.set_title(title, fontsize=13, fontweight="bold", pad=12)
+    plot_title = title
+    if plot_title is None:
+        plot_title = "Mineral Reserve & Resource Classification Map"
+        if bench_z is not None:
+            plot_title += f" (Bench Z = {bench_z:.1f} m)"
+    ax.set_title(plot_title, fontsize=13, fontweight="bold", pad=12)
     ax.grid(True, linestyle=":", alpha=0.5)
     ax.legend(loc="upper right", framealpha=0.9, fontsize=9.5)
     fig.tight_layout()
@@ -5209,9 +6139,12 @@ def plot_resource_classification_map(
     category_col: str = "category",
     boundary: Optional[Sequence[tuple[float, float]]] = None,
     drillholes: Optional[pd.DataFrame] = None,
+    bench_z: Optional[float] = None,
+    elevation_tolerance: float = 5.0,
     x_col: str = "x",
     y_col: str = "y",
-    title: str = "CIM / JORC Mineral Resource Classification Map",
+    z_col: str = "z",
+    title: Optional[str] = None,
     ax: Optional[plt.Axes] = None,
     figsize: tuple[float, float] = (10, 8),
 ) -> tuple[plt.Figure, plt.Axes]:
@@ -5223,6 +6156,9 @@ def plot_resource_classification_map(
     - Inferred Resource: Amber / Orange (#ff7f0e)
     - Unclassified: Light Grey (#d3d3d3)
 
+    Supports horizontal bench slice filtering via `bench_z` and `elevation_tolerance`
+    to prevent 3D block overplotting on 2D mine plans.
+
     Parameters
     ----------
     block_model : pd.DataFrame
@@ -5233,9 +6169,16 @@ def plot_resource_classification_map(
         Perimeter boundary polygon coordinates.
     drillholes : pd.DataFrame, optional
         Collar coordinates table with 'x' and 'y' columns.
+    bench_z : float, optional
+        Target elevation for horizontal bench slice. If specified, isolates blocks within
+        elevation_tolerance of bench_z to eliminate 3D overplotting.
+    elevation_tolerance : float, default 5.0
+        Half-thickness (± meters) for bench slice filtering.
     x_col, y_col : str, default "x", "y"
         Coordinate column names.
-    title : str, default "CIM / JORC Mineral Resource Classification Map"
+    z_col : str, default "z"
+        Elevation coordinate column name (required if bench_z is provided).
+    title : str, optional
         Plot title.
     ax : plt.Axes, optional
         Existing axes to draw on.
@@ -5251,6 +6194,22 @@ def plot_resource_classification_map(
     else:
         fig = ax.figure
 
+    if bench_z is not None:
+        if z_col not in block_model.columns:
+            raise ValueError(
+                f"z_col '{z_col}' not found in block_model for bench filtering."
+            )
+        df_plot = block_model[
+            (block_model[z_col] >= bench_z - elevation_tolerance)
+            & (block_model[z_col] <= bench_z + elevation_tolerance)
+        ].copy()
+        if len(df_plot) == 0:
+            raise ValueError(
+                f"No blocks found within elevation {bench_z} ± {elevation_tolerance} m."
+            )
+    else:
+        df_plot = block_model
+
     color_palette = {
         "Measured": "#2ca02c",  # Forest green
         "Indicated": "#1f77b4",  # Royal Blue
@@ -5259,12 +6218,12 @@ def plot_resource_classification_map(
     }
 
     # Normalize categories
-    cats_lower = block_model[category_col].astype(str).str.strip().str.lower()
+    cats_lower = df_plot[category_col].astype(str).str.strip().str.lower()
 
     # Draw blocks grouped by category
     for cat_name, color in color_palette.items():
         mask = cats_lower == cat_name.lower()
-        sub = block_model[mask]
+        sub = df_plot[mask]
         if len(sub) > 0:
             ax.scatter(
                 sub[x_col],
@@ -5312,11 +6271,285 @@ def plot_resource_classification_map(
 
     ax.set_xlabel("Easting (m)", fontsize=11, fontweight="bold")
     ax.set_ylabel("Northing (m)", fontsize=11, fontweight="bold")
-    ax.set_title(title, fontsize=13, fontweight="bold", pad=12)
+    plot_title = title
+    if plot_title is None:
+        plot_title = "CIM / JORC Mineral Resource Classification Map"
+        if bench_z is not None:
+            plot_title += f" (Bench Z = {bench_z:.1f} m)"
+    ax.set_title(plot_title, fontsize=13, fontweight="bold", pad=12)
     ax.grid(True, linestyle=":", alpha=0.5)
     ax.legend(loc="upper right", framealpha=0.9, fontsize=9.5)
     fig.tight_layout()
     return fig, ax
+
+
+def plot_resource_classification_orthogonal_slices(
+    block_model: pd.DataFrame,
+    category_col: str = "category",
+    bench_z: Optional[float] = None,
+    section_y: Optional[float] = None,
+    section_x: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    cross_section_view: str = "north",
+    long_section_view: str = "west",
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    dx_col: str = "dx",
+    dy_col: str = "dy",
+    dz_col: str = "dz",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (19.0, 5.8),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Generates 3-panel synchronized orthogonal slices of regulatory resource classification.
+
+    Mandated by international reporting guidelines (CIM Definition Standards 2014, JORC Code 2012 Table 1)
+    (TODO: Manually Verify) to document spatial continuity and drill spacing compliance in 3D:
+    - Panel 1: Bench Plan (X-Y at elevation Z = bench_z): Horizontal continuity of Measured/Indicated blocks.
+    - Panel 2: Cross-Section (X-Z at northing Y = section_y): Vertical continuity across deposit strike.
+      * Looking North (default): West is left, East is right.
+      * Looking South: East is left, West is right (X-axis inverted).
+    - Panel 3: Longitudinal Section (Y-Z at easting X = section_x): Continuity and plunge along strike.
+      * Looking West (default): South is left, North is right.
+      * Looking East: North is left, South is right (Y-axis inverted).
+
+    Standard regulatory classification colors:
+    - Measured: Forest Green (#2ca02c)
+    - Indicated: Royal Blue (#1f77b4)
+    - Inferred: Amber / Orange (#ff7f0e)
+    - Unclassified: Light Grey (#d3d3d3)
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z) and category column.
+    category_col : str, default "category"
+        Resource classification column ("Measured", "Indicated", "Inferred", "Unclassified").
+    bench_z : float, optional
+        Target elevation for horizontal bench slice. If None, uses median block elevation.
+    section_y : float, optional
+        Target northing for cross-section slice. If None, uses median block northing.
+    section_x : float, optional
+        Target easting for longitudinal slice. If None, uses median block easting.
+    samples_xyz : np.ndarray, optional
+        Drillhole composite coordinates of shape (N, 3) for slice corridor overlay.
+    cross_section_view : str, default "north"
+        Viewing direction for cross-section ("north" or "south").
+    long_section_view : str, default "west"
+        Viewing direction for longitudinal section ("west" or "east").
+    x_col, y_col, z_col : str, default "x", "y", "z"
+        Centroid coordinate column names.
+    dx_col, dy_col, dz_col : str, default "dx", "dy", "dz"
+        Block dimension column names (auto-estimated from coordinates if absent).
+    title : str, optional
+        Super-title for the figure.
+    figsize : Tuple[float, float], default (19.0, 5.8)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Figure and tuple of 3 axes: (ax_bench, ax_cross, ax_long).
+    """
+    if block_model.empty:
+        raise ValueError("block_model cannot be empty.")
+
+    cross_section_view = cross_section_view.lower()
+    if cross_section_view not in ["north", "south"]:
+        raise ValueError("cross_section_view must be 'north' or 'south'.")
+    long_section_view = long_section_view.lower()
+    if long_section_view not in ["west", "east"]:
+        raise ValueError("long_section_view must be 'west' or 'east'.")
+
+    for req in [x_col, y_col, z_col]:
+        if req not in block_model.columns:
+            raise ValueError(f"block_model is missing required coordinate column '{req}'.")
+    if category_col not in block_model.columns:
+        raise ValueError(
+            f"block_model is missing category column '{category_col}'."
+        )
+
+    bm = block_model.copy()
+
+    # Estimate block dimensions if missing
+    for c, dim_c in [(x_col, dx_col), (y_col, dy_col), (z_col, dz_col)]:
+        if dim_c not in bm.columns:
+            unq = np.sort(bm[c].unique())
+            if len(unq) > 1:
+                diffs = np.diff(unq)
+                diffs = diffs[diffs > 1e-4]
+                val = float(np.median(diffs)) if len(diffs) > 0 else 10.0
+            else:
+                val = 10.0
+            bm[dim_c] = val
+
+    # Encode categories to integer codes
+    cat_str = bm[category_col].astype(str).str.strip().str.lower()
+    code_arr = np.full(len(bm), 3, dtype=int)  # 3 = Unclassified
+    code_arr[cat_str == "measured"] = 0
+    code_arr[cat_str == "indicated"] = 1
+    code_arr[cat_str == "inferred"] = 2
+    code_arr[cat_str == "unclassified"] = 3
+    bm["_cat_code"] = code_arr
+
+    cat_colors = ["#2ca02c", "#1f77b4", "#ff7f0e", "#d3d3d3"]
+    cmap_cat = mcolors.ListedColormap(cat_colors)
+    norm_cat = mcolors.BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], ncolors=4)
+
+    # Pick exact centroid coordinate slices
+    unique_z = np.sort(bm[z_col].unique())
+    unique_y = np.sort(bm[y_col].unique())
+    unique_x = np.sort(bm[x_col].unique())
+
+    target_z = (
+        unique_z[np.argmin(np.abs(unique_z - bench_z))]
+        if bench_z is not None
+        else unique_z[len(unique_z) // 2]
+    )
+    target_y = (
+        unique_y[np.argmin(np.abs(unique_y - section_y))]
+        if section_y is not None
+        else unique_y[len(unique_y) // 2]
+    )
+    target_x = (
+        unique_x[np.argmin(np.abs(unique_x - section_x))]
+        if section_x is not None
+        else unique_x[len(unique_x) // 2]
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
+
+    # 1. Bench Plan (X-Y at target_z)
+    slice_bench = bm[np.isclose(bm[z_col], target_z)]
+    dz_val = float(slice_bench[dz_col].iloc[0]) if len(slice_bench) > 0 else 5.0
+    _render_2d_block_patches(
+        axes[0], slice_bench, x_col, y_col, dx_col, dy_col, "_cat_code", norm_cat, cmap_cat
+    )
+    axes[0].set_title(
+        f"Bench Plan (Z = {target_z:.1f} m) [Looking Down]",
+        fontsize=11,
+        fontweight="bold",
+    )
+    axes[0].set_xlabel("Easting (X) [m]")
+    axes[0].set_ylabel("Northing (Y) [m]")
+    axes[0].set_aspect("equal")
+    axes[0].axhline(target_y, color="red", linestyle="--", linewidth=1.2, alpha=0.8)
+    axes[0].axvline(target_x, color="cyan", linestyle="--", linewidth=1.2, alpha=0.8)
+
+    # 2. Cross-Section (X-Z at target_y)
+    slice_sec = bm[np.isclose(bm[y_col], target_y)]
+    dy_val = float(slice_sec[dy_col].iloc[0]) if len(slice_sec) > 0 else 10.0
+    _render_2d_block_patches(
+        axes[1], slice_sec, x_col, z_col, dx_col, dz_col, "_cat_code", norm_cat, cmap_cat
+    )
+    view_cs_label = (
+        "Looking North" if cross_section_view == "north" else "Looking South"
+    )
+    x_dir_label = (
+        "Easting (X) [m] (← West | East →)"
+        if cross_section_view == "north"
+        else "Easting (X) [m] (← East | West →)"
+    )
+    axes[1].set_title(
+        f"Cross-Section (Y = {target_y:.1f} m) [{view_cs_label}]",
+        fontsize=11,
+        fontweight="bold",
+    )
+    axes[1].set_xlabel(x_dir_label)
+    axes[1].set_ylabel("Elevation (Z) [m]")
+    axes[1].set_aspect("equal")
+    if cross_section_view == "south":
+        axes[1].invert_xaxis()
+    axes[1].axhline(target_z, color="magenta", linestyle="--", linewidth=1.2, alpha=0.8)
+    axes[1].axvline(target_x, color="cyan", linestyle="--", linewidth=1.2, alpha=0.8)
+
+    # 3. Longitudinal Section (Y-Z at target_x)
+    slice_long = bm[np.isclose(bm[x_col], target_x)]
+    dx_val = float(slice_long[dx_col].iloc[0]) if len(slice_long) > 0 else 10.0
+    _render_2d_block_patches(
+        axes[2], slice_long, y_col, z_col, dy_col, dz_col, "_cat_code", norm_cat, cmap_cat
+    )
+    view_ls_label = "Looking West" if long_section_view == "west" else "Looking East"
+    y_dir_label = (
+        "Northing (Y) [m] (← South | North →)"
+        if long_section_view == "west"
+        else "Northing (Y) [m] (← North | South →)"
+    )
+    axes[2].set_title(
+        f"Longitudinal Section (X = {target_x:.1f} m) [{view_ls_label}]",
+        fontsize=11,
+        fontweight="bold",
+    )
+    axes[2].set_xlabel(y_dir_label)
+    axes[2].set_ylabel("Elevation (Z) [m]")
+    axes[2].set_aspect("equal")
+    if long_section_view == "east":
+        axes[2].invert_xaxis()
+    axes[2].axhline(target_z, color="magenta", linestyle="--", linewidth=1.2, alpha=0.8)
+    axes[2].axvline(target_y, color="red", linestyle="--", linewidth=1.2, alpha=0.8)
+
+    # Drillhole composite overlay within corridors
+    if samples_xyz is not None and len(samples_xyz) > 0:
+        samples_arr = np.asarray(samples_xyz, dtype=float)
+        # Bench corridor
+        mask_bench = np.abs(samples_arr[:, 2] - target_z) <= 0.5 * dz_val
+        if np.any(mask_bench):
+            axes[0].scatter(
+                samples_arr[mask_bench, 0],
+                samples_arr[mask_bench, 1],
+                c="black",
+                marker="^",
+                s=35,
+                zorder=5,
+            )
+        # Cross-section corridor
+        mask_sec = np.abs(samples_arr[:, 1] - target_y) <= 0.5 * dy_val
+        if np.any(mask_sec):
+            axes[1].scatter(
+                samples_arr[mask_sec, 0],
+                samples_arr[mask_sec, 2],
+                c="black",
+                marker="^",
+                s=35,
+                zorder=5,
+            )
+        # Longitudinal section corridor
+        mask_long = np.abs(samples_arr[:, 0] - target_x) <= 0.5 * dx_val
+        if np.any(mask_long):
+            axes[2].scatter(
+                samples_arr[mask_long, 1],
+                samples_arr[mask_long, 2],
+                c="black",
+                marker="^",
+                s=35,
+                zorder=5,
+            )
+
+    # Legend elements
+    legend_handles = [
+        mpatches.Patch(facecolor="#2ca02c", edgecolor="none", label="Measured"),
+        mpatches.Patch(facecolor="#1f77b4", edgecolor="none", label="Indicated"),
+        mpatches.Patch(facecolor="#ff7f0e", edgecolor="none", label="Inferred"),
+        mpatches.Patch(facecolor="#d3d3d3", edgecolor="none", label="Unclassified"),
+    ]
+    if samples_xyz is not None and len(samples_xyz) > 0:
+        legend_handles.append(
+            mlines.Line2D([], [], color="black", marker="^", linestyle="None", markersize=7, label="Drillhole Composites")
+        )
+
+    for ax_i in axes:
+        ax_i.grid(True, linestyle=":", alpha=0.4)
+
+    axes[0].legend(handles=legend_handles, loc="upper right", framealpha=0.85, fontsize=8.5)
+
+    sup_title = (
+        title
+        if title is not None
+        else "3D Resource Classification Orthogonal Slices (CIM / JORC)"
+    )
+    fig.suptitle(sup_title, fontsize=13, fontweight="bold")
+
+    return fig, (axes[0], axes[1], axes[2])
 
 
 def plot_in_situ_vs_diluted_curves(
@@ -6458,21 +7691,33 @@ def contact_profile_analysis(
     grade_col: str,
     distance_col: Optional[str] = None,
     contact_surface: Optional[Sequence[Tuple[float, float]]] = None,
+    contact_plane_point: Optional[Sequence[float]] = None,
+    contact_dip: Optional[float] = None,
+    contact_dip_direction: Optional[float] = None,
+    contact_normal: Optional[Sequence[float]] = None,
+    contact_points: Optional[Union[np.ndarray, Sequence[Sequence[float]]]] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: Optional[str] = "z",
     bin_width: float = 2.0,
     max_distance: float = 30.0,
     domain_a: Optional[Any] = None,
     domain_b: Optional[Any] = None,
 ) -> pd.DataFrame:
-    """Evaluates grade continuity across a geological contact (Boundary Analysis).
+    """Evaluates grade continuity across a geological contact (Boundary Analysis) in 2D or 3D.
 
-    Determines quantitatively whether a geological, lithological, or structural
-    contact is:
+    Per CIM MRMR Best Practice Guidelines (§4.2 Domain Modeling) and JORC Code (2012) Table 1 (TODO: Manually Verify),
+    contact profile analysis (grade vs. perpendicular distance from boundary) must be conducted to establish
+    whether geological contacts represent:
     - HARD BOUNDARY: A sharp step-change discontinuity at distance 0.
       Requires strict segregation during kriging/interpolation (no sample sharing).
     - SOFT BOUNDARY: A continuous gradient with no discontinuity.
       Samples from both sides can be freely shared across the contact.
     - SEMI-SOFT / TRANSITIONAL BOUNDARY: A moderate transition zone.
       Samples are shared only within a restricted buffer or with distance decay.
+
+    Supports 3D planar contacts (dip / dip direction or plane normal vector), 3D point cloud surfaces
+    (e.g. wireframe contact nodes), 2D contact line segments, or precomputed signed distance columns.
 
     Parameters
     ----------
@@ -6483,12 +7728,28 @@ def contact_profile_analysis(
     grade_col : str
         Grade column name.
     distance_col : str, optional
-        Signed perpendicular distance to the contact surface (negative for domain_a,
-        positive for domain_b). If omitted, auto-detected from 'distance' or computed
-        from contact_surface.
+        Signed perpendicular distance column in `df` (negative for domain_a, positive for domain_b).
+        If omitted, auto-detected from 'distance' or 'dist_to_contact' if present.
     contact_surface : sequence of tuple of float, optional
         2D contact line segment [(x1, y1), (x2, y2)] used to compute perpendicular
-        signed distance if distance_col is not pre-calculated.
+        signed distance in 2D.
+    contact_plane_point : sequence of float, optional
+        Reference point (x0, y0, z0) lying on the 3D contact plane (or (x0, y0) in 2D).
+    contact_dip : float, optional
+        Dip angle of the 3D planar contact in degrees from horizontal (0 to 90 degrees).
+    contact_dip_direction : float, optional
+        Azimuth / dip direction of the 3D planar contact in degrees clockwise from North [0, 360).
+    contact_normal : sequence of float, optional
+        Direct unit normal vector (nx, ny, nz) perpendicular to the contact plane.
+    contact_points : np.ndarray or sequence of sequence of float, optional
+        3D (K, 3) or 2D (K, 2) array of digitized contact surface or wireframe points.
+        Perpendicular distance is computed to the nearest contact point.
+    x_col : str, default "x"
+        Easting coordinate column name.
+    y_col : str, default "y"
+        Northing coordinate column name.
+    z_col : str, optional, default "z"
+        Elevation coordinate column name.
     bin_width : float, default 2.0
         Distance bin width (meters).
     max_distance : float, default 30.0
@@ -6502,7 +7763,12 @@ def contact_profile_analysis(
     pd.DataFrame
         Contact profile binned table with columns:
         ['bin_center', 'bin_min', 'bin_max', 'domain', 'sample_count', 'mean_grade', 'std_grade', 'sem_grade']
-        Audit attributes (.attrs) include 'boundary_type', 'step_change', 'step_ratio', and 'recommendation'.
+        Audit attributes (.attrs) include:
+        - 'boundary_type': 'Hard', 'Soft', 'Semi-Soft', or 'Indeterminate'
+        - 'step_change': absolute grade discontinuity across contact
+        - 'step_ratio': relative grade jump ratio
+        - 'recommendation': actionable kriging sharing advice
+        - 'contact_type': '3D Plane', '3D Point Cloud', '2D Line Segment', or 'Precomputed Column'
     """
     if domain_col not in df.columns:
         raise ValueError(f"Domain column '{domain_col}' not found in DataFrame.")
@@ -6530,18 +7796,115 @@ def contact_profile_analysis(
     if len(sub_df) == 0:
         raise ValueError(f"No samples found for domains '{dom_a}' and '{dom_b}'.")
 
+    contact_type = "Precomputed Column"
+    normal = None
+    p0 = None
+
     # Compute or extract signed distance
     if distance_col is not None:
         if distance_col not in sub_df.columns:
             raise ValueError(f"Specified distance_col '{distance_col}' not found.")
         dists = sub_df[distance_col].to_numpy(dtype=float)
-    elif "distance" in sub_df.columns:
-        dists = sub_df["distance"].to_numpy(dtype=float)
-    elif "dist_to_contact" in sub_df.columns:
-        dists = sub_df["dist_to_contact"].to_numpy(dtype=float)
+        contact_type = "Precomputed Column"
+    elif contact_plane_point is not None or contact_dip is not None or contact_normal is not None:
+        if contact_plane_point is None:
+            raise ValueError(
+                "Must provide 'contact_plane_point' (e.g. (x0, y0, z0)) when defining a planar contact."
+            )
+        p0 = np.asarray(contact_plane_point, dtype=float)
+        if len(p0) not in (2, 3):
+            raise ValueError(
+                f"'contact_plane_point' must have length 2 or 3, got {len(p0)}."
+            )
+
+        if contact_dip is not None:
+            if contact_dip < 0.0 or contact_dip > 90.0:
+                raise ValueError(
+                    f"contact_dip must be between 0 and 90 degrees, got {contact_dip}."
+                )
+            if contact_dip_direction is None:
+                raise ValueError(
+                    "contact_dip_direction must be provided when contact_dip is specified."
+                )
+            if contact_dip_direction < 0.0 or contact_dip_direction >= 360.0:
+                raise ValueError(
+                    f"contact_dip_direction must be in [0, 360), got {contact_dip_direction}."
+                )
+            dip_rad = np.radians(contact_dip)
+            dd_rad = np.radians(contact_dip_direction)
+            # Upward/hanging-wall unit normal:
+            normal = np.array([
+                np.sin(dd_rad) * np.sin(dip_rad),
+                np.cos(dd_rad) * np.sin(dip_rad),
+                np.cos(dip_rad),
+            ], dtype=float)
+        elif contact_normal is not None:
+            normal = np.asarray(contact_normal, dtype=float)
+            norm_len = np.linalg.norm(normal)
+            if norm_len <= 1e-9:
+                raise ValueError("contact_normal must have non-zero length.")
+            normal = normal / norm_len
+        else:
+            raise ValueError(
+                "Must provide either ('contact_dip' and 'contact_dip_direction') or 'contact_normal' with 'contact_plane_point'."
+            )
+
+        is_3d = len(p0) == 3 or len(normal) == 3 or (z_col is not None and z_col in sub_df.columns)
+        if is_3d:
+            for col_name, c_label in [(x_col, "x_col"), (y_col, "y_col"), (z_col, "z_col")]:
+                if col_name is None or col_name not in sub_df.columns:
+                    raise ValueError(
+                        f"Required 3D coordinate column '{col_name}' ({c_label}) not found in DataFrame."
+                    )
+            pts = sub_df[[x_col, y_col, z_col]].to_numpy(dtype=float)
+            if len(p0) == 2:
+                p0 = np.array([p0[0], p0[1], 0.0], dtype=float)
+            if len(normal) == 2:
+                normal = np.array([normal[0], normal[1], 0.0], dtype=float)
+            contact_type = "3D Plane"
+        else:
+            for col_name, c_label in [(x_col, "x_col"), (y_col, "y_col")]:
+                if col_name not in sub_df.columns:
+                    raise ValueError(
+                        f"Required coordinate column '{col_name}' ({c_label}) not found in DataFrame."
+                    )
+            pts = sub_df[[x_col, y_col]].to_numpy(dtype=float)
+            contact_type = "Planar Contact"
+
+        dists = np.dot(pts - p0, normal)
+    elif contact_points is not None:
+        c_pts = np.asarray(contact_points, dtype=float)
+        if c_pts.ndim != 2 or c_pts.shape[1] not in (2, 3):
+            raise ValueError(
+                f"contact_points must be a 2D array/sequence of shape (K, 2) or (K, 3), got shape {c_pts.shape}."
+            )
+        if len(c_pts) == 0:
+            raise ValueError("contact_points cannot be empty.")
+        is_3d = c_pts.shape[1] == 3
+        if is_3d:
+            for col_name, c_label in [(x_col, "x_col"), (y_col, "y_col"), (z_col, "z_col")]:
+                if col_name is None or col_name not in sub_df.columns:
+                    raise ValueError(
+                        f"Required 3D coordinate column '{col_name}' ({c_label}) not found in DataFrame."
+                    )
+            pts = sub_df[[x_col, y_col, z_col]].to_numpy(dtype=float)
+            contact_type = "3D Point Cloud"
+        else:
+            for col_name, c_label in [(x_col, "x_col"), (y_col, "y_col")]:
+                if col_name not in sub_df.columns:
+                    raise ValueError(
+                        f"Required coordinate column '{col_name}' ({c_label}) not found in DataFrame."
+                    )
+            pts = sub_df[[x_col, y_col]].to_numpy(dtype=float)
+            contact_type = "2D Point Cloud"
+
+        tree = cKDTree(c_pts)
+        unsigned_dists, _ = tree.query(pts)
+        dom_vals = sub_df[domain_col].to_numpy()
+        dists = np.where(dom_vals == dom_a, -unsigned_dists, unsigned_dists)
     elif contact_surface is not None:
         # Calculate 2D signed perpendicular distance to line segment
-        pts = sub_df[["x", "y"]].to_numpy(dtype=float)
+        pts = sub_df[[x_col, y_col]].to_numpy(dtype=float)
         p1 = np.array(contact_surface[0], dtype=float)
         p2 = np.array(contact_surface[1], dtype=float)
         line_vec = p2 - p1
@@ -6552,9 +7915,16 @@ def contact_profile_analysis(
 
         # Signed distance from p1 along normal
         dists = np.dot(pts - p1, normal)
+        contact_type = "2D Line Segment"
+    elif "distance" in sub_df.columns:
+        dists = sub_df["distance"].to_numpy(dtype=float)
+        contact_type = "Precomputed Column"
+    elif "dist_to_contact" in sub_df.columns:
+        dists = sub_df["dist_to_contact"].to_numpy(dtype=float)
+        contact_type = "Precomputed Column"
     else:
         raise ValueError(
-            "Must provide either 'distance_col' or a 2D 'contact_surface' segment."
+            "Must provide either 'distance_col', a 3D planar contact ('contact_plane_point' with 'contact_dip'/'contact_dip_direction' or 'contact_normal'), 'contact_points', or a 2D 'contact_surface' line segment."
         )
 
     dom_vals = sub_df[domain_col].to_numpy()
@@ -6672,6 +8042,16 @@ def contact_profile_analysis(
     profile_df.attrs["domain_a"] = dom_a
     profile_df.attrs["domain_b"] = dom_b
     profile_df.attrs["bin_width"] = bin_width
+    profile_df.attrs["max_distance"] = max_distance
+    profile_df.attrs["contact_type"] = contact_type
+    if contact_dip is not None:
+        profile_df.attrs["contact_dip"] = float(contact_dip)
+    if contact_dip_direction is not None:
+        profile_df.attrs["contact_dip_direction"] = float(contact_dip_direction)
+    if normal is not None:
+        profile_df.attrs["contact_normal"] = normal.tolist()
+    if p0 is not None:
+        profile_df.attrs["contact_plane_point"] = p0.tolist()
     return profile_df
 
 
@@ -6836,9 +8216,19 @@ def plot_contact_profile(
 
     ax1.set_ylabel(f"Average Grade ({grade_unit})", fontsize=11, fontweight="bold")
     ax1.grid(True, linestyle=":", alpha=0.5)
-    ax1.legend(loc="upper right", framealpha=0.9, fontsize=9.0)
+    c_type = contact_df.attrs.get("contact_type", None)
+    c_dip = contact_df.attrs.get("contact_dip", None)
+    c_dd = contact_df.attrs.get("contact_dip_direction", None)
 
-    plot_title = title or f"Geological Contact Profile Analysis: {dom_a} vs. {dom_b}"
+    if title is not None:
+        plot_title = title
+    else:
+        plot_title = f"Geological Contact Profile Analysis: {dom_a} vs. {dom_b}"
+        if c_type == "3D Plane" and c_dip is not None and c_dd is not None:
+            plot_title += f"\n(3D Planar Contact: Dip {c_dip:.0f}°, Dip Dir {c_dd:.0f}°)"
+        elif c_type is not None and c_type != "Precomputed Column":
+            plot_title += f"\n({c_type})"
+
     ax1.set_title(plot_title, fontsize=12, fontweight="bold", pad=10)
 
     # -------------------------------------------------------------------------

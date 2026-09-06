@@ -26,6 +26,7 @@ from drs_mining.components.estimation import (
     classify_mineral_resources,
     format_resource_statement,
     plot_swath_analysis,
+    plot_swath_analysis_3axis,
     plot_cell_declustering_curve,
     calculate_cut_off_grade,
     cut_off_grade_breakdown,
@@ -34,6 +35,7 @@ from drs_mining.components.estimation import (
     plot_resource_to_reserve_waterfall,
     plot_reserve_classification_map,
     plot_resource_classification_map,
+    plot_resource_classification_orthogonal_slices,
     plot_in_situ_vs_diluted_curves,
     composite_drillhole_intervals,
     apply_grade_capping,
@@ -49,6 +51,8 @@ from drs_mining.components.estimation import (
     create_block_model,
     ordinary_kriging_block_estimation,
     simple_kriging_block_estimation,
+    inverse_distance_weighting_block_estimation,
+    nearest_neighbor_block_estimation,
     plot_block_model_orthogonal_slices,
     plot_block_model_bench_gallery,
     plot_block_model_3d_isometric,
@@ -1151,6 +1155,106 @@ def test_cell_declustering_removes_clustering_bias():
     # U-shape verification: both ends should approach naive mean
     assert np.isclose(auto_df["declustered_mean"].iloc[0], naive_mean, atol=1e-3)
     assert np.isclose(auto_df["declustered_mean"].iloc[-1], naive_mean, atol=0.05)
+
+
+def test_cell_declustering_3d_vertical_clustering():
+    """Verifies 3D cell declustering with anisotropic vertical aspect ratios."""
+    # 8 down-hole composites closely spaced vertically in high-grade sweet spot (x=10, y=10, z=10..17, grade=3.0)
+    # 2 isolated samples in low grade (x=80, y=80, z=10, 15, grade=0.5)
+    records = []
+    for z in range(10, 18):
+        records.append({"x": 10.0, "y": 10.0, "z": float(z), "grade": 3.0})
+    records.append({"x": 80.0, "y": 80.0, "z": 10.0, "grade": 0.5})
+    records.append({"x": 80.0, "y": 80.0, "z": 15.0, "grade": 0.5})
+
+    df = pd.DataFrame(records)
+    naive_mean = df["grade"].mean()  # (8*3.0 + 2*0.5) / 10 = 2.50
+
+    # Test with anisotropic vertical ratio (e.g. z_aspect_ratio = 0.25)
+    weights, sensitivity_df, opt_cs = cell_declustering(
+        df,
+        z_col="z",
+        z_aspect_ratio=0.25,
+        cell_sizes=[20.0, 40.0, 80.0],
+        n_offsets=4,
+        min_mean=True,
+    )
+
+    assert len(weights) == 10
+    assert np.isclose(weights.sum(), 1.0)
+    # The 2 isolated samples must have higher individual weights than the clustered high-grade samples
+    assert weights[8] > weights[0]
+    assert weights[9] > weights[0]
+
+    # Declustered mean must be lower than naive mean
+    min_declust_mean = sensitivity_df["declustered_mean"].min()
+    assert min_declust_mean < naive_mean
+    assert "cell_size_x" in sensitivity_df.columns
+    assert "cell_size_y" in sensitivity_df.columns
+    assert "cell_size_z" in sensitivity_df.columns
+    assert "optimal_cell_size_3d" in sensitivity_df.attrs
+    opt_3d = sensitivity_df.attrs["optimal_cell_size_3d"]
+    assert len(opt_3d) == 3
+    assert np.isclose(opt_3d[2], opt_3d[0] * 0.25)
+
+    # Test automatic 3D range (cell_sizes=None)
+    auto_w, auto_df, auto_opt = cell_declustering(
+        df,
+        z_col="z",
+        z_aspect_ratio=0.25,
+        min_mean=True,
+    )
+    assert len(auto_w) == 10
+    assert len(auto_df) == 45
+    assert np.isclose(auto_w.sum(), 1.0)
+
+
+def test_cell_declustering_domain_segregation():
+    """Verifies domain segregation in cell declustering per CIM MRMR §4.2."""
+    df = pd.DataFrame({
+        "x": [10.0, 11.0, 10.0, 100.0, 10.0, 12.0, 100.0],
+        "y": [10.0, 10.0, 11.0, 100.0, 10.0, 11.0, 100.0],
+        "z": [10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0],
+        "grade": [2.5, 2.5, 2.5, 0.6, 1.8, 1.8, 0.4],
+        "domain": ["Oxide", "Oxide", "Oxide", "Oxide", "Sulphide", "Sulphide", "Sulphide"],
+    })
+
+    weights, sensitivity_df, opt_cs = cell_declustering(
+        df,
+        z_col="z",
+        domain_col="domain",
+        cell_sizes=[15.0, 30.0, 60.0],
+    )
+
+    assert len(weights) == 7
+    assert np.isclose(weights.sum(), 1.0)
+    # Weights for isolated sample in Oxide (index 3) should exceed clustered samples in Oxide
+    assert weights[3] > weights[0]
+    # Weights for isolated sample in Sulphide (index 6) should exceed clustered samples in Sulphide
+    assert weights[6] > weights[4]
+
+
+def test_cell_declustering_validations():
+    df = pd.DataFrame({
+        "x": [10.0, 20.0],
+        "y": [10.0, 20.0],
+        "grade": [1.0, 2.0],
+    })
+    # Missing z_col
+    with pytest.raises(ValueError, match="Z coordinate column 'nonexistent' not found"):
+        cell_declustering(df, z_col="nonexistent")
+
+    # Missing domain_col
+    with pytest.raises(ValueError, match="Domain column 'nonexistent' not found"):
+        cell_declustering(df, domain_col="nonexistent")
+
+    # Non-positive z_aspect_ratio
+    with pytest.raises(ValueError, match="z_aspect_ratio must be strictly positive"):
+        cell_declustering(df, z_col="y", z_aspect_ratio=-0.5)
+
+    # Non-positive cell size in 3D tuple
+    with pytest.raises(ValueError, match="Cell dimensions must be strictly positive"):
+        cell_declustering(df, z_col="y", cell_sizes=[(10.0, 10.0, -5.0)])
 
 
 
@@ -3311,4 +3415,871 @@ def test_compositing_error_and_validation():
         composite_drillhole_intervals(
             df_gap, composite_length=2.0, min_coverage_ratio=1.5
         )
+
+
+def test_inverse_distance_weighting_block_estimation_basic():
+    # 1. Setup a simple 3D block model
+    bm = create_block_model(
+        origin=(0.0, 0.0, 0.0),
+        block_size=(10.0, 10.0, 5.0),
+        n_blocks=(3, 3, 2),  # 18 blocks
+        default_density=2.70,
+    )
+    samples_xyz = np.array([
+        [5.0, 5.0, 2.5],     # Centroid of block (0, 0, 0)
+        [25.0, 5.0, 2.5],    # Centroid of block (2, 0, 0)
+        [15.0, 25.0, 7.5],   # Centroid of block (1, 2, 1)
+    ])
+    sample_grades = np.array([10.0, 2.0, 5.0])
+
+    # Centroid estimation (1, 1, 1)
+    est_cent, dist_cent = inverse_distance_weighting_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        power=2.0,
+        k_neighbors=3,
+        discretization=(1, 1, 1),
+    )
+    assert len(est_cent) == 18
+    assert len(dist_cent) == 18
+    # Exact collocation at block (0, 0, 0) centroid
+    assert np.isclose(est_cent[0], 10.0)
+    assert np.isclose(dist_cent[0], (0.0 + 20.0 + np.linalg.norm(samples_xyz[2] - np.array([5.0, 5.0, 2.5]))) / 3.0)
+
+    # Discretized block support estimation (4, 4, 2)
+    est_disc, dist_disc = inverse_distance_weighting_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        power=2.0,
+        k_neighbors=3,
+        discretization=(4, 4, 2),
+    )
+    assert len(est_disc) == 18
+    # Discretization smooths grades across the block volume; center block has finite positive grade
+    assert np.all(np.isfinite(est_disc))
+    assert np.all(est_disc > 0.0)
+
+    # Power=0 gives equal weights (simple arithmetic mean of active neighbors) on non-collocated blocks
+    est_p0, _ = inverse_distance_weighting_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        power=0.0,
+        k_neighbors=3,
+        discretization=(1, 1, 1),
+    )
+    collocated = np.zeros(len(bm), dtype=bool)
+    for s in samples_xyz:
+        collocated |= np.linalg.norm(bm[["x", "y", "z"]].to_numpy() - s, axis=1) < 1e-3
+    assert np.allclose(est_p0[~collocated], np.mean(sample_grades))
+
+
+def test_inverse_distance_weighting_block_estimation_anisotropy_and_masking():
+    bm = create_block_model(
+        origin=(0.0, 0.0, 0.0),
+        block_size=(10.0, 10.0, 5.0),
+        n_blocks=(5, 5, 2),  # 50 blocks
+        default_density=2.70,
+    )
+    samples_xyz = np.array([
+        [25.0, 25.0, 2.5],  # Center
+        [45.0, 25.0, 2.5],  # 20m East (+X)
+        [25.0, 45.0, 2.5],  # 20m North (+Y)
+    ])
+    sample_grades = np.array([5.0, 10.0, 1.0])
+
+    # Anisotropy strongly elongated along strike (azimuth=90, along East)
+    # Range: major=100m along East, minor=10m across North
+    est_aniso, _ = inverse_distance_weighting_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        power=2.0,
+        k_neighbors=3,
+        anisotropy_ranges=(100.0, 100.0, 10.0),
+        anisotropy_angles=(90.0, 0.0, 0.0),
+    )
+    assert len(est_aniso) == 50
+
+    # Max radius search limitation
+    est_rad, _ = inverse_distance_weighting_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        power=2.0,
+        k_neighbors=3,
+        max_radius=15.0,  # Only nearby blocks will find samples
+    )
+    # Distant blocks at corners will be NaN
+    assert np.isnan(est_rad[0])  # Block at (5, 5, 2.5) is ~28m away from center sample
+
+    # Extrapolation masking
+    # Define samples forming a 3D tetrahedron
+    tet_samples = np.array([
+        [10.0, 10.0, 2.5],
+        [40.0, 10.0, 2.5],
+        [25.0, 40.0, 2.5],
+        [25.0, 25.0, 7.5],
+    ])
+    tet_grades = np.array([2.0, 3.0, 4.0, 5.0])
+    est_masked, _ = inverse_distance_weighting_block_estimation(
+        samples_xyz=tet_samples,
+        sample_grades=tet_grades,
+        block_model=bm,
+        mask_extrapolation=True,
+    )
+    # Exterior corner block (5, 5, 2.5) is outside convex hull
+    assert np.isnan(est_masked[0])
+    # Interior block near (25, 25, 2.5) is inside convex hull
+    inside_idx = bm[(bm["x"] == 25.0) & (bm["y"] == 25.0) & (bm["z"] == 2.5)].index[0]
+    assert np.isfinite(est_masked[inside_idx])
+
+
+def test_inverse_distance_weighting_block_estimation_domains_and_validations():
+    # Multi-domain block model
+    bm_dom = pd.DataFrame({
+        "x": [5.0, 50.0],
+        "y": [5.0, 50.0],
+        "z": [2.5, 2.5],
+        "dx": [10.0, 10.0],
+        "dy": [10.0, 10.0],
+        "dz": [5.0, 5.0],
+        "domain": ["DomainA", "DomainB"],
+    })
+    samples_xyz = np.array([
+        [5.0, 5.0, 2.5],
+        [50.0, 50.0, 2.5],
+    ])
+    sample_grades = np.array([10.0, 1.0])
+    sample_domains = ["DomainA", "DomainB"]
+
+    est_dom, dist_dom = inverse_distance_weighting_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm_dom,
+        domain_col="domain",
+        sample_domains=sample_domains,
+    )
+    assert np.isclose(est_dom[0], 10.0)
+    assert np.isclose(est_dom[1], 1.0)
+    assert np.isclose(dist_dom[0], 0.0)
+    assert np.isclose(dist_dom[1], 0.0)
+
+    # Empty inputs
+    empty_bm = pd.DataFrame(columns=["x", "y", "z", "dx", "dy", "dz"])
+    e_est, e_dist = inverse_distance_weighting_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=empty_bm,
+    )
+    assert len(e_est) == 0
+    assert len(e_dist) == 0
+
+    # Empty samples
+    e_samples_est, e_samples_dist = inverse_distance_weighting_block_estimation(
+        samples_xyz=np.empty((0, 3)),
+        sample_grades=np.empty(0),
+        block_model=bm_dom,
+    )
+    assert len(e_samples_est) == 2
+    assert np.all(np.isnan(e_samples_est))
+
+    # Validations
+    with pytest.raises(ValueError, match="missing required columns"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz, sample_grades, pd.DataFrame({"x": [0]})
+        )
+
+    with pytest.raises(ValueError, match="power must be non-negative"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz, sample_grades, bm_dom, power=-1.0
+        )
+
+    with pytest.raises(ValueError, match="k_neighbors must be at least 1"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz, sample_grades, bm_dom, k_neighbors=0
+        )
+
+    with pytest.raises(ValueError, match="max_radius must be positive"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz, sample_grades, bm_dom, max_radius=0.0
+        )
+
+    with pytest.raises(ValueError, match="discretization must be a tuple of 3 positive integers"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz, sample_grades, bm_dom, discretization=(4, 0, 2)
+        )
+
+    with pytest.raises(ValueError, match="Length of sample_grades"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz, np.array([1.0]), bm_dom
+        )
+
+    with pytest.raises(ValueError, match="samples_xyz must have shape"):
+        inverse_distance_weighting_block_estimation(
+            np.array([[1.0, 2.0]]), np.array([1.0]), bm_dom
+        )
+
+    with pytest.raises(ValueError, match="Both domain_col and sample_domains must be provided together"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz, sample_grades, bm_dom, domain_col="domain"
+        )
+
+    with pytest.raises(ValueError, match="domain_col 'nonexistent' not found in block_model"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz, sample_grades, bm_dom, domain_col="nonexistent", sample_domains=sample_domains
+        )
+
+    with pytest.raises(ValueError, match="sample_domains length .* must match samples_xyz"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz, sample_grades, bm_dom, domain_col="domain", sample_domains=["DomainA"]
+        )
+
+    # mask_extrapolation validations
+    with pytest.raises(ValueError, match="requires at least 4 non-coplanar 3D samples"):
+        inverse_distance_weighting_block_estimation(
+            samples_xyz[:2], sample_grades[:2], bm_dom, mask_extrapolation=True
+        )
+
+    # Coplanar samples in 3D (all z=0)
+    coplanar_samples = np.array([
+        [0.0, 0.0, 0.0],
+        [10.0, 0.0, 0.0],
+        [0.0, 10.0, 0.0],
+        [10.0, 10.0, 0.0],
+    ])
+    with pytest.raises(ValueError, match="samples may be coplanar"):
+        inverse_distance_weighting_block_estimation(
+            coplanar_samples, np.array([1.0, 2.0, 3.0, 4.0]), bm_dom, mask_extrapolation=True
+        )
+
+
+def test_nearest_neighbor_block_estimation():
+    bm = create_block_model(
+        origin=(0.0, 0.0, 0.0),
+        block_size=(10.0, 10.0, 5.0),
+        n_blocks=(3, 1, 1),  # 3 blocks along X: centroids at x=5, 15, 25
+        default_density=2.70,
+    )
+    samples_xyz = np.array([
+        [4.0, 5.0, 2.5],   # Nearest to block 0 (x=5)
+        [24.0, 5.0, 2.5],  # Nearest to block 2 (x=25)
+    ])
+    sample_grades = np.array([8.0, 2.0])
+
+    # Assigns nearest sample
+    nn_grades = nearest_neighbor_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+    )
+    assert isinstance(nn_grades, np.ndarray)
+    assert len(nn_grades) == 3
+    assert np.isclose(nn_grades[0], 8.0)
+    assert np.isclose(nn_grades[2], 2.0)
+
+    # Optional return_distances
+    nn_g, nn_d = nearest_neighbor_block_estimation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        return_distances=True,
+    )
+    assert len(nn_g) == 3
+    assert len(nn_d) == 3
+    assert np.isclose(nn_d[0], 1.0)  # distance from (5, 5, 2.5) to (4, 5, 2.5)
+    assert np.isclose(nn_d[2], 1.0)  # distance from (25, 5, 2.5) to (24, 5, 2.5)
+
+
+def test_classify_resources_multi_hole_independence():
+    # 1. Setup target block
+    grid_pts = np.array([[10.0, 10.0, 5.0]])
+
+    # 3 downhole composites along the SAME drillhole DH01
+    dh_single_hole = np.array([
+        [10.0, 10.0, 2.0],
+        [10.0, 10.0, 5.0],
+        [10.0, 10.0, 8.0],
+    ])
+    hole_ids_single = ["DH01", "DH01", "DH01"]
+
+    # Without sample_hole_ids: 3 samples are counted -> satisfies min_holes_measured=3 -> "Measured"
+    cats_naive = classify_resources_by_drill_spacing(
+        grid_points=grid_pts,
+        samples_xy=dh_single_hole,
+        max_radius_measured=15.0,
+        max_radius_indicated=30.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+    )
+    assert cats_naive[0] == "Measured"
+
+    # With sample_hole_ids: only 1 unique hole (DH01) -> fails min_holes_measured=3 and min_holes_indicated=2
+    # Downgraded to "Inferred" (CIM Definition Standards 2014 & JORC 2012 multi-hole independence)
+    cats_independent = classify_resources_by_drill_spacing(
+        grid_points=grid_pts,
+        samples_xy=dh_single_hole,
+        max_radius_measured=15.0,
+        max_radius_indicated=30.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        sample_hole_ids=hole_ids_single,
+    )
+    assert cats_independent[0] == "Inferred"
+
+    # Now add 2 independent drillholes within max_radius_measured
+    dh_three_holes = np.array([
+        [10.0, 10.0, 5.0],  # DH01
+        [15.0, 10.0, 5.0],  # DH02
+        [10.0, 15.0, 5.0],  # DH03
+    ])
+    hole_ids_three = ["DH01", "DH02", "DH03"]
+    cats_three = classify_resources_by_drill_spacing(
+        grid_points=grid_pts,
+        samples_xy=dh_three_holes,
+        max_radius_measured=15.0,
+        max_radius_indicated=30.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        sample_hole_ids=hole_ids_three,
+    )
+    assert cats_three[0] == "Measured"
+
+    # Also test through classify_mineral_resources wrapper
+    cats_wrapper = classify_mineral_resources(
+        grid_points=grid_pts,
+        samples_xy=dh_single_hole,
+        sample_hole_ids=hole_ids_single,
+        max_radius_measured=15.0,
+        max_radius_indicated=30.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+    )
+    assert cats_wrapper[0] == "Inferred"
+
+
+def test_classify_resources_domain_segregation():
+    # 2 target blocks: Block 0 in DomainA (x=10), Block 1 in DomainB (x=50)
+    bm = pd.DataFrame({
+        "x": [10.0, 50.0],
+        "y": [10.0, 10.0],
+        "z": [5.0, 5.0],
+        "domain": ["DomainA", "DomainB"],
+    })
+
+    # Samples: 3 in DomainA near x=10, but only 1 in DomainB near x=50
+    samples_xyz = np.array([
+        [10.0, 10.0, 5.0],
+        [12.0, 10.0, 5.0],
+        [8.0, 10.0, 5.0],
+        [50.0, 10.0, 5.0],
+    ])
+    sample_domains = ["DomainA", "DomainA", "DomainA", "DomainB"]
+
+    # In DomainA: 3 samples -> Measured
+    # In DomainB: only 1 sample -> cannot be Measured (needs 3) or Indicated (needs 2) -> Inferred
+    cats = classify_resources_by_drill_spacing(
+        grid_points=bm,
+        samples_xy=samples_xyz,
+        max_radius_measured=15.0,
+        max_radius_indicated=30.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        domain_col="domain",
+        sample_domains=sample_domains,
+    )
+    assert cats[0] == "Measured"
+    assert cats[1] == "Inferred"
+
+    # Multi-criteria classification with domain segregation and domain-isolated smoothing
+    bm_extended = pd.DataFrame({
+        "x": [10.0, 15.0, 45.0, 50.0],
+        "y": [10.0, 10.0, 10.0, 10.0],
+        "z": [5.0, 5.0, 5.0, 5.0],
+        "domain": ["DomainA", "DomainA", "DomainB", "DomainB"],
+    })
+    cats_multi = classify_mineral_resources(
+        grid_points=bm_extended,
+        samples_xy=samples_xyz,
+        sample_domains=sample_domains,
+        domain_col="domain",
+        max_radius_measured=15.0,
+        max_radius_indicated=30.0,
+        min_holes_measured=3,
+        min_holes_indicated=2,
+        smoothing_radius=20.0,  # Crosses distance between x=15 (A) and x=45 (B)
+    )
+    assert cats_multi[0] == "Measured"
+    # Domain B blocks must remain Inferred, never upgraded by Domain A smoothing
+    assert cats_multi[2] == "Inferred"
+    assert cats_multi[3] == "Inferred"
+
+
+def test_classify_resources_validations():
+    grid_pts = np.array([[10.0, 10.0, 5.0]])
+    samples = np.array([[10.0, 10.0, 5.0]])
+
+    # sample_hole_ids length mismatch
+    with pytest.raises(ValueError, match="sample_hole_ids length"):
+        classify_resources_by_drill_spacing(
+            grid_points=grid_pts,
+            samples_xy=samples,
+            max_radius_measured=10.0,
+            max_radius_indicated=20.0,
+            sample_hole_ids=["DH01", "DH02"],
+        )
+
+    # Domain mismatch: sample_domains provided without grid_domains or domain_col
+    with pytest.raises(ValueError, match="Both sample_domains and grid_domains"):
+        classify_resources_by_drill_spacing(
+            grid_points=grid_pts,
+            samples_xy=samples,
+            max_radius_measured=10.0,
+            max_radius_indicated=20.0,
+            sample_domains=["DomainA"],
+        )
+
+    # Missing x/y in DataFrame
+    with pytest.raises(ValueError, match="DataFrame must contain 'x', 'y'"):
+        classify_resources_by_drill_spacing(
+            grid_points=pd.DataFrame({"foo": [1]}),
+            samples_xy=samples,
+            max_radius_measured=10.0,
+            max_radius_indicated=20.0,
+        )
+
+
+def test_plot_swath_analysis_3axis_happy_path():
+    np.random.seed(42)
+    # Generate 3D block model
+    xs = np.linspace(25, 275, 20)
+    ys = np.linspace(25, 275, 20)
+    zs = np.linspace(5, 95, 10)
+    grid = np.array(np.meshgrid(xs, ys, zs)).T.reshape(-1, 3)
+
+    block_model = pd.DataFrame({
+        "x": grid[:, 0],
+        "y": grid[:, 1],
+        "z": grid[:, 2],
+        "estimated_grade": 1.2 + 0.3 * np.sin(grid[:, 0] / 50.0) + 0.2 * np.cos(grid[:, 2] / 20.0),
+        "nn_grade": 1.2 + 0.35 * np.sin(grid[:, 0] / 50.0) + 0.2 * np.cos(grid[:, 2] / 20.0) + np.random.normal(0, 0.05, len(grid)),
+        "tonnes": 25000.0,
+    })
+
+    drillholes = pd.DataFrame({
+        "x": [50.0, 100.0, 150.0, 200.0, 250.0],
+        "y": [50.0, 100.0, 150.0, 200.0, 250.0],
+        "z": [10.0, 30.0, 50.0, 70.0, 90.0],
+        "grade": [1.1, 1.4, 1.5, 0.9, 0.8],
+    })
+
+    fig, axes = plot_swath_analysis_3axis(
+        block_model=block_model,
+        drillholes=drillholes,
+        bin_widths=(50.0, 50.0, 20.0),
+        grade_col="estimated_grade",
+        validation_grade_col="nn_grade",
+        drillhole_grade_col="grade",
+        tonnes_col="tonnes",
+        model_name="Ordinary Kriging",
+        validation_model_name="Nearest Neighbor",
+        grade_unit="% Cu",
+        tonnage_unit="Mt",
+    )
+
+    assert isinstance(fig, plt.Figure)
+    assert len(axes) == 3
+    for ax in axes:
+        assert isinstance(ax, plt.Axes)
+        # Each axis should have lines plotted
+        assert len(ax.get_lines()) >= 2  # OK line and NN line
+    plt.close(fig)
+
+
+def test_plot_swath_analysis_3axis_fallback_and_options():
+    np.random.seed(42)
+    x = np.linspace(10, 100, 30)
+    y = np.linspace(10, 100, 30)
+    z = np.linspace(5, 50, 30)
+    # Using 'grade' instead of default 'estimated_grade' to test fallback
+    block_model = pd.DataFrame({
+        "x": x,
+        "y": y,
+        "z": z,
+        "grade": 0.75 + 0.1 * np.random.randn(30),
+        "tonnes": 10000.0,
+    })
+
+    # Scalar bin_widths
+    fig, axes = plot_swath_analysis_3axis(
+        block_model=block_model,
+        bin_widths=20.0,
+        title="Custom 3-Axis Swath Validation",
+        figsize=(12.0, 10.0),
+    )
+    assert isinstance(fig, plt.Figure)
+    assert len(axes) == 3
+    plt.close(fig)
+
+
+def test_plot_swath_analysis_3axis_validations():
+    # Empty DataFrame
+    with pytest.raises(ValueError, match="block_model cannot be empty"):
+        plot_swath_analysis_3axis(pd.DataFrame())
+
+    # Missing grade column
+    bm = pd.DataFrame({"x": [1.0], "y": [2.0], "z": [3.0], "unrelated": [10.0]})
+    with pytest.raises(ValueError, match="grade_col 'estimated_grade' not found"):
+        plot_swath_analysis_3axis(bm)
+
+    # Missing coordinate column
+    bm_no_z = pd.DataFrame({"x": [1.0], "y": [2.0], "grade": [1.0]})
+    with pytest.raises(ValueError, match="Required coordinate column 'z'"):
+        plot_swath_analysis_3axis(bm_no_z)
+
+    # Invalid bin_widths (wrong length)
+    bm_valid = pd.DataFrame({"x": [1.0], "y": [2.0], "z": [3.0], "grade": [1.0]})
+    with pytest.raises(ValueError, match="bin_widths must be a float or a sequence of 3 floats"):
+        plot_swath_analysis_3axis(bm_valid, bin_widths=(10.0, 20.0))
+
+    # Non-positive bin width
+    with pytest.raises(ValueError, match="All bin_widths must be strictly positive"):
+        plot_swath_analysis_3axis(bm_valid, bin_widths=(10.0, -5.0, 10.0))
+
+
+def test_contact_profile_analysis_3d_planar():
+    np.random.seed(42)
+    # Define 3D dipping plane: x0=(100, 100, 50), dip=45°, dip_direction=90° (dipping East)
+    p0 = np.array([100.0, 100.0, 50.0])
+    dip_deg = 45.0
+    dd_deg = 90.0
+    # Normal: (sin(90)*sin(45), cos(90)*sin(45), cos(45)) = (sqrt(2)/2, 0, sqrt(2)/2)
+    normal = np.array([np.sqrt(2) / 2.0, 0.0, np.sqrt(2) / 2.0])
+
+    # Generate samples at perpendicular distances s from -18 to +18
+    s_host = np.linspace(-18.0, -2.0, 25)
+    s_ore = np.linspace(2.0, 18.0, 25)
+
+    host_pts = p0 + np.outer(s_host, normal)
+    # Add random lateral offsets tangential to plane (along strike: (0, 1, 0))
+    host_pts[:, 1] += np.random.uniform(-10, 10, len(s_host))
+    ore_pts = p0 + np.outer(s_ore, normal)
+    ore_pts[:, 1] += np.random.uniform(-10, 10, len(s_ore))
+
+    all_pts = np.vstack([host_pts, ore_pts])
+    domains = ["HostRock"] * len(s_host) + ["OreZone"] * len(s_ore)
+    # Step change: Host rock ~0.35%, Ore zone ~2.25%
+    grades = np.concatenate([
+        0.35 + 0.05 * np.random.randn(len(s_host)),
+        2.25 + 0.10 * np.random.randn(len(s_ore)),
+    ])
+
+    df = pd.DataFrame({
+        "x": all_pts[:, 0],
+        "y": all_pts[:, 1],
+        "z": all_pts[:, 2],
+        "lithology": domains,
+        "grade": grades,
+    })
+
+    profile = contact_profile_analysis(
+        df=df,
+        domain_col="lithology",
+        grade_col="grade",
+        contact_plane_point=p0,
+        contact_dip=dip_deg,
+        contact_dip_direction=dd_deg,
+        bin_width=2.0,
+        max_distance=20.0,
+        domain_a="HostRock",
+        domain_b="OreZone",
+    )
+
+    assert profile.attrs["contact_type"] == "3D Plane"
+    assert profile.attrs["boundary_type"] == "Hard"
+    assert profile.attrs["step_change"] > 1.5
+    assert profile.attrs["contact_dip"] == 45.0
+    assert profile.attrs["contact_dip_direction"] == 90.0
+    assert "strictly segregated" in profile.attrs["recommendation"].lower()
+
+    # Test plot rendering with 3D title metadata
+    fig, axes = plot_contact_profile(profile, grade_unit="% Cu")
+    assert fig is not None
+    assert "3D Planar Contact: Dip 45°, Dip Dir 90°" in axes[0].get_title()
+    plt.close(fig)
+
+
+def test_contact_profile_analysis_3d_normal_vector():
+    np.random.seed(42)
+    # Stratigraphic horizontal contact at z = 100.0, normal pointing vertically (0, 0, 1)
+    p0 = np.array([0.0, 0.0, 100.0])
+    normal = np.array([0.0, 0.0, 1.0])
+
+    s_vals = np.linspace(-15.0, 15.0, 50)
+    pts = p0 + np.outer(s_vals, normal)
+    pts[:, 0] = np.random.uniform(0, 50, len(s_vals))
+    pts[:, 1] = np.random.uniform(0, 50, len(s_vals))
+
+    # Continuous gradient (Soft boundary)
+    grades = 1.10 + 0.005 * s_vals
+    domains = ["LowerUnit" if s < 0 else "UpperUnit" for s in s_vals]
+
+    df = pd.DataFrame({
+        "x": pts[:, 0],
+        "y": pts[:, 1],
+        "z": pts[:, 2],
+        "strat": domains,
+        "grade": grades,
+    })
+
+    profile = contact_profile_analysis(
+        df=df,
+        domain_col="strat",
+        grade_col="grade",
+        contact_plane_point=p0,
+        contact_normal=normal,
+        bin_width=2.0,
+        max_distance=16.0,
+        domain_a="LowerUnit",
+        domain_b="UpperUnit",
+    )
+
+    assert profile.attrs["contact_type"] == "3D Plane"
+    assert profile.attrs["boundary_type"] == "Soft"
+    assert "freely shared" in profile.attrs["recommendation"].lower()
+
+
+def test_contact_profile_analysis_3d_point_cloud():
+    np.random.seed(42)
+    # 3D contact surface digitized as points
+    contact_pts = np.array([[50.0, 50.0, z] for z in np.linspace(0, 50, 11)])
+
+    # Sample points on either side
+    x_a = np.linspace(30.0, 48.0, 20)
+    x_b = np.linspace(52.0, 70.0, 20)
+
+    df_a = pd.DataFrame({
+        "x": x_a,
+        "y": [50.0] * 20,
+        "z": np.linspace(5, 45, 20),
+        "domain": ["CountryRock"] * 20,
+        "cu": 0.20 + 0.02 * np.random.randn(20),
+    })
+    df_b = pd.DataFrame({
+        "x": x_b,
+        "y": [50.0] * 20,
+        "z": np.linspace(5, 45, 20),
+        "domain": ["OreBody"] * 20,
+        "cu": 1.90 + 0.05 * np.random.randn(20),
+    })
+    df = pd.concat([df_a, df_b], ignore_index=True)
+
+    profile = contact_profile_analysis(
+        df=df,
+        domain_col="domain",
+        grade_col="cu",
+        contact_points=contact_pts,
+        bin_width=2.0,
+        max_distance=20.0,
+        domain_a="CountryRock",
+        domain_b="OreBody",
+    )
+
+    assert profile.attrs["contact_type"] == "3D Point Cloud"
+    assert profile.attrs["boundary_type"] == "Hard"
+    assert profile.attrs["step_change"] > 1.0
+
+
+def test_contact_profile_analysis_3d_validations():
+    df_3d = pd.DataFrame({
+        "x": [10.0, 20.0],
+        "y": [10.0, 20.0],
+        "z": [5.0, 5.0],
+        "zone": ["A", "B"],
+        "grade": [0.5, 1.5],
+    })
+
+    # Dip out of range
+    with pytest.raises(ValueError, match="contact_dip must be between 0 and 90"):
+        contact_profile_analysis(
+            df_3d, domain_col="zone", grade_col="grade",
+            contact_plane_point=(0, 0, 0), contact_dip=95.0, contact_dip_direction=90.0
+        )
+
+    # Dip direction out of range
+    with pytest.raises(ValueError, match="contact_dip_direction must be in"):
+        contact_profile_analysis(
+            df_3d, domain_col="zone", grade_col="grade",
+            contact_plane_point=(0, 0, 0), contact_dip=45.0, contact_dip_direction=365.0
+        )
+
+    # Dip without dip direction
+    with pytest.raises(ValueError, match="contact_dip_direction must be provided"):
+        contact_profile_analysis(
+            df_3d, domain_col="zone", grade_col="grade",
+            contact_plane_point=(0, 0, 0), contact_dip=45.0
+        )
+
+    # Dip without contact_plane_point
+    with pytest.raises(ValueError, match="Must provide 'contact_plane_point'"):
+        contact_profile_analysis(
+            df_3d, domain_col="zone", grade_col="grade",
+            contact_dip=45.0, contact_dip_direction=90.0
+        )
+
+    # Zero length normal
+    with pytest.raises(ValueError, match="contact_normal must have non-zero length"):
+        contact_profile_analysis(
+            df_3d, domain_col="zone", grade_col="grade",
+            contact_plane_point=(0, 0, 0), contact_normal=(0, 0, 0)
+        )
+
+    # Missing z column for 3D contact plane
+    df_no_z = pd.DataFrame({
+        "x": [10.0, 20.0],
+        "y": [10.0, 20.0],
+        "zone": ["A", "B"],
+        "grade": [0.5, 1.5],
+    })
+    with pytest.raises(ValueError, match="Required 3D coordinate column 'z'"):
+        contact_profile_analysis(
+            df_no_z, domain_col="zone", grade_col="grade",
+            contact_plane_point=(0, 0, 0), contact_dip=45.0, contact_dip_direction=90.0
+        )
+
+    # Invalid contact_points shape
+    with pytest.raises(ValueError, match="contact_points must be a 2D array"):
+        contact_profile_analysis(
+            df_3d, domain_col="zone", grade_col="grade",
+            contact_points=np.ones((5, 4))
+        )
+
+
+def test_plot_resource_and_reserve_classification_bench_filtering():
+    # 3D block model across 3 distinct elevations: z = 10, 20, 30
+    xs = [10.0, 20.0, 10.0, 20.0, 10.0, 20.0]
+    ys = [10.0, 10.0, 20.0, 20.0, 10.0, 10.0]
+    zs = [10.0, 10.0, 20.0, 20.0, 30.0, 30.0]
+    cats = ["Measured", "Indicated", "Indicated", "Inferred", "Inferred", "Unclassified"]
+    statuses = ["Proven Reserve", "Probable Reserve", "Probable Reserve", "Sub-Economic / Waste", "Sub-Economic / Waste", "Inferred Resource (Excluded)"]
+
+    bm = pd.DataFrame({
+        "x": xs,
+        "y": ys,
+        "z": zs,
+        "category": cats,
+        "status": statuses,
+    })
+
+    # Test Resource Map Bench Filtering
+    fig_res, ax_res = plot_resource_classification_map(
+        bm,
+        bench_z=20.0,
+        elevation_tolerance=5.0,
+    )
+    assert fig_res is not None
+    assert "Bench Z = 20.0 m" in ax_res.get_title()
+    plt.close(fig_res)
+
+    # Test Reserve Map Bench Filtering
+    fig_resv, ax_resv = plot_reserve_classification_map(
+        bm,
+        bench_z=10.0,
+        elevation_tolerance=2.0,
+    )
+    assert fig_resv is not None
+    assert "Bench Z = 10.0 m" in ax_resv.get_title()
+    plt.close(fig_resv)
+
+    # Elevation with no blocks raises ValueError
+    with pytest.raises(ValueError, match="No blocks found within elevation"):
+        plot_resource_classification_map(bm, bench_z=99.0)
+
+    # Missing z_col raises ValueError
+    bm_no_z = bm.drop(columns=["z"])
+    with pytest.raises(ValueError, match="z_col 'z' not found"):
+        plot_resource_classification_map(bm_no_z, bench_z=10.0)
+
+
+def test_plot_resource_classification_orthogonal_slices():
+    np.random.seed(42)
+    xs = np.linspace(10, 50, 5)
+    ys = np.linspace(10, 50, 5)
+    zs = np.linspace(10, 30, 3)
+    grid = np.array(np.meshgrid(xs, ys, zs)).T.reshape(-1, 3)
+
+    categories = np.random.choice(["Measured", "Indicated", "Inferred", "Unclassified"], size=len(grid))
+
+    bm = pd.DataFrame({
+        "x": grid[:, 0],
+        "y": grid[:, 1],
+        "z": grid[:, 2],
+        "category": categories,
+    })
+
+    samples_xyz = np.array([
+        [20.0, 20.0, 20.0],
+        [30.0, 30.0, 20.0],
+        [40.0, 40.0, 20.0],
+    ])
+
+    # Default views (north, west)
+    fig, axes = plot_resource_classification_orthogonal_slices(
+        block_model=bm,
+        samples_xyz=samples_xyz,
+        bench_z=20.0,
+        section_y=30.0,
+        section_x=30.0,
+    )
+    assert isinstance(fig, plt.Figure)
+    assert len(axes) == 3
+    assert "Bench Plan" in axes[0].get_title()
+    assert "Cross-Section" in axes[1].get_title()
+    assert "Looking North" in axes[1].get_title()
+    assert "Longitudinal Section" in axes[2].get_title()
+    assert "Looking West" in axes[2].get_title()
+    plt.close(fig)
+
+    # Inverted viewing directions (south, east)
+    fig_inv, axes_inv = plot_resource_classification_orthogonal_slices(
+        block_model=bm,
+        cross_section_view="south",
+        long_section_view="east",
+        title="Custom Orthogonal Classification Slices",
+    )
+    assert "Looking South" in axes_inv[1].get_title()
+    assert "Looking East" in axes_inv[2].get_title()
+    plt.close(fig_inv)
+
+
+def test_plot_resource_classification_orthogonal_slices_validations():
+    # Empty DataFrame
+    with pytest.raises(ValueError, match="block_model cannot be empty"):
+        plot_resource_classification_orthogonal_slices(pd.DataFrame())
+
+    # Missing coordinates
+    with pytest.raises(ValueError, match="missing required coordinate column 'z'"):
+        plot_resource_classification_orthogonal_slices(
+            pd.DataFrame({"x": [1.0], "y": [2.0], "category": ["Measured"]})
+        )
+
+    # Missing category column
+    with pytest.raises(ValueError, match="missing category column"):
+        plot_resource_classification_orthogonal_slices(
+            pd.DataFrame({"x": [1.0], "y": [2.0], "z": [3.0]})
+        )
+
+    # Invalid views
+    valid_bm = pd.DataFrame({"x": [1.0], "y": [2.0], "z": [3.0], "category": ["Measured"]})
+    with pytest.raises(ValueError, match="cross_section_view must be 'north' or 'south'"):
+        plot_resource_classification_orthogonal_slices(valid_bm, cross_section_view="up")
+
+    with pytest.raises(ValueError, match="long_section_view must be 'west' or 'east'"):
+        plot_resource_classification_orthogonal_slices(valid_bm, long_section_view="down")
+
+
+
+
 
