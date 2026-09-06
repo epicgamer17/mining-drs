@@ -31,11 +31,19 @@ from drs_mining.components.estimation import (
     calculate_cut_off_grade,
     cut_off_grade_breakdown,
     convert_resource_to_reserve,
+    classify_reserve_status,
     format_reserve_statement,
     plot_resource_to_reserve_waterfall,
     plot_reserve_classification_map,
+    plot_reserve_classification_orthogonal_slices,
+    plot_reserve_classification_bench_gallery,
+    plot_reserve_classification_3d_isometric,
+    plot_reserve_classification_3d_interactive,
     plot_resource_classification_map,
     plot_resource_classification_orthogonal_slices,
+    plot_resource_classification_bench_gallery,
+    plot_resource_classification_3d_isometric,
+    plot_resource_classification_3d_interactive,
     plot_in_situ_vs_diluted_curves,
     composite_drillhole_intervals,
     apply_grade_capping,
@@ -59,6 +67,7 @@ from drs_mining.components.estimation import (
     plot_block_model_3d_interactive,
     plot_block_model_grade_uncertainty,
     _theoretical_covariance,
+    _solve_ordinary_kriging_system,
     compute_anisotropy_rotation_matrix,
     transform_anisotropic_coordinates,
     compute_anisotropic_distance,
@@ -633,15 +642,25 @@ def test_classify_resources_by_sor():
         threshold_measured=0.80,
         threshold_indicated=0.50,
         kriging_efficiencies=ke,
-        max_slope_measured=1.05,
         min_kriging_efficiency=0.0,
     )
 
     assert cats[0] == "Measured"      # SoR 0.95, KE 0.70
     assert cats[1] == "Indicated"     # SoR 0.65, KE 0.40
     assert cats[2] == "Inferred"      # SoR 0.35
-    assert cats[3] == "Inferred"      # SoR 1.20 > max_slope_measured -> not Measured
+    assert cats[3] == "Measured"      # SoR 1.20 >= threshold_measured -> Measured (no default cap)
     assert cats[4] == "Unclassified"  # NaN SoR
+
+    # With explicit max_slope_measured=1.05 cap:
+    cats_capped = classify_resources_by_sor(
+        slopes_of_regression=sor,
+        threshold_measured=0.80,
+        threshold_indicated=0.50,
+        kriging_efficiencies=ke,
+        max_slope_measured=1.05,
+        min_kriging_efficiency=0.0,
+    )
+    assert cats_capped[3] == "Inferred"  # SoR 1.20 > max_slope_measured -> not Measured
 
     # KE disqualification: high SoR but negative KE
     sor_high = np.array([0.90])
@@ -1699,6 +1718,96 @@ def test_convert_resource_to_reserve_dilution_cutoff_spoilage():
     xticklabels = [label.get_text() for label in ax1.get_xticklabels()]
     assert any("Dilution Spoilage" in lbl for lbl in xticklabels)
     plt.close(fig)
+
+
+def test_classify_reserve_status():
+    """Test classify_reserve_status for assigning 100% of spatial blocks to the 4 regulatory statuses."""
+    df = pd.DataFrame({
+        "x": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        "z": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+        "category": ["Measured", "Indicated", "Inferred", "Inferred", "Measured", "Unclassified"],
+        "grade": [1.5, 0.8, 1.2, 0.2, 0.3, 0.9],
+        "tonnes": [1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0],
+    })
+
+    cutoff = 0.5
+    classified = classify_reserve_status(
+        df,
+        cutoff_grade=cutoff,
+        mining_dilution_pct=5.0,
+        mining_recovery_pct=95.0,
+    )
+
+    # All 6 blocks must be present
+    assert len(classified) == 6
+    assert "status" in classified.columns
+
+    # Verify status assignments
+    # Row 0: Measured, grade 1.5 >= 0.5 -> Proven Reserve
+    assert classified.loc[0, "status"] == "Proven Reserve"
+    # Row 1: Indicated, grade 0.8 >= 0.5 -> Probable Reserve
+    assert classified.loc[1, "status"] == "Probable Reserve"
+    # Row 2: Inferred, grade 1.2 >= 0.5 -> Inferred Resource (Excluded)
+    assert classified.loc[2, "status"] == "Inferred Resource (Excluded)"
+    # Row 3: Inferred, grade 0.2 < 0.5 -> Inferred Resource (Excluded)
+    assert classified.loc[3, "status"] == "Inferred Resource (Excluded)"
+    # Row 4: Measured, grade 0.3 < 0.5 -> Sub-Economic / Waste
+    assert classified.loc[4, "status"] == "Sub-Economic / Waste"
+    # Row 5: Unclassified, grade 0.9 >= 0.5 -> Sub-Economic / Waste
+    assert classified.loc[5, "status"] == "Sub-Economic / Waste"
+
+    # Verify attributes
+    assert classified.attrs["total_blocks"] == 6
+    assert classified.attrs["proven_count"] == 1
+    assert classified.attrs["probable_count"] == 1
+    assert classified.attrs["inferred_excluded_count"] == 2
+    assert classified.attrs["subeconomic_waste_count"] == 2
+    assert len(classified.attrs["reserve_df"]) == 2  # Proven + Probable
+
+    # Coordinates preserved
+    assert list(classified["x"]) == [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+
+    # Test custom status_col
+    classified_custom = classify_reserve_status(
+        df,
+        cutoff_grade=cutoff,
+        status_col="reserve_status",
+    )
+    assert "reserve_status" in classified_custom.columns
+    assert classified_custom.loc[0, "reserve_status"] == "Proven Reserve"
+
+    # Test cutoff_type="in_situ"
+    classified_insitu = classify_reserve_status(
+        df,
+        cutoff_grade=cutoff,
+        cutoff_type="in_situ",
+    )
+    assert len(classified_insitu) == 6
+    assert classified_insitu.loc[0, "status"] == "Proven Reserve"
+
+    # Error handling tests
+    # Missing required column
+    with pytest.raises(ValueError, match="Required column 'grade' not found in block_model"):
+        classify_reserve_status(df.drop(columns=["grade"]), cutoff_grade=cutoff)
+
+    with pytest.raises(ValueError, match="Required column 'category' not found in block_model"):
+        classify_reserve_status(df.drop(columns=["category"]), cutoff_grade=cutoff)
+
+    # Empty DataFrame
+    with pytest.raises(ValueError, match="block_model cannot be empty"):
+        classify_reserve_status(pd.DataFrame(), cutoff_grade=cutoff)
+
+    # Negative cutoff
+    with pytest.raises(ValueError, match="cutoff_grade cannot be negative"):
+        classify_reserve_status(df, cutoff_grade=-0.1)
+
+    # Negative dilution or recovery
+    with pytest.raises(ValueError, match="Mining dilution cannot be negative"):
+        classify_reserve_status(df, cutoff_grade=cutoff, mining_dilution_pct=-1.0)
+
+    with pytest.raises(ValueError, match=r"Mining recovery must be in \(0, 100\]%"):
+        classify_reserve_status(df, cutoff_grade=cutoff, mining_recovery_pct=-1.0)
 
 
 def test_format_reserve_statement_sig_figs_and_footnotes():
@@ -4358,6 +4467,282 @@ def test_visualization_slice_helpers():
     assert tz == 60.0
     assert ty == 120.0
     assert tx == 20.0
+
+
+def test_resource_classification_gallery_and_3d():
+    """Validates Resource Classification multi-bench gallery and 3D visualization suite."""
+    np.random.seed(42)
+    xs = np.linspace(10, 50, 4)
+    ys = np.linspace(10, 50, 4)
+    zs = np.linspace(100, 130, 4)
+    grid = np.array(np.meshgrid(xs, ys, zs)).T.reshape(-1, 3)
+
+    cats = ["Measured", "Indicated", "Inferred", "Unclassified"]
+    categories = np.random.choice(cats, size=len(grid))
+
+    bm = pd.DataFrame({
+        "x": grid[:, 0],
+        "y": grid[:, 1],
+        "z": grid[:, 2],
+        "category": categories,
+        "tonnes": 1000.0,
+    })
+    samples_xyz = np.array([[15.0, 15.0, 110.0], [35.0, 35.0, 120.0]])
+
+    # 1. Bench Gallery (auto-elevations and custom elevations)
+    fig_gal, axes_gal = plot_resource_classification_bench_gallery(
+        block_model=bm,
+        samples_xyz=samples_xyz,
+    )
+    assert isinstance(fig_gal, plt.Figure)
+    assert len(axes_gal) == 4
+    plt.close(fig_gal)
+
+    fig_gal2, axes_gal2 = plot_resource_classification_bench_gallery(
+        block_model=bm,
+        bench_elevations=[100.0, 120.0],
+        n_cols=2,
+    )
+    assert len(axes_gal2) == 2
+    plt.close(fig_gal2)
+
+    # 2. 3D Isometric View
+    fig_iso, ax_iso = plot_resource_classification_3d_isometric(
+        block_model=bm,
+        samples_xyz=samples_xyz,
+    )
+    assert isinstance(fig_iso, plt.Figure)
+    assert ax_iso.name == "3d"
+    plt.close(fig_iso)
+
+    # 3. 3D Interactive Explorer
+    fig_int, ax_int, controls = plot_resource_classification_3d_interactive(
+        block_model=bm,
+        samples_xyz=samples_xyz,
+    )
+    assert isinstance(fig_int, plt.Figure)
+    assert ax_int.name == "3d"
+    assert "check_cats" in controls
+    assert "slider_elev" in controls
+    assert "button_reset" in controls
+    assert "reset_func" in controls
+
+    # Test toggling categories via CheckButtons
+    controls["check_cats"].set_active(0)  # toggle Measured
+    # Test slider update
+    controls["slider_elev"].set_val(110.0)
+    # Test reset function
+    controls["reset_func"](None)
+    plt.close(fig_int)
+
+    # 4. Validations
+    with pytest.raises(ValueError, match="block_model cannot be empty"):
+        plot_resource_classification_bench_gallery(pd.DataFrame())
+
+    with pytest.raises(ValueError, match="missing required column 'x'"):
+        plot_resource_classification_3d_isometric(bm.drop(columns=["x"]))
+
+    with pytest.raises(ValueError, match="missing required column 'category'"):
+        plot_resource_classification_3d_interactive(bm.drop(columns=["category"]))
+
+
+def test_reserve_classification_suite():
+    """Validates complete Mineral Reserve Status visualization suite (slices, gallery, 3D iso, 3D interactive)."""
+    np.random.seed(42)
+    xs = np.linspace(10, 50, 4)
+    ys = np.linspace(10, 50, 4)
+    zs = np.linspace(200, 230, 4)
+    grid = np.array(np.meshgrid(xs, ys, zs)).T.reshape(-1, 3)
+
+    reserve_statuses = [
+        "Proven Reserve",
+        "Probable Reserve",
+        "Inferred Resource (Excluded)",
+        "Sub-Economic / Waste",
+    ]
+    statuses = np.random.choice(reserve_statuses, size=len(grid))
+
+    bm = pd.DataFrame({
+        "x": grid[:, 0],
+        "y": grid[:, 1],
+        "z": grid[:, 2],
+        "status": statuses,
+        "tonnes": 2500.0,
+    })
+    samples_xyz = np.array([[20.0, 20.0, 210.0], [40.0, 40.0, 220.0]])
+
+    # 1. Orthogonal Slices
+    fig_ortho, axes_ortho = plot_reserve_classification_orthogonal_slices(
+        block_model=bm,
+        samples_xyz=samples_xyz,
+        bench_z=210.0,
+        section_y=30.0,
+        section_x=30.0,
+    )
+    assert isinstance(fig_ortho, plt.Figure)
+    assert len(axes_ortho) == 3
+    assert "Bench Plan" in axes_ortho[0].get_title()
+    assert "Cross-Section" in axes_ortho[1].get_title()
+    assert "Longitudinal Section" in axes_ortho[2].get_title()
+    plt.close(fig_ortho)
+
+    # Custom viewing directions
+    fig_inv, axes_inv = plot_reserve_classification_orthogonal_slices(
+        block_model=bm,
+        cross_section_view="south",
+        long_section_view="east",
+    )
+    assert "Looking South" in axes_inv[1].get_title()
+    assert "Looking East" in axes_inv[2].get_title()
+    plt.close(fig_inv)
+
+    # 2. Bench Gallery
+    fig_gal, axes_gal = plot_reserve_classification_bench_gallery(
+        block_model=bm,
+        samples_xyz=samples_xyz,
+        bench_elevations=[200.0, 210.0, 220.0],
+    )
+    assert isinstance(fig_gal, plt.Figure)
+    assert len(axes_gal) == 3
+    plt.close(fig_gal)
+
+    # 3. 3D Isometric View
+    fig_iso, ax_iso = plot_reserve_classification_3d_isometric(
+        block_model=bm,
+        samples_xyz=samples_xyz,
+    )
+    assert isinstance(fig_iso, plt.Figure)
+    assert ax_iso.name == "3d"
+    plt.close(fig_iso)
+
+    # 4. 3D Interactive Explorer
+    fig_int, ax_int, controls = plot_reserve_classification_3d_interactive(
+        block_model=bm,
+        samples_xyz=samples_xyz,
+    )
+    assert isinstance(fig_int, plt.Figure)
+    assert ax_int.name == "3d"
+    assert "check_cats" in controls
+    assert "slider_elev" in controls
+    assert "button_reset" in controls
+
+    # Test toggling reserve status checkboxes
+    controls["check_cats"].set_active(0)  # toggle Proven
+    controls["slider_elev"].set_val(220.0)
+    controls["reset_func"](None)
+    plt.close(fig_int)
+
+    # 5. Validations
+    with pytest.raises(ValueError, match="block_model cannot be empty"):
+        plot_reserve_classification_orthogonal_slices(pd.DataFrame())
+
+    with pytest.raises(ValueError, match="missing required coordinate column 'z'"):
+        plot_reserve_classification_orthogonal_slices(
+            pd.DataFrame({"x": [1.0], "y": [2.0], "status": ["Proven Reserve"]})
+        )
+
+    with pytest.raises(ValueError, match="missing category column 'status'"):
+        plot_reserve_classification_orthogonal_slices(
+            pd.DataFrame({"x": [1.0], "y": [2.0], "z": [3.0]})
+        )
+
+    with pytest.raises(ValueError, match="cross_section_view must be 'north' or 'south'"):
+        plot_reserve_classification_orthogonal_slices(bm, cross_section_view="up")
+
+    with pytest.raises(ValueError, match="long_section_view must be 'west' or 'east'"):
+        plot_reserve_classification_orthogonal_slices(bm, long_section_view="down")
+
+
+def test_classify_resources_by_sor_instability_warnings():
+    """Verifies that classify_resources_by_sor emits warnings for high SoR while preserving Measured by default."""
+    sor_high = np.array([0.90, 1.12])
+    ke = np.array([0.75, 0.80])
+
+    # 1. SoR > 1.05 warning: emitted, but Measured is NOT disqualified by default
+    with pytest.warns(UserWarning, match=r"Kriging Neighborhood Instability.*Slope of Regression"):
+        cats = classify_resources_by_sor(
+            slopes_of_regression=sor_high,
+            threshold_measured=0.80,
+            threshold_indicated=0.50,
+            kriging_efficiencies=ke,
+        )
+    assert cats[0] == "Measured"
+    assert cats[1] == "Measured"  # preserved as Measured (no default 1.05 upper bound)
+
+    # 2. When max_slope_measured is explicitly provided, it caps Measured
+    cats_capped = classify_resources_by_sor(
+        slopes_of_regression=sor_high,
+        threshold_measured=0.80,
+        threshold_indicated=0.50,
+        kriging_efficiencies=ke,
+        max_slope_measured=1.05,
+    )
+    assert cats_capped[1] == "Inferred"
+
+
+def test_solve_ordinary_kriging_system_ill_conditioned_warning():
+    """Verifies that _solve_ordinary_kriging_system warns when matrix condition number exceeds 1e4."""
+    # Two near-collocated samples separated by 0.0001m with tiny nugget
+    coords = np.array([[10.0, 10.0, 10.0], [10.0001, 10.0, 10.0]])
+    diffs = coords[:, None, :] - coords[None, :, :]
+    K = _theoretical_covariance(np.linalg.norm(diffs, axis=2), "spherical", 0.0001, 1.0, 100.0)
+    k0 = np.array([0.9, 0.9])
+
+    with pytest.warns(UserWarning, match=r"Ill-Conditioned Kriging System.*condition number is.*> 1e4"):
+        w, mu = _solve_ordinary_kriging_system(K, k0)
+    assert len(w) == 2
+    assert np.isclose(np.sum(w), 1.0)
+
+
+def test_ordinary_kriging_block_estimation_instability_warnings():
+    """Verifies that ordinary_kriging_block_estimation warns when ill-conditioned or anomalous Lagrange multipliers occur."""
+    # Near-collocated samples triggering ill-conditioned matrix warning
+    samples_xyz = np.array([
+        [10.0, 10.0, 10.0],
+        [10.0001, 10.0, 10.0],
+        [20.0, 20.0, 10.0],
+    ])
+    sample_grades = np.array([1.0, 1.2, 0.5])
+    bm = pd.DataFrame({"x": [15.0], "y": [15.0], "z": [10.0], "dx": [5.0], "dy": [5.0], "dz": [5.0]})
+
+    with pytest.warns(UserWarning, match=r"Ill-Conditioned Kriging System"):
+        _, _, _, lags = ordinary_kriging_block_estimation(
+            samples_xyz=samples_xyz,
+            sample_grades=sample_grades,
+            block_model=bm,
+            sill=1.0,
+            range_param=30.0,
+            nugget=0.0001,
+            k_neighbors=3,
+        )
+    assert len(lags) == 1
+
+
+def test_kriging_quality_metrics_instability_warnings():
+    """Verifies that kriging_quality_metrics emits warnings for anomalous positive Lagrange multipliers and SoR > 1.05."""
+    bv = 0.5
+    # Construct block where SoR > 1.05 and mu_C > 0:
+    # bv=0.5, var=0.1, mu=0.02 -> num=0.38, den=0.36 -> SoR=1.0556
+    variances = np.array([0.1])
+    mus = np.array([0.02])
+    with pytest.warns(UserWarning, match=r"Kriging Neighborhood Instability.*positive Lagrange multipliers"):
+        ke, sor = kriging_quality_metrics(
+            variances, block_dispersion_variance=bv, lagrange_multipliers=mus
+        )
+    assert sor[0] > 1.05
+
+    # Stable estimation with mu_C <= 0 and SoR <= 1.0 does NOT trigger false alarms
+    variances_ok = np.array([0.25])
+    mus_neg = np.array([-0.05])
+    import warnings
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        ke2, sor2 = kriging_quality_metrics(
+            variances_ok, block_dispersion_variance=bv, lagrange_multipliers=mus_neg
+        )
+        assert len(recorded) == 0
+    assert sor2[0] < 1.0
+
 
 
 

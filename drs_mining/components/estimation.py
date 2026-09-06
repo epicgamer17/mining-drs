@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 from matplotlib.patches import Polygon as MplPolygon, Rectangle as MplRectangle
-from matplotlib.widgets import Slider, Button
+from matplotlib.widgets import Slider, Button, CheckButtons
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.collections import PatchCollection
 import matplotlib.cm as cm
@@ -30,16 +30,6 @@ from scipy.sparse.csgraph import connected_components
 from scipy import stats
 
 
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Current status: 2D planar Voronoi polygons of influence.
-# Guidelines from CONTRIBUTING.md to adhere to:
-# - Functional approach: transparent DataFrames and NumPy arrays (no custom config/wrapper classes).
-# - Domain segregation: must strictly respect domain boundaries (`domain_col`).
-# - Extrapolation control: provide `clip_to_convex_hull=True` and `max_radius`.
-# - Boundary vs Data Support: separate legal `boundary` from `is_within_convex_hull`.
-# - No backwards-compatibility fallbacks: provide direct functional 3D block model estimator
-#   (or update signature) assigning nearest composite to block centroids as the standard
-#   declustered validation benchmark for comparative grade-tonnage audits and swath plots.
 def polygonal_estimation(
     drillholes: pd.DataFrame,
     bulk_density: float,
@@ -436,14 +426,6 @@ def grade_tonnage_table(
     return res_df.set_index("cutoff")
 
 
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Current status: 2D plan map of Voronoi polygons.
-# Guidelines from CONTRIBUTING.md to adhere to:
-# - Scope of this function: strictly 2D plan view mapping; add `bench_z: Optional[float] = None`
-#   to render single horizontal mining bench slices.
-# - Following codebase conventions, 3D visualizations are implemented as separate functions:
-#   1. `plot_polygonal_3d_isometric`: dedicated static 3D isometric visualization (projection="3d").
-#   2. `plot_polygonal_3d_interactive`: dedicated interactive 3D explorer with pan/zoom/rotation.
 def plot_polygonal_map(
     df: pd.DataFrame,
     boundary: Optional[Sequence[Tuple[float, float]]] = None,
@@ -969,20 +951,23 @@ def _solve_ordinary_kriging_system(
     rhs = np.ones(k + 1, dtype=float)
     rhs[:k] = k0
 
+    cond = np.linalg.cond(A)
+    if cond > 1e4:
+        warnings.warn(
+            f"Ill-Conditioned Kriging System: Ordinary Kriging matrix condition number is {cond:.1e} (> 1e4). "
+            f"This confirms that your sample geometry (e.g. collinear, duplicate, or heavily clustered samples) "
+            f"and variogram model are causing numerical instability.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     solution = np.linalg.solve(A, rhs)
+    # TODO: Add clipping and renormalization as an option to deal with negative kriging weights
+    # (Deutsch 1996; Isaaks & Srivastava): when negative weights occur due to the screen effect,
+    # optionally clip lambda_i < 0 to 0.0 and renormalize positive weights so sum(lambda_i) == 1.0.
     return solution[:k], float(solution[k])
 
 
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Current status: Point-support interpolation (V -> 0) on coordinate arrays.
-# Guidelines from CONTRIBUTING.md to adhere to:
-# - Explicit Extrapolation Control: strictly enforce `mask_extrapolation=True` and `max_radius`.
-# - Domain Boundaries: must respect domain boundaries (`sample_domains`, `grid_domains`).
-# - Block Support: add 3D block model estimation with block dimensions (dx, dy, dz) and internal
-#   point discretization (Nx x Ny x Nz) for volume-averaged block grades (SME Handbook).
-# - Anisotropic search: 3D search ellipsoids with dip/azimuth/plunge without rigid config objects.
-# - Validation support: block outputs must feed directly into `plot_grade_tonnage_curve` for
-#   smoothing audits against NN and Kriging without indirection layers.
 def inverse_distance_weighting(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
@@ -1354,7 +1339,9 @@ def inverse_distance_weighting_block_estimation(
 
     # If no samples, return all NaNs
     if len(samples_xyz_arr) == 0:
-        return np.full(n_blocks, np.nan, dtype=float), np.full(n_blocks, np.nan, dtype=float)
+        return np.full(n_blocks, np.nan, dtype=float), np.full(
+            n_blocks, np.nan, dtype=float
+        )
 
     # Discretization unit offsets centered at 0 within [-0.5, 0.5]
     nx, ny, nz = discretization
@@ -2025,6 +2012,9 @@ def ordinary_kriging_grid_estimation(
     )
 
     # 1. Query k nearest neighbors using KDTree in transformed space
+    # TODO: Add quadrant/octant search limits (SME Mining Engineering Handbook §4.5, Rule 7 & Figure 4.5-14)
+    # and maximum samples per drillhole trace cap (Rule 6: max 3-5 composites per hole) to prevent
+    # clustered samples from dominating the search neighborhood.
     k_query = min(k_neighbors, len(samples_xy))
     tree = KDTree(samples_t)
     upper_bound = max_radius if max_radius is not None else float("inf")
@@ -2074,6 +2064,9 @@ def ordinary_kriging_grid_estimation(
 
         # Solve linear system: K_aug * [lambda; mu_lagrange] = k0_aug
         weights_m, mu_lagrange = _solve_ordinary_kriging_system(K_m, k0_m)
+        # TODO: Add clipping and renormalization as an option to deal with negative kriging weights
+        # (Deutsch 1996; Isaaks & Srivastava): optionally clip weights_m < 0 to 0.0 and renormalize
+        # positive weights so sum(weights_m) == 1.0.
 
         # Ordinary Kriging estimate: Z*_OK = sum_i lambda_i * Z(x_i)
         estimates[m] = np.sum(weights_m * grades_m)
@@ -2230,7 +2223,6 @@ def create_block_model(
     return df_blocks
 
 
-# TODO: potentially return internal_block_var
 def ordinary_kriging_block_estimation(
     samples_xyz: np.ndarray,
     sample_grades: np.ndarray,
@@ -2393,9 +2385,7 @@ def ordinary_kriging_block_estimation(
     )
     block_dispersion_var = c_vv
 
-    disc_offsets = _generate_block_discretization_offsets(
-        discretization, (dx, dy, dz)
-    )
+    disc_offsets = _generate_block_discretization_offsets(discretization, (dx, dy, dz))
     eff_ranges = (
         anisotropy_ranges
         if anisotropy_ranges is not None
@@ -2431,6 +2421,9 @@ def ordinary_kriging_block_estimation(
         block_coords, ranges=eff_ranges, angles=anisotropy_angles
     )
 
+    # TODO: Add quadrant/octant search limits (SME Mining Engineering Handbook §4.5, Rule 7 & Figure 4.5-14)
+    # and maximum samples per drillhole trace cap (Rule 6: max 3-5 composites per hole) to prevent
+    # collinear downhole composite strings from dominating the neighborhood and causing screen-effect instability.
     tree = KDTree(samples_xyz_t)
     k_query = min(k_neighbors, len(samples_xyz))
 
@@ -2443,6 +2436,8 @@ def ordinary_kriging_block_estimation(
     if k_query == 1:
         distances = distances[:, None]
         indices = indices[:, None]
+
+    neg_weight_block_count = 0
 
     # 6. Point-to-Block Covariance & Ordinary Kriging Solution per Block
     for b in range(n_blocks):
@@ -2481,6 +2476,11 @@ def ordinary_kriging_block_estimation(
 
         try:
             weights, mu = _solve_ordinary_kriging_system(K_mat, k0_block)
+            # TODO: Add clipping and renormalization as an option to deal with negative kriging weights /
+            # screen effects (Deutsch 1996; Isaaks & Srivastava): optionally clip weights < 0 to 0.0 and renormalize
+            # sum(weights) == 1.0 to prevent anomalous grade extrapolation and conditional bias distortion.
+            if np.any(weights < -0.01):
+                neg_weight_block_count += 1
             # Block Grade Estimate: Z*(V) = sum(lambda_i * Z_i)
             block_estimates[b] = float(np.sum(weights * grades_active))
             # Block Kriging Variance: sigma_OK^2 = C_bar(V, V) - sum(lambda_i * C_bar(x_i, V)) - mu
@@ -2490,6 +2490,31 @@ def ordinary_kriging_block_estimation(
         except np.linalg.LinAlgError:
             # Fallback for singular matrix
             continue
+
+    # Covariance formulation duality: mu_C = -mu_gamma. Under stable estimation, mu_C <= 0
+    # (corresponding to variogram mu_gamma >= 0 and SoR <= 1.0).
+    # When mu_C > 1e-6 (variogram mu_gamma < -1e-6), the unbiasedness constraint is active
+    # against severe screen effects / clustering, forcing SoR > 1.0.
+    unstable_mu_mask = np.isfinite(lagrange_multipliers) & (lagrange_multipliers > 1e-6)
+    unstable_mu_count = int(np.sum(unstable_mu_mask))
+    if unstable_mu_count > 0:
+        warnings.warn(
+            f"Kriging Neighborhood Instability: {unstable_mu_count} block(s) exhibit anomalous positive Lagrange "
+            f"multipliers in covariance space (maximum mu={float(np.nanmax(lagrange_multipliers)):.4f}), equivalent to a "
+            f"negative variogram Lagrange multiplier (mu_gamma < 0). This indicates that the unbiasedness constraint is active "
+            f"against severe screen effects or clustered sampling geometries, driving the Slope of Regression above 1.0.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    if neg_weight_block_count > 0:
+        warnings.warn(
+            f"Negative Kriging Weights: {neg_weight_block_count} block(s) receive negative kriging weights (lambda < -0.01). "
+            f"In Ordinary Kriging, negative weights occur due to the screen effect from clustered or collinear drillhole samples "
+            f"and can produce physically unrealistic grade extrapolations.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     return block_estimates, block_variances, block_dispersion_var, lagrange_multipliers
 
@@ -2686,6 +2711,10 @@ def simple_kriging_block_estimation(
         block_coords, ranges=eff_ranges, angles=anisotropy_angles
     )
 
+    # 5. Neighbor Search Setup & Spatial Query
+    # TODO: Add quadrant/octant search limits (SME Mining Engineering Handbook §4.5, Rule 7 & Figure 4.5-14)
+    # and maximum samples per drillhole trace cap (Rule 6: max 3-5 composites per hole) to prevent
+    # collinear downhole composite strings from dominating the neighborhood.
     tree = KDTree(samples_xyz_t)
     k_query = min(k_neighbors, len(samples_xyz))
 
@@ -2727,6 +2756,8 @@ def simple_kriging_block_estimation(
 
         try:
             weights = np.linalg.solve(K_mat, k0_block)
+            # TODO: Add clipping and renormalization as an option to deal with negative kriging weights
+            # (Deutsch 1996): optionally clip weights < 0 to 0.0 and rescale weights.
             # SK estimate: m + sum(lambda_i * (Z_i - m))
             residual = grades_active - base_mean
             block_estimates[b] = float(base_mean + np.sum(weights * residual))
@@ -2866,15 +2897,6 @@ def plot_grade_tonnage_curve(
     return fig, ax1
 
 
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Current status: 2D cell declustering in (X, Y) plane.
-# Guidelines from CONTRIBUTING.md to adhere to:
-# - SME Handbook & Geostatistical Standards: 3D exploration drillholes have dense downhole
-#   sampling vs wide lateral spacing; requires 3D anisotropic cell sizing (Lx, Ly, Lz) with `z_col`.
-# - Domain boundaries: declustering weights must be calculated per geological domain (`domain_col`).
-# - Functional style & Simple over easy: transparent DataFrame inputs and array outputs; avoid
-#   rigid config classes, use inline constants and simple function arguments.
-# - No backwards-compatibility fallbacks: cleanly extend the signature rather than adding shim layers.
 def cell_declustering(
     drillholes: pd.DataFrame,
     cell_sizes: Optional[
@@ -2997,7 +3019,9 @@ def cell_declustering(
                     len(drillholes[drillholes[domain_col] == d])
                     for d in group["domain"]
                 ]
-                w_mean = float(np.average(group["declustered_mean"], weights=dom_weights))
+                w_mean = float(
+                    np.average(group["declustered_mean"], weights=dom_weights)
+                )
                 w_var = float(
                     np.average(group["declustered_variance"], weights=dom_weights)
                 )
@@ -3111,9 +3135,7 @@ def cell_declustering(
         cs_y = c_dim[1]
         cs_z = c_dim[2] if is_3d else None
         if cs_x <= 0 or cs_y <= 0 or (is_3d and cs_z <= 0):
-            raise ValueError(
-                f"Cell dimensions must be strictly positive, got {c_dim}"
-            )
+            raise ValueError(f"Cell dimensions must be strictly positive, got {c_dim}")
 
         weights_sum = np.zeros(n_samples, dtype=float)
 
@@ -3187,7 +3209,6 @@ def cell_declustering(
         sensitivity_df.attrs["optimal_cell_size_3d"] = cell_dims_list[opt_idx]
 
     return optimal_weights, sensitivity_df, optimal_cell_size
-
 
 
 def plot_cell_declustering_curve(
@@ -3397,6 +3418,30 @@ def kriging_quality_metrics(
 
         with np.errstate(divide="ignore", invalid="ignore"):
             slope_of_regression = np.where(np.abs(den) > 1e-12, num / den, np.nan)
+
+        unstable_mu_mask = np.isfinite(mu_arr) & (mu_arr > 1e-6)
+        unstable_mu_count = int(np.sum(unstable_mu_mask))
+        if unstable_mu_count > 0:
+            warnings.warn(
+                f"Kriging Neighborhood Instability: {unstable_mu_count} block(s) exhibit anomalous positive Lagrange "
+                f"multipliers in covariance space (maximum mu={float(np.nanmax(mu_arr)):.4f}), equivalent to a "
+                f"negative variogram Lagrange multiplier (mu_gamma < 0). This indicates screen effect or clustered sampling "
+                f"geometry that forces the Slope of Regression above 1.0.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        high_sor_mask = np.isfinite(slope_of_regression) & (slope_of_regression > 1.05)
+        high_sor_count = int(np.sum(high_sor_mask))
+        if high_sor_count > 0:
+            warnings.warn(
+                f"Kriging Neighborhood Instability: {high_sor_count} block(s) exhibit Slope of Regression (SoR) "
+                f"> 1.05 (maximum SoR={float(np.nanmax(slope_of_regression)):.3f}). In standard geostatistical practice "
+                f"(SME Mining Engineering Handbook §4.5.8.2; Armstrong, 1998), an SoR > 1.0 indicates mathematical or geometric "
+                f"instability in the kriging system (often caused by excessive sample count, clustering, or the screen effect).",
+                UserWarning,
+                stacklevel=2,
+            )
 
     return kriging_efficiency, slope_of_regression
 
@@ -3637,9 +3682,7 @@ def classify_resources_by_drill_spacing(
         has_measured = meas_counts >= min_holes_measured
 
         ind_balls = tree.query_ball_point(pts_t, r=max_radius_indicated)
-        ind_counts = np.array(
-            [len(set(hole_ids_arr[b])) for b in ind_balls], dtype=int
-        )
+        ind_counts = np.array([len(set(hole_ids_arr[b])) for b in ind_balls], dtype=int)
         has_indicated = ind_counts >= min_holes_indicated
 
         if max_radius_inferred is not None:
@@ -3686,20 +3729,19 @@ def classify_resources_by_drill_spacing(
     return categories
 
 
-# TODO: possibly remove and inline in classify_mineral_resources
 def classify_resources_by_sor(
     slopes_of_regression: np.ndarray,
     threshold_measured: float,
     threshold_indicated: float,
     kriging_efficiencies: Optional[np.ndarray] = None,
-    max_slope_measured: float = 1.05,
+    max_slope_measured: Optional[float] = None,
     min_kriging_efficiency: Optional[float] = 0.0,
 ) -> np.ndarray:
     """Classifies resource blocks based on Kriging Neighborhood Analysis (KNA) Slope of Regression (SoR).
 
     In geostatistical best practice (Vann et al., 2003; Armstrong, 1998) (TODO: Manually Verify):
     - Slope of Regression (SoR) gauges conditional unbiasedness of block estimates.
-    - Measured: High conditional unbiasedness (typically SoR >= 0.80 and <= 1.05, with positive KE).
+    - Measured: High conditional unbiasedness (typically SoR >= 0.80, with positive KE).
     - Indicated: Moderate conditional unbiasedness (typically 0.50 <= SoR < 0.80, with positive KE).
     - Inferred: Low conditional unbiasedness (SoR < 0.50) or negative efficiency.
     - Unclassified: Non-finite or unestimated blocks (NaN / Inf).
@@ -3717,9 +3759,10 @@ def classify_resources_by_sor(
     kriging_efficiencies : np.ndarray, optional
         Array of Kriging Efficiency values of shape (M,). If provided, blocks
         with KE < min_kriging_efficiency are disqualified from Measured/Indicated.
-    max_slope_measured : float, default 1.05
-        Maximum Slope of Regression for Measured classification (slopes > 1.05
-        frequently reflect numerical instability or severe conditional bias).
+    max_slope_measured : float, optional, default None
+        Optional maximum Slope of Regression for Measured classification.
+        If None, no upper bound is enforced on Measured classification, but
+        a warning is issued if slopes exceed 1.05.
     min_kriging_efficiency : float, optional, default 0.0
         Minimum Kriging Efficiency required for Measured and Indicated.
         If None, Kriging Efficiency is not evaluated.
@@ -3737,7 +3780,7 @@ def classify_resources_by_sor(
         raise ValueError(
             f"threshold_measured ({threshold_measured}) must be > threshold_indicated ({threshold_indicated})."
         )
-    if max_slope_measured < threshold_measured:
+    if max_slope_measured is not None and max_slope_measured < threshold_measured:
         raise ValueError(
             f"max_slope_measured ({max_slope_measured}) must be >= threshold_measured ({threshold_measured})."
         )
@@ -3758,9 +3801,29 @@ def classify_resources_by_sor(
     valid_sor = np.isfinite(sor)
     categories = np.full(len(sor), "Unclassified", dtype=object)
 
-    is_meas = (
-        valid_sor & (sor >= threshold_measured) & (sor <= max_slope_measured) & ke_ok
-    )
+    # 1. Diagnostic warning for SoR slope exceeding 1.05 (or max_slope_measured if set)
+    warn_threshold = max_slope_measured if max_slope_measured is not None else 1.05
+    high_sor_mask = valid_sor & (sor > warn_threshold)
+    high_sor_count = int(np.sum(high_sor_mask))
+    if high_sor_count > 0:
+        warnings.warn(
+            f"Kriging Neighborhood Instability: {high_sor_count} block(s) exhibit Slope of Regression (SoR) "
+            f"> {warn_threshold:.2f} (maximum SoR={float(np.nanmax(sor)):.3f}). In standard geostatistical practice "
+            f"(SME Mining Engineering Handbook §4.5.8.2; Armstrong, 1998), an SoR > 1.0 indicates mathematical or geometric "
+            f"instability in the kriging system (often caused by severe sample clustering, the string/screen effect, or an "
+            f"excessive search neighborhood). Consider reducing k_neighbors, restricting composites per drillhole, or applying "
+            f"spatial smoothing (smooth_resource_categories).",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    if max_slope_measured is not None:
+        is_meas = (
+            valid_sor & (sor >= threshold_measured) & (sor <= max_slope_measured) & ke_ok
+        )
+    else:
+        is_meas = valid_sor & (sor >= threshold_measured) & ke_ok
+
     is_ind = (
         valid_sor & (sor >= threshold_indicated) & (sor < threshold_measured) & ke_ok
     )
@@ -4123,7 +4186,7 @@ def classify_mineral_resources(
     kriging_efficiencies: Optional[np.ndarray] = None,
     sor_threshold_measured: Optional[float] = None,
     sor_threshold_indicated: Optional[float] = None,
-    max_slope_measured: float = 1.05,
+    max_slope_measured: Optional[float] = None,
     min_kriging_efficiency: Optional[float] = 0.0,
     max_radius_inferred: Optional[float] = None,
     is_interpolated: Optional[np.ndarray] = None,
@@ -4195,8 +4258,10 @@ def classify_mineral_resources(
         Minimum Slope of Regression for Measured classification. Required if slopes_of_regression is provided.
     sor_threshold_indicated : float, optional
         Minimum Slope of Regression for Indicated classification. Required if slopes_of_regression is provided.
-    max_slope_measured : float, default 1.05
-        Maximum Slope of Regression for Measured classification.
+    max_slope_measured : float, optional, default None
+        Optional maximum Slope of Regression for Measured classification.
+        If None, no upper bound is enforced on Measured classification, but
+        a warning is issued if slopes exceed 1.05.
     min_kriging_efficiency : float, optional, default 0.0
         Minimum Kriging Efficiency required for Measured/Indicated.
     max_radius_inferred : float, optional
@@ -4994,7 +5059,11 @@ def plot_swath_analysis_3axis(
     if isinstance(bin_widths, (int, float)):
         bw_x = bw_y = bw_z = float(bin_widths)
     elif len(bin_widths) == 3:
-        bw_x, bw_y, bw_z = float(bin_widths[0]), float(bin_widths[1]), float(bin_widths[2])
+        bw_x, bw_y, bw_z = (
+            float(bin_widths[0]),
+            float(bin_widths[1]),
+            float(bin_widths[2]),
+        )
     else:
         raise ValueError(
             f"bin_widths must be a float or a sequence of 3 floats, got {bin_widths}."
@@ -5263,7 +5332,9 @@ def cut_off_grade_breakdown(
     net_price = (payable_price - selling_cost) * royalty_factor
     revenue_per_grade_unit = net_price * rec * metal_conversion_factor
 
-    op_cost = processing_cost + ga_cost + (mining_cost if mining_cost is not None else 0.0)
+    op_cost = (
+        processing_cost + ga_cost + (mining_cost if mining_cost is not None else 0.0)
+    )
     total_cost = op_cost + sustaining_capital
     mill_feed_cog = total_cost / revenue_per_grade_unit
 
@@ -5565,6 +5636,92 @@ def convert_resource_to_reserve(
     reserve_df.attrs["cutoff_type"] = cutoff_type
     reserve_df.attrs["metal_factor"] = metal_factor
     return reserve_df
+
+
+def classify_reserve_status(
+    block_model: pd.DataFrame,
+    cutoff_grade: float,
+    mining_dilution_pct: float = 0.0,
+    mining_recovery_pct: float = 100.0,
+    dilution_grade: float = 0.0,
+    category_col: str = "category",
+    grade_col: str = "grade",
+    tonnes_col: str = "tonnes",
+    cutoff_type: Literal["rom", "in_situ"] = "rom",
+    status_col: str = "status",
+) -> pd.DataFrame:
+    """Classifies every block in a 3D block model into CIM / JORC Mineral Reserve statuses.
+
+    Produces a 1-to-1 spatial table where every block is assigned one of the 4 regulatory statuses:
+    1. 'Proven Reserve': Measured mineral resource meeting economic modifying factor cut-off.
+    2. 'Probable Reserve': Indicated mineral resource meeting economic modifying factor cut-off.
+    3. 'Inferred Resource (Excluded)': Inferred mineral resource strictly prohibited from reserve
+       conversion under CRIRSCO / CIM / JORC reporting standards (TODO: Manually Verify).
+    4. 'Sub-Economic / Waste': Blocks falling below economic cut-off grade or unclassified waste.
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Classified block model table containing spatial coordinates, resource category, and grades.
+    cutoff_grade : float
+        Economic cut-off grade for reserve delineation.
+    mining_dilution_pct : float, default 0.0
+        Mining dilution percentage applied to candidate ore.
+    mining_recovery_pct : float, default 100.0
+        Mining recovery percentage applied to candidate ore.
+    dilution_grade : float, default 0.0
+        Grade of diluting material.
+    category_col : str, default "category"
+        Resource classification column ('Measured', 'Indicated', 'Inferred', 'Unclassified').
+    grade_col : str, default "grade"
+        Block grade column name.
+    tonnes_col : str, default "tonnes"
+        Block tonnage column name.
+    cutoff_type : Literal["rom", "in_situ"], default "rom"
+        Cut-off application basis.
+    status_col : str, default "status"
+        Name of the resulting status column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of block_model with the new status column populated for 100% of blocks.
+    """
+    if block_model.empty:
+        raise ValueError("block_model cannot be empty.")
+    for req in [category_col, grade_col, tonnes_col]:
+        if req not in block_model.columns:
+            raise ValueError(f"Required column '{req}' not found in block_model.")
+
+    res_df = convert_resource_to_reserve(
+        resource_df=block_model,
+        mining_dilution_pct=mining_dilution_pct,
+        mining_recovery_pct=mining_recovery_pct,
+        cutoff_grade=cutoff_grade,
+        dilution_grade=dilution_grade,
+        category_col=category_col,
+        grade_col=grade_col,
+        tonnes_col=tonnes_col,
+        cutoff_type=cutoff_type,
+    )
+    df_out = block_model.copy()
+    status_arr = np.full(len(df_out), "Sub-Economic / Waste", dtype=object)
+    cat_series = df_out[category_col].astype(str).str.strip().str.lower()
+    is_inferred = cat_series.str.startswith("infer")
+    status_arr[is_inferred] = "Inferred Resource (Excluded)"
+    status_arr[res_df.index] = res_df["reserve_category"]
+    df_out[status_col] = status_arr
+    df_out.attrs["total_blocks"] = len(df_out)
+    df_out.attrs["proven_count"] = int((status_arr == "Proven Reserve").sum())
+    df_out.attrs["probable_count"] = int((status_arr == "Probable Reserve").sum())
+    df_out.attrs["inferred_excluded_count"] = int(
+        (status_arr == "Inferred Resource (Excluded)").sum()
+    )
+    df_out.attrs["subeconomic_waste_count"] = int(
+        (status_arr == "Sub-Economic / Waste").sum()
+    )
+    df_out.attrs["reserve_df"] = res_df
+    return df_out
 
 
 def format_reserve_statement(
@@ -6119,17 +6276,107 @@ def _find_nearest_slice_coords(
     return target_z, target_y, target_x
 
 
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Current status: 2D plan scatter plot of block centroids.
-# Guidelines from CONTRIBUTING.md to adhere to:
-# - Scope of this function: strictly 2D plan view mapping; add `bench_z: Optional[float] = None`
-#   and `elevation_tolerance` to render a single horizontal mining bench slice without overplotting.
-# - Keep property `boundary` distinct from drillhole data envelope (`is_within_convex_hull`).
-# - Transparent DataFrames: directly read block model DataFrame without custom wrapper objects.
-# - Following codebase conventions, 3D visualizations are implemented as separate functions:
-#   1. `plot_reserve_classification_3d_isometric`: dedicated static 3D isometric view.
-#   2. `plot_reserve_classification_3d_interactive`: dedicated interactive 3D explorer (sliders, HUD).
-#   3. `plot_reserve_classification_bench_gallery`: dedicated multi-bench elevation gallery.
+def _plot_categorical_2d_map(
+    block_model: pd.DataFrame,
+    category_col: str,
+    categories: Sequence[str],
+    colors: Sequence[str],
+    boundary: Optional[Sequence[tuple[float, float]]] = None,
+    drillholes: Optional[pd.DataFrame] = None,
+    bench_z: Optional[float] = None,
+    elevation_tolerance: float = 5.0,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    title: Optional[str] = None,
+    default_title: str = "Classification Map",
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (10, 8),
+    point_size: float = 35.0,
+    alpha: float = 0.85,
+    boundary_color: str = "black",
+    boundary_linestyle: str = "-",
+    boundary_label: str = "Mine Boundary",
+) -> tuple[plt.Figure, plt.Axes]:
+    """Shared 2D spatial mine plan map renderer for categorical block models."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    df_plot = _filter_bench_slice(
+        block_model=block_model,
+        bench_z=bench_z,
+        elevation_tolerance=elevation_tolerance,
+        z_col=z_col,
+    )
+
+    cats_lower = df_plot[category_col].astype(str).str.strip().str.lower()
+
+    for cat_name, color in zip(categories, colors):
+        sub = df_plot[cats_lower == cat_name.lower()]
+        if len(sub) > 0:
+            ax.scatter(
+                sub[x_col],
+                sub[y_col],
+                c=color,
+                label=f"{cat_name} ({len(sub):,} blocks)",
+                s=point_size,
+                marker="s",
+                alpha=alpha,
+                edgecolors="none",
+            )
+
+    # Perimeter boundary polygon
+    if boundary is not None and len(boundary) >= 3:
+        poly_patch = MplPolygon(
+            boundary,
+            closed=True,
+            fill=False,
+            edgecolor=boundary_color,
+            linewidth=2.0,
+            linestyle=boundary_linestyle,
+            label=boundary_label,
+            zorder=5,
+        )
+        ax.add_patch(poly_patch)
+
+    # Drillhole collars
+    if drillholes is not None and len(drillholes) > 0:
+        dh_x = (
+            drillholes["x"]
+            if "x" in drillholes
+            else (drillholes[x_col] if x_col in drillholes else drillholes.iloc[:, 0])
+        )
+        dh_y = (
+            drillholes["y"]
+            if "y" in drillholes
+            else (drillholes[y_col] if y_col in drillholes else drillholes.iloc[:, 1])
+        )
+        ax.scatter(
+            dh_x,
+            dh_y,
+            c="black",
+            s=50,
+            marker="^",
+            label=f"Drillholes (N={len(drillholes)})",
+            zorder=6,
+        )
+
+    ax.set_xlabel("Easting (m)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Northing (m)", fontsize=11, fontweight="bold")
+    plot_title = title
+    if plot_title is None:
+        plot_title = default_title
+        if bench_z is not None:
+            plot_title += f" (Bench Z = {bench_z:.1f} m)"
+    ax.set_title(plot_title, fontsize=13, fontweight="bold", pad=12)
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend(loc="upper right", framealpha=0.9, fontsize=9.5)
+    fig.tight_layout()
+    return fig, ax
+
+
 def plot_reserve_classification_map(
     block_model: pd.DataFrame,
     boundary: Optional[Sequence[tuple[float, float]]] = None,
@@ -6185,92 +6432,315 @@ def plot_reserve_classification_map(
     -------
     tuple[plt.Figure, plt.Axes]
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
-
-    df_plot = _filter_bench_slice(
+    return _plot_categorical_2d_map(
         block_model=block_model,
+        category_col=status_col,
+        categories=[
+            "Proven Reserve",
+            "Probable Reserve",
+            "Inferred Resource (Excluded)",
+            "Sub-Economic / Waste",
+        ],
+        colors=["#2ca02c", "#1f77b4", "#9467bd", "#d3d3d3"],
+        boundary=boundary,
+        drillholes=drillholes,
         bench_z=bench_z,
         elevation_tolerance=elevation_tolerance,
+        x_col=x_col,
+        y_col=y_col,
         z_col=z_col,
+        title=title,
+        default_title="Mineral Reserve & Resource Classification Map",
+        ax=ax,
+        figsize=figsize,
+        alpha=0.75,
+        boundary_color="black",
+        boundary_linestyle="-",
+        boundary_label="Mine Boundary",
     )
 
-    color_palette = {
-        "Proven Reserve": "#2ca02c",  # Forest green
-        "Probable Reserve": "#1f77b4",  # Blue
-        "Inferred Resource (Excluded)": "#9467bd",  # Purple
-        "Sub-Economic / Waste": "#d3d3d3",  # Light grey
-    }
 
-    # Draw blocks grouped by status
-    for status_name, color in color_palette.items():
-        sub = df_plot[
-            df_plot[status_col].astype(str).str.strip().str.lower()
-            == status_name.lower()
-        ]
-        if len(sub) > 0:
-            ax.scatter(
-                sub[x_col],
-                sub[y_col],
-                c=color,
-                label=f"{status_name} ({len(sub):,} blocks)",
-                s=35,
-                marker="s",
-                alpha=0.85,
-                edgecolors="none",
-            )
+def plot_reserve_classification_orthogonal_slices(
+    block_model: pd.DataFrame,
+    status_col: str = "status",
+    bench_z: Optional[float] = None,
+    section_y: Optional[float] = None,
+    section_x: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    cross_section_view: str = "north",
+    long_section_view: str = "west",
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    dx_col: str = "dx",
+    dy_col: str = "dy",
+    dz_col: str = "dz",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (19.0, 5.8),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Generates 3-panel synchronized orthogonal slices of regulatory Mineral Reserve status.
 
-    # Draw boundary if provided
-    if boundary is not None:
-        b_pts = np.array(list(boundary) + [boundary[0]])
-        ax.plot(
-            b_pts[:, 0],
-            b_pts[:, 1],
-            "r--",
-            linewidth=2.0,
-            label="Pit / Concession Perimeter",
-        )
+    Standard coloring:
+    - Proven Reserve: Forest Green (#2ca02c)
+    - Probable Reserve: Royal Blue (#1f77b4)
+    - Inferred Resource (Excluded): Purple / Magenta (#9467bd)
+    - Sub-Economic / Waste: Light Grey (#d3d3d3)
 
-    # Draw drillholes if provided
-    if drillholes is not None and not drillholes.empty:
-        ax.scatter(
-            drillholes["x"],
-            drillholes["y"],
-            c="black",
-            s=50,
-            marker="^",
-            label=f"Drillholes (N={len(drillholes)})",
-            zorder=6,
-        )
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates and reserve status column.
+    status_col : str, default "status"
+        Column containing reserve classification status.
+    bench_z, section_y, section_x : float, optional
+        Target slice coordinates.
+    samples_xyz : np.ndarray, optional
+        Drillhole composite coordinates for overlay.
+    cross_section_view, long_section_view : str, default "north", "west"
+        Viewing directions.
+    x_col, y_col, z_col : str, default "x", "y", "z"
+        Coordinate column names.
+    dx_col, dy_col, dz_col : str, default "dx", "dy", "dz"
+        Block dimension column names.
+    title : str, optional
+        Figure title.
+    figsize : Tuple[float, float], default (19.0, 5.8)
+        Dimensions of figure.
 
-    ax.set_xlabel("Easting (m)", fontsize=11, fontweight="bold")
-    ax.set_ylabel("Northing (m)", fontsize=11, fontweight="bold")
-    plot_title = title
-    if plot_title is None:
-        plot_title = "Mineral Reserve & Resource Classification Map"
-        if bench_z is not None:
-            plot_title += f" (Bench Z = {bench_z:.1f} m)"
-    ax.set_title(plot_title, fontsize=13, fontweight="bold", pad=12)
-    ax.grid(True, linestyle=":", alpha=0.5)
-    ax.legend(loc="upper right", framealpha=0.9, fontsize=9.5)
-    fig.tight_layout()
-    return fig, ax
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Figure and sequence of 3 axes (ax_bench, ax_cross, ax_long).
+    """
+    return _plot_categorical_blocks_orthogonal_slices(
+        block_model=block_model,
+        category_col=status_col,
+        categories=[
+            "Proven Reserve",
+            "Probable Reserve",
+            "Inferred Resource (Excluded)",
+            "Sub-Economic / Waste",
+        ],
+        colors=["#2ca02c", "#1f77b4", "#9467bd", "#d3d3d3"],
+        bench_z=bench_z,
+        section_y=section_y,
+        section_x=section_x,
+        samples_xyz=samples_xyz,
+        cross_section_view=cross_section_view,
+        long_section_view=long_section_view,
+        x_col=x_col,
+        y_col=y_col,
+        z_col=z_col,
+        dx_col=dx_col,
+        dy_col=dy_col,
+        dz_col=dz_col,
+        title=title or "3D Mineral Reserve Status Orthogonal Slices",
+        figsize=figsize,
+    )
 
 
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Current status: 2D plan scatter plot of block centroids.
-# Guidelines from CONTRIBUTING.md to adhere to:
-# - Scope of this function: strictly 2D plan view mapping; add `bench_z: Optional[float] = None`
-#   and `elevation_tolerance` to render a single horizontal mining bench slice without overplotting.
-# - Keep property `boundary` distinct from drillhole data envelope (`is_within_convex_hull`).
-# - Transparent DataFrames: directly read block model DataFrame without custom wrapper objects.
-# - Following codebase conventions, 3D visualizations are implemented as separate functions:
-#   1. `plot_resource_classification_3d_isometric`: dedicated static 3D isometric view (following `plot_block_model_3d_isometric`).
-#   2. `plot_resource_classification_3d_interactive`: dedicated interactive 3D explorer (following `plot_block_model_3d_interactive` with category toggles and bench sliders).
-#   3. `plot_resource_classification_bench_gallery`: dedicated multi-bench elevation gallery (following `plot_block_model_bench_gallery`).
-#   4. `plot_resource_classification_orthogonal_slices`: dedicated 3-view orthogonal slice viewer (following `plot_block_model_orthogonal_slices`).
+def plot_reserve_classification_bench_gallery(
+    block_model: pd.DataFrame,
+    status_col: str = "status",
+    bench_elevations: Optional[Sequence[float]] = None,
+    n_cols: int = 3,
+    samples_xyz: Optional[np.ndarray] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    dx_col: str = "dx",
+    dy_col: str = "dy",
+    dz_col: str = "dz",
+    title: Optional[str] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Plots multi-bench elevation gallery of Mineral Reserve status slices.
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates and reserve status.
+    status_col : str, default "status"
+        Reserve status column.
+    bench_elevations : Sequence[float], optional
+        Elevations to plot.
+    n_cols : int, default 3
+        Number of gallery columns.
+    samples_xyz : np.ndarray, optional
+        Drillhole coordinates for overlay.
+    x_col, y_col, z_col : str, default "x", "y", "z"
+        Coordinate column names.
+    dx_col, dy_col, dz_col : str, default "dx", "dy", "dz"
+        Block dimension column names.
+    title : str, optional
+        Plot title.
+    figsize : Tuple[float, float], optional
+        Figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Figure and active axes sequence.
+    """
+    return _plot_categorical_bench_gallery(
+        block_model=block_model,
+        category_col=status_col,
+        categories=[
+            "Proven Reserve",
+            "Probable Reserve",
+            "Inferred Resource (Excluded)",
+            "Sub-Economic / Waste",
+        ],
+        colors=["#2ca02c", "#1f77b4", "#9467bd", "#d3d3d3"],
+        bench_elevations=bench_elevations,
+        n_cols=n_cols,
+        samples_xyz=samples_xyz,
+        x_col=x_col,
+        y_col=y_col,
+        z_col=z_col,
+        dx_col=dx_col,
+        dy_col=dy_col,
+        dz_col=dz_col,
+        title=title or "Mineral Reserve Status: Multi-Bench Depth Gallery",
+        figsize=figsize,
+    )
+
+
+def plot_reserve_classification_3d_isometric(
+    block_model: pd.DataFrame,
+    status_col: str = "status",
+    active_categories: Optional[Sequence[str]] = None,
+    bench_z: Optional[float] = None,
+    elevation_tolerance: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    elev: float = 28.0,
+    azim: float = -55.0,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10.0, 8.0),
+) -> Tuple[plt.Figure, Axes3D]:
+    """Renders static 3D isometric projection of Mineral Reserve status categories.
+
+    Allows filtering to specific reserve categories (e.g. only Proven and Probable
+    to isolate the mineable orebody from waste) or bench elevation ranges.
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates and reserve status.
+    status_col : str, default "status"
+        Reserve status column.
+    active_categories : Sequence[str], optional
+        Categories to render (e.g. ['Proven Reserve', 'Probable Reserve']).
+    bench_z, elevation_tolerance : float, optional
+        Elevation bench slice corridor.
+    samples_xyz : np.ndarray, optional
+        Drillhole coordinates.
+    x_col, y_col, z_col : str, default "x", "y", "z"
+        Coordinate column names.
+    elev, azim : float, default 28.0, -55.0
+        Camera angles.
+    title : str, optional
+        Plot title.
+    figsize : Tuple[float, float], default (10.0, 8.0)
+        Figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Axes3D]
+        Figure and 3D axes.
+    """
+    return _plot_categorical_blocks_3d_isometric(
+        block_model=block_model,
+        category_col=status_col,
+        categories=[
+            "Proven Reserve",
+            "Probable Reserve",
+            "Inferred Resource (Excluded)",
+            "Sub-Economic / Waste",
+        ],
+        colors=["#2ca02c", "#1f77b4", "#9467bd", "#d3d3d3"],
+        active_categories=active_categories,
+        bench_z=bench_z,
+        elevation_tolerance=elevation_tolerance,
+        samples_xyz=samples_xyz,
+        x_col=x_col,
+        y_col=y_col,
+        z_col=z_col,
+        elev=elev,
+        azim=azim,
+        title=title or "3D Mineral Reserve Classification",
+        figsize=figsize,
+    )
+
+
+def plot_reserve_classification_3d_interactive(
+    block_model: pd.DataFrame,
+    status_col: str = "status",
+    tonnes_col: Optional[str] = "tonnes",
+    samples_xyz: Optional[np.ndarray] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    elev: float = 28.0,
+    azim: float = -55.0,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (11.0, 9.0),
+) -> Tuple[plt.Figure, Axes3D, Dict[str, Any]]:
+    """Interactive 3D explorer for Mineral Reserve status categories.
+
+    Provides real-time checkboxes to toggle Proven, Probable, Inferred Excluded,
+    and Waste blocks, an elevation slider for bench-by-bench slice exploration,
+    and a live HUD reporting reserve tonnage and percentage breakdowns.
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates and reserve status.
+    status_col : str, default "status"
+        Reserve status column.
+    tonnes_col : str, optional, default "tonnes"
+        Tonnage column for real-time HUD mass accounting.
+    samples_xyz : np.ndarray, optional
+        Drillhole coordinates.
+    x_col, y_col, z_col : str, default "x", "y", "z"
+        Coordinate column names.
+    elev, azim : float, default 28.0, -55.0
+        Camera viewing angles.
+    title : str, optional
+        Window and plot title.
+    figsize : Tuple[float, float], default (11.0, 9.0)
+        Figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Axes3D, Dict[str, Any]]
+        Figure, 3D axes, and interactive controls dictionary.
+    """
+    return _plot_categorical_blocks_3d_interactive(
+        block_model=block_model,
+        category_col=status_col,
+        categories=[
+            "Proven Reserve",
+            "Probable Reserve",
+            "Inferred Resource (Excluded)",
+            "Sub-Economic / Waste",
+        ],
+        colors=["#2ca02c", "#1f77b4", "#9467bd", "#d3d3d3"],
+        tonnes_col=tonnes_col,
+        samples_xyz=samples_xyz,
+        x_col=x_col,
+        y_col=y_col,
+        z_col=z_col,
+        elev=elev,
+        azim=azim,
+        title=title or "Interactive 3D Mineral Reserve Explorer",
+        figsize=figsize,
+    )
+
+
 def plot_resource_classification_map(
     block_model: pd.DataFrame,
     category_col: str = "category",
@@ -6326,89 +6796,27 @@ def plot_resource_classification_map(
     -------
     tuple[plt.Figure, plt.Axes]
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
-
-    df_plot = _filter_bench_slice(
+    return _plot_categorical_2d_map(
         block_model=block_model,
+        category_col=category_col,
+        categories=["Measured", "Indicated", "Inferred", "Unclassified"],
+        colors=["#2ca02c", "#1f77b4", "#ff7f0e", "#d3d3d3"],
+        boundary=boundary,
+        drillholes=drillholes,
         bench_z=bench_z,
         elevation_tolerance=elevation_tolerance,
+        x_col=x_col,
+        y_col=y_col,
         z_col=z_col,
+        title=title,
+        default_title="CIM / JORC Mineral Resource Classification Map",
+        ax=ax,
+        figsize=figsize,
+        alpha=0.85,
+        boundary_color="red",
+        boundary_linestyle="--",
+        boundary_label="Concession Perimeter",
     )
-
-    color_palette = {
-        "Measured": "#2ca02c",  # Forest green
-        "Indicated": "#1f77b4",  # Royal Blue
-        "Inferred": "#ff7f0e",  # Amber / Orange
-        "Unclassified": "#d3d3d3",  # Light grey
-    }
-
-    # Normalize categories
-    cats_lower = df_plot[category_col].astype(str).str.strip().str.lower()
-
-    # Draw blocks grouped by category
-    for cat_name, color in color_palette.items():
-        mask = cats_lower == cat_name.lower()
-        sub = df_plot[mask]
-        if len(sub) > 0:
-            ax.scatter(
-                sub[x_col],
-                sub[y_col],
-                c=color,
-                label=f"{cat_name} ({len(sub):,} blocks)",
-                s=35,
-                marker="s",
-                alpha=0.85,
-                edgecolors="none",
-            )
-
-    # Draw boundary if provided
-    if boundary is not None:
-        b_pts = np.array(list(boundary) + [boundary[0]])
-        ax.plot(
-            b_pts[:, 0],
-            b_pts[:, 1],
-            "r--",
-            linewidth=2.0,
-            label="Concession Perimeter",
-        )
-
-    # Draw drillholes if provided
-    if drillholes is not None and not drillholes.empty:
-        dh_x = (
-            drillholes["x"]
-            if "x" in drillholes
-            else (drillholes[x_col] if x_col in drillholes else drillholes.iloc[:, 0])
-        )
-        dh_y = (
-            drillholes["y"]
-            if "y" in drillholes
-            else (drillholes[y_col] if y_col in drillholes else drillholes.iloc[:, 1])
-        )
-        ax.scatter(
-            dh_x,
-            dh_y,
-            c="black",
-            s=50,
-            marker="^",
-            label=f"Drillholes (N={len(drillholes)})",
-            zorder=6,
-        )
-
-    ax.set_xlabel("Easting (m)", fontsize=11, fontweight="bold")
-    ax.set_ylabel("Northing (m)", fontsize=11, fontweight="bold")
-    plot_title = title
-    if plot_title is None:
-        plot_title = "CIM / JORC Mineral Resource Classification Map"
-        if bench_z is not None:
-            plot_title += f" (Bench Z = {bench_z:.1f} m)"
-    ax.set_title(plot_title, fontsize=13, fontweight="bold", pad=12)
-    ax.grid(True, linestyle=":", alpha=0.5)
-    ax.legend(loc="upper right", framealpha=0.9, fontsize=9.5)
-    fig.tight_layout()
-    return fig, ax
 
 
 def plot_resource_classification_orthogonal_slices(
@@ -6479,192 +6887,213 @@ def plot_resource_classification_orthogonal_slices(
     Tuple[plt.Figure, Sequence[plt.Axes]]
         Figure and tuple of 3 axes: (ax_bench, ax_cross, ax_long).
     """
-    if block_model.empty:
-        raise ValueError("block_model cannot be empty.")
-
-    cross_section_view, long_section_view = _validate_orthogonal_views(
-        cross_section_view, long_section_view
-    )
-
-    for req in [x_col, y_col, z_col]:
-        if req not in block_model.columns:
-            raise ValueError(f"block_model is missing required coordinate column '{req}'.")
-    if category_col not in block_model.columns:
-        raise ValueError(
-            f"block_model is missing category column '{category_col}'."
-        )
-
-    bm = block_model.copy()
-
-    # Estimate block dimensions if missing
-    for c, dim_c in [(x_col, dx_col), (y_col, dy_col), (z_col, dz_col)]:
-        if dim_c not in bm.columns:
-            unq = np.sort(bm[c].unique())
-            if len(unq) > 1:
-                diffs = np.diff(unq)
-                diffs = diffs[diffs > 1e-4]
-                val = float(np.median(diffs)) if len(diffs) > 0 else 10.0
-            else:
-                val = 10.0
-            bm[dim_c] = val
-
-    # Encode categories to integer codes
-    cat_str = bm[category_col].astype(str).str.strip().str.lower()
-    code_arr = np.full(len(bm), 3, dtype=int)  # 3 = Unclassified
-    code_arr[cat_str == "measured"] = 0
-    code_arr[cat_str == "indicated"] = 1
-    code_arr[cat_str == "inferred"] = 2
-    code_arr[cat_str == "unclassified"] = 3
-    bm["_cat_code"] = code_arr
-
-    cat_colors = ["#2ca02c", "#1f77b4", "#ff7f0e", "#d3d3d3"]
-    cmap_cat = mcolors.ListedColormap(cat_colors)
-    norm_cat = mcolors.BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], ncolors=4)
-
-    # Pick exact centroid coordinate slices
-    target_z, target_y, target_x = _find_nearest_slice_coords(
-        bm,
+    return _plot_categorical_blocks_orthogonal_slices(
+        block_model=block_model,
+        category_col=category_col,
+        categories=["Measured", "Indicated", "Inferred", "Unclassified"],
+        colors=["#2ca02c", "#1f77b4", "#ff7f0e", "#d3d3d3"],
         bench_z=bench_z,
         section_y=section_y,
         section_x=section_x,
+        samples_xyz=samples_xyz,
+        cross_section_view=cross_section_view,
+        long_section_view=long_section_view,
         x_col=x_col,
         y_col=y_col,
         z_col=z_col,
+        dx_col=dx_col,
+        dy_col=dy_col,
+        dz_col=dz_col,
+        title=title or "3D Resource Classification Orthogonal Slices (CIM / JORC)",
+        figsize=figsize,
     )
 
-    fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
 
-    # 1. Bench Plan (X-Y at target_z)
-    slice_bench = bm[np.isclose(bm[z_col], target_z)]
-    dz_val = float(slice_bench[dz_col].iloc[0]) if len(slice_bench) > 0 else 5.0
-    _render_2d_block_patches(
-        axes[0], slice_bench, x_col, y_col, dx_col, dy_col, "_cat_code", norm_cat, cmap_cat
-    )
-    axes[0].set_title(
-        f"Bench Plan (Z = {target_z:.1f} m) [Looking Down]",
-        fontsize=11,
-        fontweight="bold",
-    )
-    axes[0].set_xlabel("Easting (X) [m]")
-    axes[0].set_ylabel("Northing (Y) [m]")
-    axes[0].set_aspect("equal")
-    axes[0].axhline(target_y, color="red", linestyle="--", linewidth=1.2, alpha=0.8)
-    axes[0].axvline(target_x, color="cyan", linestyle="--", linewidth=1.2, alpha=0.8)
+def plot_resource_classification_bench_gallery(
+    block_model: pd.DataFrame,
+    category_col: str = "category",
+    bench_elevations: Optional[Sequence[float]] = None,
+    n_cols: int = 3,
+    samples_xyz: Optional[np.ndarray] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    dx_col: str = "dx",
+    dy_col: str = "dy",
+    dz_col: str = "dz",
+    title: Optional[str] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Plots multi-bench elevation gallery of CIM/JORC Mineral Resource Classification slices.
 
-    # 2. Cross-Section (X-Z at target_y)
-    slice_sec = bm[np.isclose(bm[y_col], target_y)]
-    dy_val = float(slice_sec[dy_col].iloc[0]) if len(slice_sec) > 0 else 10.0
-    _render_2d_block_patches(
-        axes[1], slice_sec, x_col, z_col, dx_col, dz_col, "_cat_code", norm_cat, cmap_cat
-    )
-    view_cs_label = (
-        "Looking North" if cross_section_view == "north" else "Looking South"
-    )
-    x_dir_label = (
-        "Easting (X) [m] (← West | East →)"
-        if cross_section_view == "north"
-        else "Easting (X) [m] (← East | West →)"
-    )
-    axes[1].set_title(
-        f"Cross-Section (Y = {target_y:.1f} m) [{view_cs_label}]",
-        fontsize=11,
-        fontweight="bold",
-    )
-    axes[1].set_xlabel(x_dir_label)
-    axes[1].set_ylabel("Elevation (Z) [m]")
-    axes[1].set_aspect("equal")
-    if cross_section_view == "south":
-        axes[1].invert_xaxis()
-    axes[1].axhline(target_z, color="magenta", linestyle="--", linewidth=1.2, alpha=0.8)
-    axes[1].axvline(target_x, color="cyan", linestyle="--", linewidth=1.2, alpha=0.8)
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z) and classification category.
+    category_col : str, default "category"
+        Resource classification column ("Measured", "Indicated", "Inferred", "Unclassified").
+    bench_elevations : Sequence[float], optional
+        Specific bench elevations to plot. If None, samples up to 6 evenly spaced levels.
+    n_cols : int, default 3
+        Number of subplot columns in gallery grid.
+    samples_xyz : np.ndarray, optional
+        Composite drillhole coordinates for corridor overlay.
+    x_col, y_col, z_col : str, default "x", "y", "z"
+        Coordinate column names.
+    dx_col, dy_col, dz_col : str, default "dx", "dy", "dz"
+        Block dimension column names.
+    title : str, optional
+        Super-title for figure.
+    figsize : Tuple[float, float], optional
+        Matplotlib figure dimensions.
 
-    # 3. Longitudinal Section (Y-Z at target_x)
-    slice_long = bm[np.isclose(bm[x_col], target_x)]
-    dx_val = float(slice_long[dx_col].iloc[0]) if len(slice_long) > 0 else 10.0
-    _render_2d_block_patches(
-        axes[2], slice_long, y_col, z_col, dy_col, dz_col, "_cat_code", norm_cat, cmap_cat
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Figure and active axes sequence.
+    """
+    return _plot_categorical_bench_gallery(
+        block_model=block_model,
+        category_col=category_col,
+        categories=["Measured", "Indicated", "Inferred", "Unclassified"],
+        colors=["#2ca02c", "#1f77b4", "#ff7f0e", "#d3d3d3"],
+        bench_elevations=bench_elevations,
+        n_cols=n_cols,
+        samples_xyz=samples_xyz,
+        x_col=x_col,
+        y_col=y_col,
+        z_col=z_col,
+        dx_col=dx_col,
+        dy_col=dy_col,
+        dz_col=dz_col,
+        title=title
+        or "CIM / JORC Mineral Resource Classification: Multi-Bench Depth Gallery",
+        figsize=figsize,
     )
-    view_ls_label = "Looking West" if long_section_view == "west" else "Looking East"
-    y_dir_label = (
-        "Northing (Y) [m] (← South | North →)"
-        if long_section_view == "west"
-        else "Northing (Y) [m] (← North | South →)"
+
+
+def plot_resource_classification_3d_isometric(
+    block_model: pd.DataFrame,
+    category_col: str = "category",
+    active_categories: Optional[Sequence[str]] = None,
+    bench_z: Optional[float] = None,
+    elevation_tolerance: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    elev: float = 28.0,
+    azim: float = -55.0,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10.0, 8.0),
+) -> Tuple[plt.Figure, Axes3D]:
+    """Renders static 3D isometric view of CIM/JORC Mineral Resource Classification categories.
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z) and classification category.
+    category_col : str, default "category"
+        Resource classification column ("Measured", "Indicated", "Inferred", "Unclassified").
+    active_categories : Sequence[str], optional
+        Subset of categories to display (e.g. ['Measured', 'Indicated']). Defaults to all.
+    bench_z : float, optional
+        Center elevation for horizontal bench corridor filter.
+    elevation_tolerance : float, optional
+        Half-thickness in meters for bench corridor filter (default 5.0m).
+    samples_xyz : np.ndarray, optional
+        Drillhole composite coordinates for spatial overlay.
+    x_col, y_col, z_col : str, default "x", "y", "z"
+        Coordinate column names.
+    elev, azim : float, default 28.0, -55.0
+        Matplotlib 3D camera viewing angles.
+    title : str, optional
+        Figure title.
+    figsize : Tuple[float, float], default (10.0, 8.0)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Axes3D]
+        Figure and 3D axes.
+    """
+    return _plot_categorical_blocks_3d_isometric(
+        block_model=block_model,
+        category_col=category_col,
+        categories=["Measured", "Indicated", "Inferred", "Unclassified"],
+        colors=["#2ca02c", "#1f77b4", "#ff7f0e", "#d3d3d3"],
+        active_categories=active_categories,
+        bench_z=bench_z,
+        elevation_tolerance=elevation_tolerance,
+        samples_xyz=samples_xyz,
+        x_col=x_col,
+        y_col=y_col,
+        z_col=z_col,
+        elev=elev,
+        azim=azim,
+        title=title or "3D Mineral Resource Classification (CIM / JORC)",
+        figsize=figsize,
     )
-    axes[2].set_title(
-        f"Longitudinal Section (X = {target_x:.1f} m) [{view_ls_label}]",
-        fontsize=11,
-        fontweight="bold",
+
+
+def plot_resource_classification_3d_interactive(
+    block_model: pd.DataFrame,
+    category_col: str = "category",
+    tonnes_col: Optional[str] = "tonnes",
+    samples_xyz: Optional[np.ndarray] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    elev: float = 28.0,
+    azim: float = -55.0,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (11.0, 9.0),
+) -> Tuple[plt.Figure, Axes3D, Dict[str, Any]]:
+    """Interactive 3D explorer for CIM/JORC Mineral Resource Classification.
+
+    Provides real-time interactive checkboxes to toggle category visibility (Measured,
+    Indicated, Inferred, Unclassified), an elevation slider to slice benches downward,
+    and a live HUD reporting active block counts, percentages, and tonnage.
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Table of blocks containing centroid coordinates (x, y, z) and classification category.
+    category_col : str, default "category"
+        Resource classification column ("Measured", "Indicated", "Inferred", "Unclassified").
+    tonnes_col : str, optional, default "tonnes"
+        Column containing block tonnage for real-time HUD mass accounting.
+    samples_xyz : np.ndarray, optional
+        Drillhole composite coordinates for spatial overlay.
+    x_col, y_col, z_col : str, default "x", "y", "z"
+        Coordinate column names.
+    elev, azim : float, default 28.0, -55.0
+        Initial 3D camera angles.
+    title : str, optional
+        Window and plot title.
+    figsize : Tuple[float, float], default (11.0, 9.0)
+        Figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Axes3D, Dict[str, Any]]
+        Figure, 3D axes, and widget controls dictionary.
+    """
+    return _plot_categorical_blocks_3d_interactive(
+        block_model=block_model,
+        category_col=category_col,
+        categories=["Measured", "Indicated", "Inferred", "Unclassified"],
+        colors=["#2ca02c", "#1f77b4", "#ff7f0e", "#d3d3d3"],
+        tonnes_col=tonnes_col,
+        samples_xyz=samples_xyz,
+        x_col=x_col,
+        y_col=y_col,
+        z_col=z_col,
+        elev=elev,
+        azim=azim,
+        title=title or "Interactive 3D Resource Classification Explorer",
+        figsize=figsize,
     )
-    axes[2].set_xlabel(y_dir_label)
-    axes[2].set_ylabel("Elevation (Z) [m]")
-    axes[2].set_aspect("equal")
-    if long_section_view == "east":
-        axes[2].invert_xaxis()
-    axes[2].axhline(target_z, color="magenta", linestyle="--", linewidth=1.2, alpha=0.8)
-    axes[2].axvline(target_y, color="red", linestyle="--", linewidth=1.2, alpha=0.8)
-
-    # Drillhole composite overlay within corridors
-    if samples_xyz is not None and len(samples_xyz) > 0:
-        samples_arr = np.asarray(samples_xyz, dtype=float)
-        # Bench corridor
-        mask_bench = np.abs(samples_arr[:, 2] - target_z) <= 0.5 * dz_val
-        if np.any(mask_bench):
-            axes[0].scatter(
-                samples_arr[mask_bench, 0],
-                samples_arr[mask_bench, 1],
-                c="black",
-                marker="^",
-                s=35,
-                zorder=5,
-            )
-        # Cross-section corridor
-        mask_sec = np.abs(samples_arr[:, 1] - target_y) <= 0.5 * dy_val
-        if np.any(mask_sec):
-            axes[1].scatter(
-                samples_arr[mask_sec, 0],
-                samples_arr[mask_sec, 2],
-                c="black",
-                marker="^",
-                s=35,
-                zorder=5,
-            )
-        # Longitudinal section corridor
-        mask_long = np.abs(samples_arr[:, 0] - target_x) <= 0.5 * dx_val
-        if np.any(mask_long):
-            axes[2].scatter(
-                samples_arr[mask_long, 1],
-                samples_arr[mask_long, 2],
-                c="black",
-                marker="^",
-                s=35,
-                zorder=5,
-            )
-
-    # Legend elements
-    legend_handles = [
-        mpatches.Patch(facecolor="#2ca02c", edgecolor="none", label="Measured"),
-        mpatches.Patch(facecolor="#1f77b4", edgecolor="none", label="Indicated"),
-        mpatches.Patch(facecolor="#ff7f0e", edgecolor="none", label="Inferred"),
-        mpatches.Patch(facecolor="#d3d3d3", edgecolor="none", label="Unclassified"),
-    ]
-    if samples_xyz is not None and len(samples_xyz) > 0:
-        legend_handles.append(
-            mlines.Line2D([], [], color="black", marker="^", linestyle="None", markersize=7, label="Drillhole Composites")
-        )
-
-    for ax_i in axes:
-        ax_i.grid(True, linestyle=":", alpha=0.4)
-
-    axes[0].legend(handles=legend_handles, loc="upper right", framealpha=0.85, fontsize=8.5)
-
-    sup_title = (
-        title
-        if title is not None
-        else "3D Resource Classification Orthogonal Slices (CIM / JORC)"
-    )
-    fig.suptitle(sup_title, fontsize=13, fontweight="bold")
-
-    return fig, (axes[0], axes[1], axes[2])
 
 
 def plot_in_situ_vs_diluted_curves(
@@ -6870,17 +7299,13 @@ def composite_drillhole_intervals(
             f"unassayed_treatment must be 'zero', 'split', 'ignore', or 'error', got '{unassayed_treatment}'"
         )
     if not (0.0 <= min_length_ratio <= 1.0):
-        raise ValueError(
-            f"min_length_ratio must be in [0, 1], got {min_length_ratio}"
-        )
+        raise ValueError(f"min_length_ratio must be in [0, 1], got {min_length_ratio}")
     if not (0.0 <= min_coverage_ratio <= 1.0):
         raise ValueError(
             f"min_coverage_ratio must be in [0, 1], got {min_coverage_ratio}"
         )
     if max_gap_length < 0.0:
-        raise ValueError(
-            f"max_gap_length must be non-negative, got {max_gap_length}"
-        )
+        raise ValueError(f"max_gap_length must be non-negative, got {max_gap_length}")
 
     for col in (hole_id_col, from_col, to_col, grade_col):
         if col not in assay_df.columns:
@@ -7030,28 +7455,39 @@ def composite_drillhole_intervals(
                         for c in coord_cols:
                             p_val = raw_coords[c][i - 1]
                             c_val = raw_coords[c][i]
-                            if np.isfinite(p_val) and np.isfinite(c_val) and abs(denom) > 1e-9:
+                            if (
+                                np.isfinite(p_val)
+                                and np.isfinite(c_val)
+                                and abs(denom) > 1e-9
+                            ):
                                 gap_coords[c] = float(
-                                    p_val + ((gap_mid - prev_mid) / denom) * (c_val - p_val)
+                                    p_val
+                                    + ((gap_mid - prev_mid) / denom) * (c_val - p_val)
                                 )
                             elif np.isfinite(p_val):
                                 gap_coords[c] = float(p_val)
                             else:
                                 gap_coords[c] = float(c_val)
 
-                        current_run.append({
-                            "from": prev_to,
-                            "to": f_i,
-                            "length": gap_len,
-                            "grade": unassayed_grade,
-                            "density": mean_density,
-                            "is_sampled": False,
-                            "domain": current_dom,
-                            "coords": gap_coords,
-                        })
+                        current_run.append(
+                            {
+                                "from": prev_to,
+                                "to": f_i,
+                                "length": gap_len,
+                                "grade": unassayed_grade,
+                                "density": mean_density,
+                                "is_sampled": False,
+                                "domain": current_dom,
+                                "coords": gap_coords,
+                            }
+                        )
 
             # Check domain transition
-            if domain_col is not None and current_dom is not None and dom_i != current_dom:
+            if (
+                domain_col is not None
+                and current_dom is not None
+                and dom_i != current_dom
+            ):
                 if current_run:
                     runs.append(current_run)
                     current_run = []
@@ -7060,7 +7496,7 @@ def composite_drillhole_intervals(
             # Handle current interval
             if missing_i:
                 total_gaps_count += 1
-                total_gaps_length += (t_i - f_i)
+                total_gaps_length += t_i - f_i
                 if unassayed_treatment == "error":
                     raise ValueError(
                         f"Missing or unassayed grade detected in hole '{hole_id}' "
@@ -7125,10 +7561,12 @@ def composite_drillhole_intervals(
                     discarded_remnants_count += 1
                     continue
                 for ci in range(n_comp):
-                    comp_intervals.append((
-                        run_start + ci * actual_len,
-                        run_start + (ci + 1) * actual_len,
-                    ))
+                    comp_intervals.append(
+                        (
+                            run_start + ci * actual_len,
+                            run_start + (ci + 1) * actual_len,
+                        )
+                    )
             else:  # "discard"
                 curr = run_start
                 while curr + composite_length <= run_end + 1e-9:
@@ -7178,7 +7616,9 @@ def composite_drillhole_intervals(
                 if unassayed_treatment == "ignore":
                     if not np.any(active_sampled):
                         continue
-                    sample_weights = active_lens[active_sampled] * active_dens[active_sampled]
+                    sample_weights = (
+                        active_lens[active_sampled] * active_dens[active_sampled]
+                    )
                     tot_w = float(sample_weights.sum())
                     if tot_w <= 0:
                         continue
@@ -7190,9 +7630,7 @@ def composite_drillhole_intervals(
                     tot_w = float(weights.sum())
                     if tot_w <= 0:
                         continue
-                    weighted_grade = float(
-                        (weights * active_grades).sum() / tot_w
-                    )
+                    weighted_grade = float((weights * active_grades).sum() / tot_w)
 
                 rec: dict = {
                     hole_id_col: hole_id,
@@ -7209,12 +7647,16 @@ def composite_drillhole_intervals(
                 # Interpolate spatial coordinates to composite midpoint
                 c_mid = (c_from + c_to) / 2.0
                 for c_name in coord_cols:
-                    raw_c = np.array([s["coords"].get(c_name, np.nan) for s in run], dtype=float)
+                    raw_c = np.array(
+                        [s["coords"].get(c_name, np.nan) for s in run], dtype=float
+                    )
                     active_c = raw_c[valid_mask]
                     c_valid = np.isfinite(active_c)
                     if np.any(c_valid):
                         c_weights = active_lens[c_valid]
-                        comp_coord = float((c_weights * active_c[c_valid]).sum() / c_weights.sum())
+                        comp_coord = float(
+                            (c_weights * active_c[c_valid]).sum() / c_weights.sum()
+                        )
                     else:
                         comp_coord = np.nan
                     rec[c_name] = comp_coord
@@ -7921,7 +8363,11 @@ def contact_profile_analysis(
             raise ValueError(f"Specified distance_col '{distance_col}' not found.")
         dists = sub_df[distance_col].to_numpy(dtype=float)
         contact_type = "Precomputed Column"
-    elif contact_plane_point is not None or contact_dip is not None or contact_normal is not None:
+    elif (
+        contact_plane_point is not None
+        or contact_dip is not None
+        or contact_normal is not None
+    ):
         if contact_plane_point is None:
             raise ValueError(
                 "Must provide 'contact_plane_point' (e.g. (x0, y0, z0)) when defining a planar contact."
@@ -7948,11 +8394,14 @@ def contact_profile_analysis(
             dip_rad = np.radians(contact_dip)
             dd_rad = np.radians(contact_dip_direction)
             # Upward/hanging-wall unit normal:
-            normal = np.array([
-                np.sin(dd_rad) * np.sin(dip_rad),
-                np.cos(dd_rad) * np.sin(dip_rad),
-                np.cos(dip_rad),
-            ], dtype=float)
+            normal = np.array(
+                [
+                    np.sin(dd_rad) * np.sin(dip_rad),
+                    np.cos(dd_rad) * np.sin(dip_rad),
+                    np.cos(dip_rad),
+                ],
+                dtype=float,
+            )
         elif contact_normal is not None:
             normal = np.asarray(contact_normal, dtype=float)
             norm_len = np.linalg.norm(normal)
@@ -7964,9 +8413,17 @@ def contact_profile_analysis(
                 "Must provide either ('contact_dip' and 'contact_dip_direction') or 'contact_normal' with 'contact_plane_point'."
             )
 
-        is_3d = len(p0) == 3 or len(normal) == 3 or (z_col is not None and z_col in sub_df.columns)
+        is_3d = (
+            len(p0) == 3
+            or len(normal) == 3
+            or (z_col is not None and z_col in sub_df.columns)
+        )
         if is_3d:
-            for col_name, c_label in [(x_col, "x_col"), (y_col, "y_col"), (z_col, "z_col")]:
+            for col_name, c_label in [
+                (x_col, "x_col"),
+                (y_col, "y_col"),
+                (z_col, "z_col"),
+            ]:
                 if col_name is None or col_name not in sub_df.columns:
                     raise ValueError(
                         f"Required 3D coordinate column '{col_name}' ({c_label}) not found in DataFrame."
@@ -7997,7 +8454,11 @@ def contact_profile_analysis(
             raise ValueError("contact_points cannot be empty.")
         is_3d = c_pts.shape[1] == 3
         if is_3d:
-            for col_name, c_label in [(x_col, "x_col"), (y_col, "y_col"), (z_col, "z_col")]:
+            for col_name, c_label in [
+                (x_col, "x_col"),
+                (y_col, "y_col"),
+                (z_col, "z_col"),
+            ]:
                 if col_name is None or col_name not in sub_df.columns:
                     raise ValueError(
                         f"Required 3D coordinate column '{col_name}' ({c_label}) not found in DataFrame."
@@ -8340,7 +8801,9 @@ def plot_contact_profile(
     else:
         plot_title = f"Geological Contact Profile Analysis: {dom_a} vs. {dom_b}"
         if c_type == "3D Plane" and c_dip is not None and c_dd is not None:
-            plot_title += f"\n(3D Planar Contact: Dip {c_dip:.0f}°, Dip Dir {c_dd:.0f}°)"
+            plot_title += (
+                f"\n(3D Planar Contact: Dip {c_dip:.0f}°, Dip Dir {c_dd:.0f}°)"
+            )
         elif c_type is not None and c_type != "Precomputed Column":
             plot_title += f"\n({c_type})"
 
@@ -8448,16 +8911,48 @@ def reconcile_production_to_reserve(
             return pd.DataFrame([data])
         return data.copy()
 
-    def _extract_stockpile_delta(sp_row: pd.Series, g_scale: float) -> Tuple[float, float]:
+    def _extract_stockpile_delta(
+        sp_row: pd.Series, g_scale: float
+    ) -> Tuple[float, float]:
         """Extracts (delta_tonnes, delta_metal) from a stockpile record."""
         # Format 1: Opening & closing inventory balances
-        open_t = next((c for c in sp_row.index if c in ("opening_tonnes", "open_tonnes", "opening_t", "open_t")), None)
-        close_t = next((c for c in sp_row.index if c in ("closing_tonnes", "close_tonnes", "closing_t", "close_t")), None)
+        open_t = next(
+            (
+                c
+                for c in sp_row.index
+                if c in ("opening_tonnes", "open_tonnes", "opening_t", "open_t")
+            ),
+            None,
+        )
+        close_t = next(
+            (
+                c
+                for c in sp_row.index
+                if c in ("closing_tonnes", "close_tonnes", "closing_t", "close_t")
+            ),
+            None,
+        )
         if open_t is not None and close_t is not None:
-            open_g = next((c for c in sp_row.index if c in ("opening_grade", "open_grade", "opening_g", "open_g")), None)
-            close_g = next((c for c in sp_row.index if c in ("closing_grade", "close_grade", "closing_g", "close_g")), None)
+            open_g = next(
+                (
+                    c
+                    for c in sp_row.index
+                    if c in ("opening_grade", "open_grade", "opening_g", "open_g")
+                ),
+                None,
+            )
+            close_g = next(
+                (
+                    c
+                    for c in sp_row.index
+                    if c in ("closing_grade", "close_grade", "closing_g", "close_g")
+                ),
+                None,
+            )
             if open_g is None or close_g is None:
-                raise ValueError("Stockpile opening/closing balances require both tonnes and grade columns.")
+                raise ValueError(
+                    "Stockpile opening/closing balances require both tonnes and grade columns."
+                )
             t_o, g_o = float(sp_row[open_t]), float(sp_row[open_g])
             t_c, g_c = float(sp_row[close_t]), float(sp_row[close_g])
             d_t = t_c - t_o
@@ -8465,13 +8960,69 @@ def reconcile_production_to_reserve(
             return d_t, d_m
 
         # Format 2: Movement receipts and reclaims
-        add_t = next((c for c in sp_row.index if c in ("added_tonnes", "deposit_tonnes", "inflow_tonnes", "feed_tonnes", "add_tonnes")), None)
-        rec_t = next((c for c in sp_row.index if c in ("reclaimed_tonnes", "reclaim_tonnes", "drawdown_tonnes", "outflow_tonnes")), None)
+        add_t = next(
+            (
+                c
+                for c in sp_row.index
+                if c
+                in (
+                    "added_tonnes",
+                    "deposit_tonnes",
+                    "inflow_tonnes",
+                    "feed_tonnes",
+                    "add_tonnes",
+                )
+            ),
+            None,
+        )
+        rec_t = next(
+            (
+                c
+                for c in sp_row.index
+                if c
+                in (
+                    "reclaimed_tonnes",
+                    "reclaim_tonnes",
+                    "drawdown_tonnes",
+                    "outflow_tonnes",
+                )
+            ),
+            None,
+        )
         if add_t is not None and rec_t is not None:
-            add_g = next((c for c in sp_row.index if c in ("added_grade", "deposit_grade", "inflow_grade", "feed_grade", "add_grade")), None)
-            rec_g = next((c for c in sp_row.index if c in ("reclaimed_grade", "reclaim_grade", "drawdown_grade", "outflow_grade")), None)
+            add_g = next(
+                (
+                    c
+                    for c in sp_row.index
+                    if c
+                    in (
+                        "added_grade",
+                        "deposit_grade",
+                        "inflow_grade",
+                        "feed_grade",
+                        "add_grade",
+                    )
+                ),
+                None,
+            )
+            rec_g = next(
+                (
+                    c
+                    for c in sp_row.index
+                    if c
+                    in (
+                        "reclaimed_grade",
+                        "reclaim_grade",
+                        "drawdown_grade",
+                        "outflow_grade",
+                    )
+                ),
+                None,
+            )
             if add_g is None or rec_g is None:
-                raise ValueError("Stockpile movement flows require both added/reclaimed tonnes and grade columns.")
+                raise ValueError(
+                    "Stockpile movement flows require both added/reclaimed tonnes and grade columns."
+                )
             t_a, g_a = float(sp_row[add_t]), float(sp_row[add_g])
             t_r, g_r = float(sp_row[rec_t]), float(sp_row[rec_g])
             d_t = t_a - t_r
@@ -8479,12 +9030,33 @@ def reconcile_production_to_reserve(
             return d_t, d_m
 
         # Format 3: Direct deltas
-        d_t_col = next((c for c in sp_row.index if c in ("delta_tonnes", "delta_t", "stockpile_delta_tonnes", "tonnes")), None)
+        d_t_col = next(
+            (
+                c
+                for c in sp_row.index
+                if c in ("delta_tonnes", "delta_t", "stockpile_delta_tonnes", "tonnes")
+            ),
+            None,
+        )
         if d_t_col is not None:
-            d_m_col = next((c for c in sp_row.index if c in ("delta_metal", "delta_m", "stockpile_delta_metal", "metal")), None)
+            d_m_col = next(
+                (
+                    c
+                    for c in sp_row.index
+                    if c in ("delta_metal", "delta_m", "stockpile_delta_metal", "metal")
+                ),
+                None,
+            )
             if d_m_col is not None:
                 return float(sp_row[d_t_col]), float(sp_row[d_m_col])
-            d_g_col = next((c for c in sp_row.index if c in ("delta_grade", "delta_g", "stockpile_delta_grade", "grade")), None)
+            d_g_col = next(
+                (
+                    c
+                    for c in sp_row.index
+                    if c in ("delta_grade", "delta_g", "stockpile_delta_grade", "grade")
+                ),
+                None,
+            )
             if d_g_col is not None:
                 d_t = float(sp_row[d_t_col])
                 d_g = float(sp_row[d_g_col])
@@ -8529,7 +9101,9 @@ def reconcile_production_to_reserve(
         if len(df_sp) == len(df_res):
             df_sp[p_col] = df_res[p_col].values
         else:
-            raise ValueError(f"Period column '{p_col}' not found in stockpile_data and length does not match reserve data.")
+            raise ValueError(
+                f"Period column '{p_col}' not found in stockpile_data and length does not match reserve data."
+            )
 
     grade_scale = 100.0 if "%" in grade_unit else 1.0
 
@@ -8594,7 +9168,9 @@ def reconcile_production_to_reserve(
 
             t_plant_adj = t_plant + d_t
             m_plant_adj = m_plant + d_m
-            g_plant_adj = (m_plant_adj / t_plant_adj) * grade_scale if t_plant_adj > 0 else 0.0
+            g_plant_adj = (
+                (m_plant_adj / t_plant_adj) * grade_scale if t_plant_adj > 0 else 0.0
+            )
 
             rec["stockpile_delta_tonnes"] = d_t
             rec["stockpile_delta_grade"] = d_g
@@ -8665,7 +9241,11 @@ def reconcile_production_to_reserve(
             tot_d_g = (tot_d_m / tot_d_t) * grade_scale if tot_d_t != 0 else 0.0
             tot_t_plant_adj = tot_t_plant + tot_d_t
             tot_m_plant_adj = tot_m_plant + tot_d_m
-            tot_g_plant_adj = (tot_m_plant_adj / tot_t_plant_adj) * grade_scale if tot_t_plant_adj > 0 else 0.0
+            tot_g_plant_adj = (
+                (tot_m_plant_adj / tot_t_plant_adj) * grade_scale
+                if tot_t_plant_adj > 0
+                else 0.0
+            )
 
             tot_rec["stockpile_delta_tonnes"] = tot_d_t
             tot_rec["stockpile_delta_grade"] = tot_d_g
@@ -8675,13 +9255,25 @@ def reconcile_production_to_reserve(
             tot_rec["plant_adj_metal"] = tot_m_plant_adj
 
             if has_gc:
-                tot_rec["f2_adj_tonnes_ratio"] = tot_t_plant_adj / tot_t_gc if tot_t_gc > 0 else 1.0
-                tot_rec["f2_adj_grade_ratio"] = tot_g_plant_adj / tot_g_gc if tot_g_gc > 0 else 1.0
-                tot_rec["f2_adj_metal_factor"] = tot_m_plant_adj / tot_m_gc if tot_m_gc > 0 else 1.0
+                tot_rec["f2_adj_tonnes_ratio"] = (
+                    tot_t_plant_adj / tot_t_gc if tot_t_gc > 0 else 1.0
+                )
+                tot_rec["f2_adj_grade_ratio"] = (
+                    tot_g_plant_adj / tot_g_gc if tot_g_gc > 0 else 1.0
+                )
+                tot_rec["f2_adj_metal_factor"] = (
+                    tot_m_plant_adj / tot_m_gc if tot_m_gc > 0 else 1.0
+                )
 
-            tot_rec["f3_adj_tonnes_ratio"] = tot_t_plant_adj / tot_t_res if tot_t_res > 0 else 1.0
-            tot_rec["f3_adj_grade_ratio"] = tot_g_plant_adj / tot_g_res if tot_g_res > 0 else 1.0
-            tot_rec["f3_adj_metal_factor"] = tot_m_plant_adj / tot_m_res if tot_m_res > 0 else 1.0
+            tot_rec["f3_adj_tonnes_ratio"] = (
+                tot_t_plant_adj / tot_t_res if tot_t_res > 0 else 1.0
+            )
+            tot_rec["f3_adj_grade_ratio"] = (
+                tot_g_plant_adj / tot_g_res if tot_g_res > 0 else 1.0
+            )
+            tot_rec["f3_adj_metal_factor"] = (
+                tot_m_plant_adj / tot_m_res if tot_m_res > 0 else 1.0
+            )
 
         res_df = pd.concat([res_df, pd.DataFrame([tot_rec])], ignore_index=True)
 
@@ -8786,38 +9378,60 @@ def plot_production_reconciliation(
     ax_t, ax_g = axes[0, 0], axes[0, 1]
     ax_m, ax_f = axes[1, 0], axes[1, 1]
 
-    col_res = "#1f77b4"      # Blue (Reserve Model)
-    col_gc = "#ff7f0e"       # Orange (Grade Control)
-    col_plant = "#2ca02c"    # Green (Plant Direct Feed)
-    col_plant_adj = "#9467bd"# Purple (Plant + Stockpile Delta)
+    col_res = "#1f77b4"  # Blue (Reserve Model)
+    col_gc = "#ff7f0e"  # Orange (Grade Control)
+    col_plant = "#2ca02c"  # Green (Plant Direct Feed)
+    col_plant_adj = "#9467bd"  # Purple (Plant + Stockpile Delta)
 
     # Offsets helper
-    offsets = np.linspace(-width * (num_series - 1) / 2, width * (num_series - 1) / 2, num_series)
+    offsets = np.linspace(
+        -width * (num_series - 1) / 2, width * (num_series - 1) / 2, num_series
+    )
 
     # -------------------------------------------------------------------------
     # Panel 1: Ore Tonnage
     # -------------------------------------------------------------------------
     s_idx = 0
     ax_t.bar(
-        x + offsets[s_idx], plot_df["reserve_tonnes"], width,
-        label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85
+        x + offsets[s_idx],
+        plot_df["reserve_tonnes"],
+        width,
+        label="Reserve Model",
+        color=col_res,
+        edgecolor="black",
+        alpha=0.85,
     )
     s_idx += 1
     if has_gc:
         ax_t.bar(
-            x + offsets[s_idx], plot_df["gc_tonnes"], width,
-            label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85
+            x + offsets[s_idx],
+            plot_df["gc_tonnes"],
+            width,
+            label="Grade Control",
+            color=col_gc,
+            edgecolor="black",
+            alpha=0.85,
         )
         s_idx += 1
     ax_t.bar(
-        x + offsets[s_idx], plot_df["plant_tonnes"], width,
-        label="Plant (Direct)", color=col_plant, edgecolor="black", alpha=0.85
+        x + offsets[s_idx],
+        plot_df["plant_tonnes"],
+        width,
+        label="Plant (Direct)",
+        color=col_plant,
+        edgecolor="black",
+        alpha=0.85,
     )
     s_idx += 1
     if has_sp:
         ax_t.bar(
-            x + offsets[s_idx], plot_df["plant_adj_tonnes"], width,
-            label="Plant (Stockpile-Adj)", color=col_plant_adj, edgecolor="black", alpha=0.85
+            x + offsets[s_idx],
+            plot_df["plant_adj_tonnes"],
+            width,
+            label="Plant (Stockpile-Adj)",
+            color=col_plant_adj,
+            edgecolor="black",
+            alpha=0.85,
         )
 
     ax_t.set_ylabel(f"Ore Tonnage ({tonnage_unit})", fontsize=10, fontweight="bold")
@@ -8832,25 +9446,45 @@ def plot_production_reconciliation(
     # -------------------------------------------------------------------------
     s_idx = 0
     ax_g.bar(
-        x + offsets[s_idx], plot_df["reserve_grade"], width,
-        label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85
+        x + offsets[s_idx],
+        plot_df["reserve_grade"],
+        width,
+        label="Reserve Model",
+        color=col_res,
+        edgecolor="black",
+        alpha=0.85,
     )
     s_idx += 1
     if has_gc:
         ax_g.bar(
-            x + offsets[s_idx], plot_df["gc_grade"], width,
-            label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85
+            x + offsets[s_idx],
+            plot_df["gc_grade"],
+            width,
+            label="Grade Control",
+            color=col_gc,
+            edgecolor="black",
+            alpha=0.85,
         )
         s_idx += 1
     ax_g.bar(
-        x + offsets[s_idx], plot_df["plant_grade"], width,
-        label="Plant (Direct)", color=col_plant, edgecolor="black", alpha=0.85
+        x + offsets[s_idx],
+        plot_df["plant_grade"],
+        width,
+        label="Plant (Direct)",
+        color=col_plant,
+        edgecolor="black",
+        alpha=0.85,
     )
     s_idx += 1
     if has_sp:
         ax_g.bar(
-            x + offsets[s_idx], plot_df["plant_adj_grade"], width,
-            label="Plant (Stockpile-Adj)", color=col_plant_adj, edgecolor="black", alpha=0.85
+            x + offsets[s_idx],
+            plot_df["plant_adj_grade"],
+            width,
+            label="Plant (Stockpile-Adj)",
+            color=col_plant_adj,
+            edgecolor="black",
+            alpha=0.85,
         )
 
     ax_g.set_ylabel(f"Head Grade ({grade_unit})", fontsize=10, fontweight="bold")
@@ -8865,25 +9499,45 @@ def plot_production_reconciliation(
     # -------------------------------------------------------------------------
     s_idx = 0
     ax_m.bar(
-        x + offsets[s_idx], plot_df["reserve_metal"], width,
-        label="Reserve Model", color=col_res, edgecolor="black", alpha=0.85
+        x + offsets[s_idx],
+        plot_df["reserve_metal"],
+        width,
+        label="Reserve Model",
+        color=col_res,
+        edgecolor="black",
+        alpha=0.85,
     )
     s_idx += 1
     if has_gc:
         ax_m.bar(
-            x + offsets[s_idx], plot_df["gc_metal"], width,
-            label="Grade Control", color=col_gc, edgecolor="black", alpha=0.85
+            x + offsets[s_idx],
+            plot_df["gc_metal"],
+            width,
+            label="Grade Control",
+            color=col_gc,
+            edgecolor="black",
+            alpha=0.85,
         )
         s_idx += 1
     ax_m.bar(
-        x + offsets[s_idx], plot_df["plant_metal"], width,
-        label="Plant (Direct)", color=col_plant, edgecolor="black", alpha=0.85
+        x + offsets[s_idx],
+        plot_df["plant_metal"],
+        width,
+        label="Plant (Direct)",
+        color=col_plant,
+        edgecolor="black",
+        alpha=0.85,
     )
     s_idx += 1
     if has_sp:
         ax_m.bar(
-            x + offsets[s_idx], plot_df["plant_adj_metal"], width,
-            label="Plant (Stockpile-Adj)", color=col_plant_adj, edgecolor="black", alpha=0.85
+            x + offsets[s_idx],
+            plot_df["plant_adj_metal"],
+            width,
+            label="Plant (Stockpile-Adj)",
+            color=col_plant_adj,
+            edgecolor="black",
+            alpha=0.85,
         )
 
     ax_m.set_ylabel(f"Contained Metal ({metal_unit})", fontsize=10, fontweight="bold")
@@ -8902,28 +9556,51 @@ def plot_production_reconciliation(
     if n_p > 1:
         if has_gc:
             ax_f.plot(
-                x, plot_df["f1_metal_factor"], "-o",
-                color=col_res, linewidth=2.0, markersize=6, label="F1 (Model → Mine)"
+                x,
+                plot_df["f1_metal_factor"],
+                "-o",
+                color=col_res,
+                linewidth=2.0,
+                markersize=6,
+                label="F1 (Model → Mine)",
             )
             ax_f.plot(
-                x, plot_df["f2_metal_factor"], "--s" if has_sp else "-s",
-                color=col_gc, linewidth=1.8 if has_sp else 2.0, markersize=5 if has_sp else 6,
-                label="F2 (Direct Mine → Mill)" if has_sp else "F2 (Mine → Mill)"
+                x,
+                plot_df["f2_metal_factor"],
+                "--s" if has_sp else "-s",
+                color=col_gc,
+                linewidth=1.8 if has_sp else 2.0,
+                markersize=5 if has_sp else 6,
+                label="F2 (Direct Mine → Mill)" if has_sp else "F2 (Mine → Mill)",
             )
             if has_sp:
                 ax_f.plot(
-                    x, plot_df["f2_adj_metal_factor"], "-s",
-                    color="#d62728", linewidth=2.2, markersize=6, label="F2 (Stockpile-Adj)"
+                    x,
+                    plot_df["f2_adj_metal_factor"],
+                    "-s",
+                    color="#d62728",
+                    linewidth=2.2,
+                    markersize=6,
+                    label="F2 (Stockpile-Adj)",
                 )
         ax_f.plot(
-            x, plot_df["f3_metal_factor"], "--^" if has_sp else "-^",
-            color=col_plant, linewidth=1.8 if has_sp else 2.5, markersize=6 if has_sp else 7,
-            label="F3 (Direct Total)" if has_sp else "F3 (Total Value Chain)"
+            x,
+            plot_df["f3_metal_factor"],
+            "--^" if has_sp else "-^",
+            color=col_plant,
+            linewidth=1.8 if has_sp else 2.5,
+            markersize=6 if has_sp else 7,
+            label="F3 (Direct Total)" if has_sp else "F3 (Total Value Chain)",
         )
         if has_sp:
             ax_f.plot(
-                x, plot_df["f3_adj_metal_factor"], "-^",
-                color=col_plant_adj, linewidth=2.5, markersize=7, label="F3 (Stockpile-Adj Total)"
+                x,
+                plot_df["f3_adj_metal_factor"],
+                "-^",
+                color=col_plant_adj,
+                linewidth=2.5,
+                markersize=7,
+                label="F3 (Stockpile-Adj Total)",
             )
         ax_f.set_xticks(x)
         ax_f.set_xticklabels(periods, fontsize=9)
@@ -8951,13 +9628,19 @@ def plot_production_reconciliation(
             bar_c.append(col_plant_adj)
 
         ax_f.bar(
-            range(len(cats)), vals, width=0.45,
-            color=bar_c, edgecolor="black", alpha=0.85
+            range(len(cats)),
+            vals,
+            width=0.45,
+            color=bar_c,
+            edgecolor="black",
+            alpha=0.85,
         )
         ax_f.set_xticks(range(len(cats)))
         ax_f.set_xticklabels(cats, fontsize=8.5, fontweight="bold")
         for idx, v in enumerate(vals):
-            ax_f.text(idx, v + 0.02, f"{v:.3f}", ha="center", fontsize=8.5, fontweight="bold")
+            ax_f.text(
+                idx, v + 0.02, f"{v:.3f}", ha="center", fontsize=8.5, fontweight="bold"
+            )
 
     ax_f.set_ylabel("Reconciliation Factor (Ratio)", fontsize=10, fontweight="bold")
     ax_f.set_title(
@@ -9218,17 +9901,6 @@ def plot_simulation_realizations_dashboard(
 # =============================================================================
 # 3D BLOCK MODEL VISUALIZATION SUITE (SLICES, GALLERIES, ISOMETRIC, UNCERTAINTY)
 # =============================================================================
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Maintain clean separation of concerns by adding dedicated functions to this suite:
-# - `plot_resource_classification_3d_isometric`: Static 3D isometric projection of CIM/JORC resource categories (TODO: Manually Verify).
-# - `plot_resource_classification_3d_interactive`: Interactive 3D explorer with category toggles, bench slider, and HUD.
-# - `plot_resource_classification_bench_gallery`: Multi-panel elevation gallery of classification slices.
-# - `plot_resource_classification_orthogonal_slices`: 3-view orthogonal slices (XY plan, XZ cross, YZ long).
-# - `plot_reserve_classification_3d_isometric` & `plot_reserve_classification_3d_interactive`: Reserve status 3D viewers.
-# - `plot_polygonal_3d_isometric` & `plot_polygonal_3d_interactive`: 3D polygonal/NN domain viewers.
-# - `plot_simulation_3d_isometric` & `plot_simulation_3d_interactive`: 3D conditional simulation realization viewers.
-
-
 def _get_block_grade_norm_and_cmap(
     block_grades: np.ndarray,
     sample_grades: Optional[np.ndarray] = None,
@@ -9304,6 +9976,678 @@ def _render_2d_block_patches(
     ax.add_collection(pc)
     ax.autoscale_view()
     return pc
+
+
+# =============================================================================
+# SHARED CATEGORICAL BLOCK MODEL VISUALIZATION ENGINE
+# =============================================================================
+
+
+def _plot_categorical_blocks_orthogonal_slices(
+    block_model: pd.DataFrame,
+    category_col: str,
+    categories: Sequence[str],
+    colors: Sequence[str],
+    bench_z: Optional[float] = None,
+    section_y: Optional[float] = None,
+    section_x: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    cross_section_view: str = "north",
+    long_section_view: str = "west",
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    dx_col: str = "dx",
+    dy_col: str = "dy",
+    dz_col: str = "dz",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (19.0, 5.8),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Shared 3-panel synchronized orthogonal slice renderer for categorical block models."""
+    if block_model.empty:
+        raise ValueError("block_model cannot be empty.")
+
+    cross_section_view, long_section_view = _validate_orthogonal_views(
+        cross_section_view, long_section_view
+    )
+
+    for req in [x_col, y_col, z_col]:
+        if req not in block_model.columns:
+            raise ValueError(
+                f"block_model is missing required coordinate column '{req}'."
+            )
+    if category_col not in block_model.columns:
+        raise ValueError(f"block_model is missing category column '{category_col}'.")
+
+    bm = block_model.copy()
+
+    # Estimate block dimensions if missing
+    for c, dim_c in [(x_col, dx_col), (y_col, dy_col), (z_col, dz_col)]:
+        if dim_c not in bm.columns:
+            unq = np.sort(bm[c].unique())
+            if len(unq) > 1:
+                diffs = np.diff(unq)
+                diffs = diffs[diffs > 1e-4]
+                val = float(np.median(diffs)) if len(diffs) > 0 else 10.0
+            else:
+                val = 10.0
+            bm[dim_c] = val
+
+    n_cats = len(categories)
+    cat_to_code = {cat.lower(): i for i, cat in enumerate(categories)}
+    default_code = n_cats - 1
+    cat_series = bm[category_col].astype(str).str.strip().str.lower()
+    bm["_cat_code"] = cat_series.map(
+        lambda s: cat_to_code.get(s, default_code)
+    ).to_numpy(dtype=int)
+
+    cmap_cat = mcolors.ListedColormap(colors)
+    bounds = np.arange(n_cats + 1) - 0.5
+    norm_cat = mcolors.BoundaryNorm(bounds, ncolors=n_cats)
+
+    target_z, target_y, target_x = _find_nearest_slice_coords(
+        bm,
+        bench_z=bench_z,
+        section_y=section_y,
+        section_x=section_x,
+        x_col=x_col,
+        y_col=y_col,
+        z_col=z_col,
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
+
+    # 1. Bench Plan (X-Y at target_z)
+    slice_bench = bm[np.isclose(bm[z_col], target_z)]
+    dz_val = float(slice_bench[dz_col].iloc[0]) if len(slice_bench) > 0 else 5.0
+    _render_2d_block_patches(
+        axes[0],
+        slice_bench,
+        x_col,
+        y_col,
+        dx_col,
+        dy_col,
+        "_cat_code",
+        norm_cat,
+        cmap_cat,
+    )
+    axes[0].set_title(
+        f"Bench Plan (Z = {target_z:.1f} m) [Looking Down]",
+        fontsize=11,
+        fontweight="bold",
+    )
+    axes[0].set_xlabel("Easting (X) [m]")
+    axes[0].set_ylabel("Northing (Y) [m]")
+    axes[0].set_aspect("equal")
+    axes[0].axhline(target_y, color="red", linestyle="--", linewidth=1.2, alpha=0.8)
+    axes[0].axvline(target_x, color="cyan", linestyle="--", linewidth=1.2, alpha=0.8)
+
+    # 2. Cross-Section (X-Z at target_y)
+    slice_sec = bm[np.isclose(bm[y_col], target_y)]
+    dy_val = float(slice_sec[dy_col].iloc[0]) if len(slice_sec) > 0 else 10.0
+    _render_2d_block_patches(
+        axes[1],
+        slice_sec,
+        x_col,
+        z_col,
+        dx_col,
+        dz_col,
+        "_cat_code",
+        norm_cat,
+        cmap_cat,
+    )
+    view_cs_label = (
+        "Looking North" if cross_section_view == "north" else "Looking South"
+    )
+    x_dir_label = (
+        "Easting (X) [m] (← West | East →)"
+        if cross_section_view == "north"
+        else "Easting (X) [m] (← East | West →)"
+    )
+    axes[1].set_title(
+        f"Cross-Section (Y = {target_y:.1f} m) [{view_cs_label}]",
+        fontsize=11,
+        fontweight="bold",
+    )
+    axes[1].set_xlabel(x_dir_label)
+    axes[1].set_ylabel("Elevation (Z) [m]")
+    axes[1].set_aspect("equal")
+    if cross_section_view == "south":
+        axes[1].invert_xaxis()
+    axes[1].axhline(target_z, color="magenta", linestyle="--", linewidth=1.2, alpha=0.8)
+    axes[1].axvline(target_x, color="cyan", linestyle="--", linewidth=1.2, alpha=0.8)
+
+    # 3. Longitudinal Section (Y-Z at target_x)
+    slice_long = bm[np.isclose(bm[x_col], target_x)]
+    dx_val = float(slice_long[dx_col].iloc[0]) if len(slice_long) > 0 else 10.0
+    _render_2d_block_patches(
+        axes[2],
+        slice_long,
+        y_col,
+        z_col,
+        dy_col,
+        dz_col,
+        "_cat_code",
+        norm_cat,
+        cmap_cat,
+    )
+    view_ls_label = "Looking West" if long_section_view == "west" else "Looking East"
+    y_dir_label = (
+        "Northing (Y) [m] (← South | North →)"
+        if long_section_view == "west"
+        else "Northing (Y) [m] (← North | South →)"
+    )
+    axes[2].set_title(
+        f"Longitudinal Section (X = {target_x:.1f} m) [{view_ls_label}]",
+        fontsize=11,
+        fontweight="bold",
+    )
+    axes[2].set_xlabel(y_dir_label)
+    axes[2].set_ylabel("Elevation (Z) [m]")
+    axes[2].set_aspect("equal")
+    if long_section_view == "east":
+        axes[2].invert_xaxis()
+    axes[2].axhline(target_z, color="magenta", linestyle="--", linewidth=1.2, alpha=0.8)
+    axes[2].axvline(target_y, color="red", linestyle="--", linewidth=1.2, alpha=0.8)
+
+    # Drillhole composite overlay within corridors
+    if samples_xyz is not None and len(samples_xyz) > 0:
+        samples_arr = np.asarray(samples_xyz, dtype=float)
+        mask_bench = np.abs(samples_arr[:, 2] - target_z) <= 0.5 * dz_val
+        if np.any(mask_bench):
+            axes[0].scatter(
+                samples_arr[mask_bench, 0],
+                samples_arr[mask_bench, 1],
+                c="black",
+                marker="^",
+                s=35,
+                zorder=5,
+            )
+        mask_sec = np.abs(samples_arr[:, 1] - target_y) <= 0.5 * dy_val
+        if np.any(mask_sec):
+            axes[1].scatter(
+                samples_arr[mask_sec, 0],
+                samples_arr[mask_sec, 2],
+                c="black",
+                marker="^",
+                s=35,
+                zorder=5,
+            )
+        mask_long = np.abs(samples_arr[:, 0] - target_x) <= 0.5 * dx_val
+        if np.any(mask_long):
+            axes[2].scatter(
+                samples_arr[mask_long, 1],
+                samples_arr[mask_long, 2],
+                c="black",
+                marker="^",
+                s=35,
+                zorder=5,
+            )
+
+    legend_handles = [
+        mpatches.Patch(facecolor=c, edgecolor="none", label=cat)
+        for cat, c in zip(categories, colors)
+    ]
+    if samples_xyz is not None and len(samples_xyz) > 0:
+        legend_handles.append(
+            mlines.Line2D(
+                [],
+                [],
+                color="black",
+                marker="^",
+                linestyle="None",
+                markersize=6,
+                label="Drillhole",
+            )
+        )
+    axes[0].legend(
+        handles=legend_handles, loc="upper right", framealpha=0.85, fontsize=8
+    )
+
+    for ax in axes:
+        ax.grid(True, linestyle=":", alpha=0.5, zorder=1)
+
+    fig_title = title or "3D Block Model Orthogonal Slices"
+    fig.suptitle(fig_title, fontsize=13, fontweight="bold")
+    return fig, axes
+
+
+def _plot_categorical_bench_gallery(
+    block_model: pd.DataFrame,
+    category_col: str,
+    categories: Sequence[str],
+    colors: Sequence[str],
+    bench_elevations: Optional[Sequence[float]] = None,
+    n_cols: int = 3,
+    samples_xyz: Optional[np.ndarray] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    dx_col: str = "dx",
+    dy_col: str = "dy",
+    dz_col: str = "dz",
+    title: Optional[str] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Shared multi-bench elevation gallery for categorical block models."""
+    if block_model.empty:
+        raise ValueError("block_model cannot be empty.")
+    for req in [x_col, y_col, z_col, category_col]:
+        if req not in block_model.columns:
+            raise ValueError(f"block_model is missing required column '{req}'.")
+
+    bm = block_model.copy()
+    for c, dim_c in [(x_col, dx_col), (y_col, dy_col), (z_col, dz_col)]:
+        if dim_c not in bm.columns:
+            unq = np.sort(bm[c].unique())
+            if len(unq) > 1:
+                diffs = np.diff(unq)
+                diffs = diffs[diffs > 1e-4]
+                val = float(np.median(diffs)) if len(diffs) > 0 else 10.0
+            else:
+                val = 10.0
+            bm[dim_c] = val
+
+    n_cats = len(categories)
+    cat_to_code = {cat.lower(): i for i, cat in enumerate(categories)}
+    default_code = n_cats - 1
+    cat_series = bm[category_col].astype(str).str.strip().str.lower()
+    bm["_cat_code"] = cat_series.map(
+        lambda s: cat_to_code.get(s, default_code)
+    ).to_numpy(dtype=int)
+
+    cmap_cat = mcolors.ListedColormap(colors)
+    bounds = np.arange(n_cats + 1) - 0.5
+    norm_cat = mcolors.BoundaryNorm(bounds, ncolors=n_cats)
+
+    unique_z = np.sort(bm[z_col].unique())
+    if bench_elevations is None:
+        if len(unique_z) <= 6:
+            chosen_z = unique_z
+        else:
+            indices = np.linspace(0, len(unique_z) - 1, 6, dtype=int)
+            chosen_z = unique_z[indices]
+    else:
+        chosen_z = [
+            unique_z[np.argmin(np.abs(unique_z - bz))] for bz in bench_elevations
+        ]
+
+    n_plots = len(chosen_z)
+    n_cols = max(1, min(n_cols, n_plots))
+    n_rows = int(np.ceil(n_plots / n_cols))
+
+    fig_size = figsize or (5.5 * n_cols + 1.5, 4.8 * n_rows)
+    fig, axes_flat = plt.subplots(
+        n_rows, n_cols, figsize=fig_size, constrained_layout=True, squeeze=False
+    )
+    axes = axes_flat.ravel()
+
+    for i, bz in enumerate(chosen_z):
+        ax = axes[i]
+        df_bench = bm[np.isclose(bm[z_col], bz)]
+        dz_val = float(df_bench[dz_col].iloc[0]) if len(df_bench) > 0 else 5.0
+        _render_2d_block_patches(
+            ax, df_bench, x_col, y_col, dx_col, dy_col, "_cat_code", norm_cat, cmap_cat
+        )
+        if samples_xyz is not None and len(samples_xyz) > 0:
+            samples_arr = np.asarray(samples_xyz, dtype=float)
+            mask_dh = np.abs(samples_arr[:, 2] - bz) <= 0.5 * dz_val
+            if np.any(mask_dh):
+                ax.scatter(
+                    samples_arr[mask_dh, 0],
+                    samples_arr[mask_dh, 1],
+                    c="black",
+                    marker="^",
+                    s=30,
+                    zorder=5,
+                )
+        ax.set_title(f"Bench Elevation Z = {bz:.1f} m", fontsize=11, fontweight="bold")
+        ax.set_xlabel("Easting (X) [m]")
+        ax.set_ylabel("Northing (Y) [m]")
+        ax.set_aspect("equal")
+        ax.grid(True, linestyle=":", alpha=0.5, zorder=1)
+
+    for j in range(n_plots, len(axes)):
+        axes[j].axis("off")
+
+    legend_handles = [
+        mpatches.Patch(facecolor=c, edgecolor="none", label=cat)
+        for cat, c in zip(categories, colors)
+    ]
+    if samples_xyz is not None and len(samples_xyz) > 0:
+        legend_handles.append(
+            mlines.Line2D(
+                [],
+                [],
+                color="black",
+                marker="^",
+                linestyle="None",
+                markersize=6,
+                label="Drillhole",
+            )
+        )
+    fig.legend(
+        handles=legend_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=len(legend_handles),
+        fontsize=9,
+        framealpha=0.9,
+    )
+
+    fig_title = title or "Multi-Bench Depth Gallery"
+    fig.suptitle(fig_title, fontsize=13, fontweight="bold", y=1.06)
+    return fig, axes[:n_plots]
+
+
+def _plot_categorical_blocks_3d_isometric(
+    block_model: pd.DataFrame,
+    category_col: str,
+    categories: Sequence[str],
+    colors: Sequence[str],
+    active_categories: Optional[Sequence[str]] = None,
+    bench_z: Optional[float] = None,
+    elevation_tolerance: Optional[float] = None,
+    samples_xyz: Optional[np.ndarray] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    elev: float = 28.0,
+    azim: float = -55.0,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10.0, 8.0),
+) -> Tuple[plt.Figure, Axes3D]:
+    """Shared static 3D isometric projection for categorical block models."""
+    if block_model.empty:
+        raise ValueError("block_model cannot be empty.")
+    for req in [x_col, y_col, z_col, category_col]:
+        if req not in block_model.columns:
+            raise ValueError(f"block_model is missing required column '{req}'.")
+
+    bm = block_model.copy()
+    cat_series = bm[category_col].astype(str).str.strip().str.lower()
+    n_cats = len(categories)
+    cat_to_code = {cat.lower(): i for i, cat in enumerate(categories)}
+    default_code = n_cats - 1
+    bm["_cat_code"] = cat_series.map(
+        lambda s: cat_to_code.get(s, default_code)
+    ).to_numpy(dtype=int)
+
+    mask = np.ones(len(bm), dtype=bool)
+    if active_categories is not None:
+        act_lower = {c.lower() for c in active_categories}
+        mask &= cat_series.isin(act_lower)
+
+    if bench_z is not None:
+        tol = elevation_tolerance if elevation_tolerance is not None else 5.0
+        mask &= (bm[z_col] >= bench_z - tol) & (bm[z_col] <= bench_z + tol)
+
+    bm_vis = bm[mask]
+
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(111, projection="3d")
+
+    cmap_cat = mcolors.ListedColormap(colors)
+    bounds = np.arange(n_cats + 1) - 0.5
+    norm_cat = mcolors.BoundaryNorm(bounds, ncolors=n_cats)
+
+    if len(bm_vis) > 0:
+        ax.scatter(
+            bm_vis[x_col].to_numpy(),
+            bm_vis[y_col].to_numpy(),
+            bm_vis[z_col].to_numpy(),
+            c=bm_vis["_cat_code"].to_numpy(),
+            cmap=cmap_cat,
+            norm=norm_cat,
+            marker="s",
+            s=45,
+            alpha=0.75,
+            edgecolors="none",
+            label="Blocks",
+        )
+
+    if samples_xyz is not None and len(samples_xyz) > 0:
+        samples_arr = np.asarray(samples_xyz, dtype=float)
+        ax.scatter(
+            samples_arr[:, 0],
+            samples_arr[:, 1],
+            samples_arr[:, 2],
+            c="black",
+            s=20,
+            edgecolor="white",
+            linewidth=0.5,
+            label="Drillholes",
+            zorder=5,
+        )
+
+    ax.set_xlabel("Easting (X) [m]", labelpad=8)
+    ax.set_ylabel("Northing (Y) [m]", labelpad=8)
+    ax.set_zlabel("Elevation (Z) [m]", labelpad=8)
+    ax.view_init(elev=elev, azim=azim)
+
+    span_x = max(1.0, float(np.ptp(bm[x_col])))
+    span_y = max(1.0, float(np.ptp(bm[y_col])))
+    span_z = max(1.0, float(np.ptp(bm[z_col])))
+    ax.set_box_aspect((span_x, span_y, span_z))
+
+    legend_handles = []
+    tot_blocks = max(1, len(bm_vis))
+    for i, (cat, c) in enumerate(zip(categories, colors)):
+        count = int(np.sum(bm_vis["_cat_code"] == i))
+        pct = count / tot_blocks * 100.0
+        legend_handles.append(
+            mpatches.Patch(
+                facecolor=c, edgecolor="none", label=f"{cat} ({count:,} - {pct:.1f}%)"
+            )
+        )
+    if samples_xyz is not None and len(samples_xyz) > 0:
+        legend_handles.append(
+            mlines.Line2D(
+                [],
+                [],
+                color="black",
+                marker="o",
+                linestyle="None",
+                markersize=5,
+                label="Drillholes",
+            )
+        )
+    ax.legend(handles=legend_handles, loc="upper left", framealpha=0.85, fontsize=8)
+
+    fig_title = title or "3D Categorical Block Model Isometric View"
+    ax.set_title(fig_title, fontsize=12, fontweight="bold", pad=12)
+    return fig, ax
+
+
+def _plot_categorical_blocks_3d_interactive(
+    block_model: pd.DataFrame,
+    category_col: str,
+    categories: Sequence[str],
+    colors: Sequence[str],
+    tonnes_col: Optional[str] = "tonnes",
+    samples_xyz: Optional[np.ndarray] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: str = "z",
+    elev: float = 28.0,
+    azim: float = -55.0,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (11.0, 9.0),
+) -> Tuple[plt.Figure, Axes3D, Dict[str, Any]]:
+    """Shared interactive 3D explorer with category toggles and elevation sliders."""
+    if block_model.empty:
+        raise ValueError("block_model cannot be empty.")
+    for req in [x_col, y_col, z_col, category_col]:
+        if req not in block_model.columns:
+            raise ValueError(f"block_model is missing required column '{req}'.")
+
+    bm = block_model.copy()
+    cat_series = bm[category_col].astype(str).str.strip().str.lower()
+    n_cats = len(categories)
+    cat_to_code = {cat.lower(): i for i, cat in enumerate(categories)}
+    default_code = n_cats - 1
+    bm["_cat_code"] = cat_series.map(
+        lambda s: cat_to_code.get(s, default_code)
+    ).to_numpy(dtype=int)
+
+    x_all = bm[x_col].to_numpy()
+    y_all = bm[y_col].to_numpy()
+    z_all = bm[z_col].to_numpy()
+    codes_all = bm["_cat_code"].to_numpy()
+    tonnes_all = (
+        bm[tonnes_col].to_numpy() if (tonnes_col and tonnes_col in bm.columns) else None
+    )
+
+    min_z = float(np.min(z_all))
+    max_z = float(np.max(z_all))
+
+    cmap_cat = mcolors.ListedColormap(colors)
+    bounds = np.arange(n_cats + 1) - 0.5
+    norm_cat = mcolors.BoundaryNorm(bounds, ncolors=n_cats)
+
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(111, projection="3d")
+    fig.subplots_adjust(bottom=0.22, top=0.93, left=0.05, right=0.88)
+
+    p = ax.scatter(
+        x_all,
+        y_all,
+        z_all,
+        c=codes_all,
+        cmap=cmap_cat,
+        norm=norm_cat,
+        marker="s",
+        s=45,
+        alpha=0.75,
+        edgecolors="none",
+        label="Blocks",
+    )
+
+    if samples_xyz is not None and len(samples_xyz) > 0:
+        samples_arr = np.asarray(samples_xyz, dtype=float)
+        ax.scatter(
+            samples_arr[:, 0],
+            samples_arr[:, 1],
+            samples_arr[:, 2],
+            c="black",
+            s=20,
+            edgecolor="white",
+            linewidth=0.5,
+            label="Drillholes",
+            zorder=5,
+        )
+
+    span_x = max(1.0, float(np.ptp(x_all)))
+    span_y = max(1.0, float(np.ptp(y_all)))
+    span_z = max(1.0, float(np.ptp(z_all)))
+    ax.set_box_aspect((span_x, span_y, span_z))
+    ax.set_xlabel("Easting (X) [m]", labelpad=8)
+    ax.set_ylabel("Northing (Y) [m]", labelpad=8)
+    ax.set_zlabel("Elevation (Z) [m]", labelpad=8)
+    ax.view_init(elev=elev, azim=azim)
+
+    fig_title = title or "Interactive 3D Block Model Exploration"
+    ax.set_title(fig_title, fontsize=12, fontweight="bold", pad=12)
+
+    legend_handles = [
+        mpatches.Patch(facecolor=c, edgecolor="none", label=cat)
+        for cat, c in zip(categories, colors)
+    ]
+    ax.legend(handles=legend_handles, loc="upper left", framealpha=0.85, fontsize=8)
+
+    info_box = ax.text2D(
+        0.02,
+        0.95,
+        "",
+        transform=ax.transAxes,
+        fontsize=9,
+        fontfamily="monospace",
+        verticalalignment="top",
+        bbox=dict(
+            boxstyle="round,pad=0.5",
+            facecolor="white",
+            edgecolor="#cccccc",
+            alpha=0.9,
+        ),
+    )
+
+    # Widgets
+    ax_check = fig.add_axes([0.08, 0.03, 0.28, 0.12])
+    check_cats = CheckButtons(
+        ax=ax_check,
+        labels=list(categories),
+        actives=[True] * n_cats,
+    )
+    for txt in check_cats.labels:
+        txt.set_fontsize(8)
+
+    ax_slider_z = fig.add_axes([0.42, 0.09, 0.38, 0.035])
+    slider_elev = Slider(
+        ax=ax_slider_z,
+        label="Max Elevation",
+        valmin=min_z,
+        valmax=max_z,
+        valinit=max_z,
+        valfmt="%.1f m",
+        color="#4a7c59",
+    )
+
+    ax_btn = fig.add_axes([0.84, 0.03, 0.11, 0.095])
+    btn_reset = Button(ax_btn, "Reset\nControls", hovercolor="#e0e0e0")
+
+    def update_plot(val=None):
+        active_flags = check_cats.get_status()
+        z_val = slider_elev.val
+        active_codes = {i for i, act in enumerate(active_flags) if act}
+
+        mask = np.isin(codes_all, list(active_codes)) & (z_all <= z_val)
+        n_vis = int(np.sum(mask))
+        n_tot = len(x_all)
+        pct = (n_vis / n_tot * 100.0) if n_tot > 0 else 0.0
+
+        if n_vis > 0:
+            p._offsets3d = (x_all[mask], y_all[mask], z_all[mask])
+            p.set_array(codes_all[mask])
+        else:
+            p._offsets3d = (np.array([]), np.array([]), np.array([]))
+            p.set_array(np.array([]))
+
+        hud_lines = [f"Visible: {n_vis:,} / {n_tot:,} ({pct:.1f}%)"]
+        if tonnes_all is not None:
+            t_vis = float(np.sum(tonnes_all[mask])) / 1e6
+            hud_lines.append(f"Tonnage: {t_vis:.2f} Mt")
+        for i, cat in enumerate(categories):
+            if i in active_codes:
+                c_cnt = int(np.sum(mask & (codes_all == i)))
+                c_pct = (c_cnt / n_vis * 100.0) if n_vis > 0 else 0.0
+                hud_lines.append(f"• {cat}: {c_cnt:,} ({c_pct:.1f}%)")
+
+        info_box.set_text("\n".join(hud_lines))
+        fig.canvas.draw_idle()
+
+    check_cats.on_clicked(update_plot)
+    slider_elev.on_changed(update_plot)
+
+    def reset_controls(event):
+        slider_elev.reset()
+        for i, act in enumerate(check_cats.get_status()):
+            if not act:
+                check_cats.set_active(i)
+        ax.view_init(elev=elev, azim=azim)
+        update_plot()
+
+    btn_reset.on_clicked(reset_controls)
+    update_plot()
+
+    controls = {
+        "check_cats": check_cats,
+        "slider_elev": slider_elev,
+        "button_reset": btn_reset,
+        "btn_reset": btn_reset,
+        "reset_func": reset_controls,
+        "update_func": update_plot,
+    }
+    return fig, ax, controls
 
 
 def plot_block_model_orthogonal_slices(

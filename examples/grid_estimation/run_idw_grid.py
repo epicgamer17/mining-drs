@@ -36,6 +36,7 @@ from drs_mining.components.estimation import (
     format_resource_statement,
     calculate_cut_off_grade,
     convert_resource_to_reserve,
+    classify_reserve_status,
     format_reserve_statement,
     plot_resource_to_reserve_waterfall,
     plot_reserve_classification_map,
@@ -256,6 +257,8 @@ def main():
 
     block_class_df = pd.DataFrame(
         {
+            "x": grid_points[:, 0],
+            "y": grid_points[:, 1],
             "category": categories,
             "grade": idw2_grades,
             "tonnes": block_tonnes,
@@ -500,27 +503,12 @@ def main():
         print(f"  • Resource-to-Reserve Waterfall: saved to {waterfall_file}")
 
         # Spatial Reserve & Resource Classification Map
-        status_arr = np.empty(len(grid_points), dtype=object)
-        for i in range(len(grid_points)):
-            cat = categories[i]
-            g = idw2_grades[i]
-            if cat == "Inferred":
-                status_arr[i] = "Inferred Resource (Excluded)"
-            elif g < base_cutoff:
-                status_arr[i] = "Sub-Economic / Waste"
-            elif cat == "Measured":
-                status_arr[i] = "Proven Reserve"
-            elif cat == "Indicated":
-                status_arr[i] = "Probable Reserve"
-            else:
-                status_arr[i] = "Sub-Economic / Waste"
-
-        map_blocks_df = pd.DataFrame(
-            {
-                "x": grid_points[:, 0],
-                "y": grid_points[:, 1],
-                "status": status_arr,
-            }
+        map_blocks_df = classify_reserve_status(
+            block_class_df,
+            cutoff_grade=base_cutoff,
+            mining_dilution_pct=dilution_pct,
+            mining_recovery_pct=recovery_pct,
+            dilution_grade=dilution_grade,
         )
 
         # Resource Classification Map (In-Situ Confidence)

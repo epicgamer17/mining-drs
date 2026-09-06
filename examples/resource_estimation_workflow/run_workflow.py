@@ -25,12 +25,16 @@ from drs_mining.components.estimation import (
     calculate_cut_off_grade,
     classify_mineral_resources,
     convert_resource_to_reserve,
+    classify_reserve_status,
     format_resource_statement,
     format_reserve_statement,
     plot_resource_to_reserve_waterfall,
+    plot_resource_classification_map,
+    plot_reserve_classification_map,
     reconcile_production_to_reserve,
     plot_production_reconciliation,
     cell_declustering,
+    is_within_convex_hull,
 )
 
 
@@ -242,18 +246,23 @@ def main():
     )
     print(f"  • Economic Breakeven Cut-Off Grade: {cog:.3f}% Cu.")
 
+    # Concession boundary and spatial interpolation audit
+    concession_boundary = [(70.0, 50.0), (370.0, 50.0), (370.0, 350.0), (70.0, 350.0)]
+    is_interp = is_within_convex_hull(samples_xy, grid_pts)
+
     block_tonnes = 5000.0  # 5,000 t per block
     block_cats = classify_mineral_resources(
         grid_points=grid_pts,
         samples_xy=samples_xy,
         kriging_variances=ok_vars,
-        variance_threshold_measured=0.12,
+        variance_threshold_measured=0.18,
         variance_threshold_indicated=0.25,
-        max_radius_measured=45.0,
+        max_radius_measured=85.0,
         max_radius_indicated=90.0,
         min_holes_measured=3,
         min_holes_indicated=2,
-        smoothing_radius=25.0,
+        is_interpolated=is_interp,
+        smoothing_radius=20.0,
     )
 
     block_res_df = pd.DataFrame({
@@ -311,6 +320,37 @@ def main():
         fig_wf.savefig(wf_plot_path, dpi=180, bbox_inches="tight")
         plt.close(fig_wf)
         print(f"  • Reserve reconciliation waterfall saved to: {wf_plot_path}")
+
+        # Stage 4 Plan Maps
+        fig_res_map, _ = plot_resource_classification_map(
+            block_res_df,
+            boundary=concession_boundary,
+            category_col="category",
+            drillholes=dh_all,
+            title="Stage 4: CIM / JORC Mineral Resource Classification Plan",
+        )
+        res_map_path = plots_dir / "workflow_resource_classification_map.png"
+        fig_res_map.savefig(res_map_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_res_map)
+        print(f"  • Resource classification map saved to: {res_map_path}")
+
+        reserve_block_model = classify_reserve_status(
+            block_res_df,
+            cutoff_grade=cog,
+            mining_dilution_pct=6.0,
+            mining_recovery_pct=94.0,
+            dilution_grade=0.10,
+        )
+        fig_rev_map, _ = plot_reserve_classification_map(
+            reserve_block_model,
+            boundary=concession_boundary,
+            drillholes=dh_all,
+            title="Stage 4: Mineral Reserve Status Map (Modifying Factors Applied)",
+        )
+        rev_map_path = plots_dir / "workflow_reserve_classification_map.png"
+        fig_rev_map.savefig(rev_map_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_rev_map)
+        print(f"  • Reserve classification map saved to: {rev_map_path}")
 
     # -------------------------------------------------------------------------
     # STAGE 5: PRODUCTION RECONCILIATION (PARKER F1, F2, F3 FACTORS)

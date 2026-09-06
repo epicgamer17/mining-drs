@@ -39,8 +39,19 @@ from drs_mining.components.estimation import (
     kriging_quality_metrics,
     classify_resources_by_sor,
     classify_mineral_resources,
+    convert_resource_to_reserve,
+    classify_reserve_status,
+    format_reserve_statement,
     plot_resource_classification_map,
     plot_resource_classification_orthogonal_slices,
+    plot_resource_classification_bench_gallery,
+    plot_resource_classification_3d_isometric,
+    plot_resource_classification_3d_interactive,
+    plot_reserve_classification_map,
+    plot_reserve_classification_orthogonal_slices,
+    plot_reserve_classification_bench_gallery,
+    plot_reserve_classification_3d_isometric,
+    plot_reserve_classification_3d_interactive,
     plot_block_model_orthogonal_slices,
     plot_block_model_bench_gallery,
     plot_block_model_3d_isometric,
@@ -134,6 +145,12 @@ def main():
         "-i",
         action="store_true",
         help="Launch interactive 3D deposit explorer with cut-off and elevation sliders",
+    )
+    parser.add_argument(
+        "--interactive-view",
+        choices=["all", "grade", "resource", "reserve"],
+        default="all",
+        help="Interactive 3D explorer to display in interactive mode (default: all)",
     )
     parser.add_argument(
         "--no-plot",
@@ -278,7 +295,6 @@ def main():
         kriging_efficiencies=kriging_eff,
         threshold_measured=0.80,
         threshold_indicated=0.50,
-        max_slope_measured=1.05,
         min_kriging_efficiency=0.0,
     )
     pct_measured = float(np.mean(sor_categories[valid_blocks] == "Measured") * 100.0)
@@ -286,7 +302,7 @@ def main():
     print(f"  • Mean Kriging Efficiency (KE): {mean_ke * 100:.1f}%")
     print(f"  • Mean Slope of Regression (SoR): {mean_sor:.3f}")
     print(
-        f"  • High Confidence Blocks (0.80 ≤ SoR ≤ 1.05, KE > 0, Measured candidate): {pct_measured:.1f}%"
+        f"  • High Confidence Blocks (SoR >= 0.80, KE > 0, Measured candidate): {pct_measured:.1f}%"
     )
     print(
         f"  • Moderate Confidence Blocks (0.50 ≤ SoR < 0.80, KE > 0, Indicated candidate): {pct_indicated:.1f}%"
@@ -305,7 +321,6 @@ def main():
         kriging_efficiencies=kriging_eff,
         sor_threshold_measured=0.80,
         sor_threshold_indicated=0.50,
-        max_slope_measured=1.05,
         min_kriging_efficiency=0.0,
     )
     block_model["category"] = resource_categories
@@ -352,6 +367,53 @@ def main():
 
     # Discrete reporting cut-off intervals matching mining standards
     grade_bins = [0.0, 0.4, 0.8, 1.2, 1.6, 2.2, 3.5]
+
+    # -------------------------------------------------------------------------
+    # 4b. Convert Mineral Resources to Reserves (CIM / JORC Modifying Factors)
+    # -------------------------------------------------------------------------
+    print("\n[Step 4b] Converting Mineral Resources to Mineral Reserves (CIM / JORC Modifying Factors)...")
+    cog_reserve = 0.40  # Economic cut-off grade (% Cu)
+    reserve_df = convert_resource_to_reserve(
+        resource_df=block_model,
+        mining_dilution_pct=5.0,
+        mining_recovery_pct=95.0,
+        cutoff_grade=cog_reserve,
+        dilution_grade=0.10,
+        category_col="category",
+        grade_col="estimated_grade",
+        tonnes_col="tonnes",
+    )
+    reserve_df["status"] = reserve_df["reserve_category"]
+
+    # Classify 100% of spatial blocks into regulatory reserve statuses:
+    # 1. 'Proven Reserve' (Forest Green)
+    # 2. 'Probable Reserve' (Royal Blue)
+    # 3. 'Inferred Resource (Excluded)' (Purple / Magenta)
+    # 4. 'Sub-Economic / Waste' (Light Grey)
+    reserve_block_model = classify_reserve_status(
+        block_model=block_model,
+        cutoff_grade=cog_reserve,
+        mining_dilution_pct=5.0,
+        mining_recovery_pct=95.0,
+        dilution_grade=0.10,
+        category_col="category",
+        grade_col="estimated_grade",
+        tonnes_col="tonnes",
+        status_col="status",
+    )
+    block_model["status"] = reserve_block_model["status"]
+
+    res_stmt = format_reserve_statement(
+        reserve_df,
+        cutoff_grade=cog_reserve,
+        mining_dilution_pct=5.0,
+        mining_recovery_pct=95.0,
+        commodity_price="$3.80/lb Cu",
+        metallurgical_recovery=88.0,
+        rpeee_constraint="Constrained within Lerchs-Grossmann optimized pit shell",
+    )
+    print("\n--- Official Mineral Reserve Statement (Run-of-Mine Delivered Feed) ---")
+    print(res_stmt.to_string(index=False))
 
     # -------------------------------------------------------------------------
     # 5. Visualizations (Method 1 to 4 & Resource Map)
@@ -493,27 +555,136 @@ def main():
         fig_ortho_class.savefig(fig_ortho_path, dpi=200, bbox_inches="tight")
         plt.close(fig_ortho_class)
         print(f"  -> Saved: {fig_ortho_path}")
+
+        print("\n[Step 8e] Generating Multi-Bench Resource Classification Gallery...")
+        fig_res_gal, _ = plot_resource_classification_bench_gallery(
+            block_model=block_model,
+            category_col="category",
+            bench_elevations=bench_levels,
+            n_cols=2,
+            samples_xyz=samples_xyz,
+            title="CIM / JORC Mineral Resource Classification: Multi-Bench Depth Gallery",
+            figsize=(12.0, 10.0),
+        )
+        fig_res_gal_path = output_dir / "block_kriging_resource_bench_gallery.png"
+        fig_res_gal.savefig(fig_res_gal_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_res_gal)
+        print(f"  -> Saved: {fig_res_gal_path}")
+
+        print("\n[Step 8f] Generating 3D Isometric Resource Classification Model...")
+        fig_res_iso, _ = plot_resource_classification_3d_isometric(
+            block_model=block_model,
+            category_col="category",
+            samples_xyz=samples_xyz,
+            title="3D Isometric Mineral Resource Classification Model (CIM / JORC)",
+        )
+        fig_res_iso_path = output_dir / "block_kriging_resource_3d_isometric.png"
+        fig_res_iso.savefig(fig_res_iso_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_res_iso)
+        print(f"  -> Saved: {fig_res_iso_path}")
+
+        print("\n[Step 8g] Generating Mineral Reserve Status Map (Central Bench Z=47.5m)...")
+        fig_rev_map, _ = plot_reserve_classification_map(
+            block_model=reserve_block_model,
+            drillholes=dh_df,
+            status_col="status",
+            bench_z=47.5,
+            elevation_tolerance=2.5,
+            title="3D Block Model: Mineral Reserve Status (Bench Z = 47.5m)",
+        )
+        fig_rev_map_path = output_dir / "block_kriging_reserve_classification_map.png"
+        fig_rev_map.savefig(fig_rev_map_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_rev_map)
+        print(f"  -> Saved: {fig_rev_map_path}")
+
+        print("\n[Step 8h] Generating 3-View Orthogonal Reserve Status Projections...")
+        fig_rev_ortho, _ = plot_reserve_classification_orthogonal_slices(
+            block_model=reserve_block_model,
+            status_col="status",
+            bench_z=47.5,
+            section_y=205.0,
+            section_x=205.0,
+            samples_xyz=samples_xyz,
+            title="Mineral Reserve Status: Synchronized Orthogonal Projections",
+        )
+        fig_rev_ortho_path = output_dir / "block_kriging_reserve_orthogonal_slices.png"
+        fig_rev_ortho.savefig(fig_rev_ortho_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_rev_ortho)
+        print(f"  -> Saved: {fig_rev_ortho_path}")
+
+        print("\n[Step 8i] Generating Multi-Bench Mineral Reserve Status Gallery...")
+        fig_rev_gal, _ = plot_reserve_classification_bench_gallery(
+            block_model=reserve_block_model,
+            status_col="status",
+            bench_elevations=bench_levels,
+            n_cols=2,
+            samples_xyz=samples_xyz,
+            title="Mineral Reserve Status: Multi-Bench Depth Gallery",
+            figsize=(12.0, 10.0),
+        )
+        fig_rev_gal_path = output_dir / "block_kriging_reserve_bench_gallery.png"
+        fig_rev_gal.savefig(fig_rev_gal_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_rev_gal)
+        print(f"  -> Saved: {fig_rev_gal_path}")
+
+        print("\n[Step 8j] Generating 3D Isometric Mineral Reserve Status Model...")
+        fig_rev_iso, _ = plot_reserve_classification_3d_isometric(
+            block_model=reserve_block_model,
+            status_col="status",
+            samples_xyz=samples_xyz,
+            title="3D Isometric Mineral Reserve Status Model",
+        )
+        fig_rev_iso_path = output_dir / "block_kriging_reserve_3d_isometric.png"
+        fig_rev_iso.savefig(fig_rev_iso_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_rev_iso)
+        print(f"  -> Saved: {fig_rev_iso_path}")
     else:
         print("\n[Plotting skipped via --no-plot]")
 
     # -------------------------------------------------------------------------
-    # 9. Optional Interactive 3D Explorer
+    # 9. Optional Interactive 3D Explorers (Continuous Grade, Resource, Reserve)
     # -------------------------------------------------------------------------
     if args.interactive:
-        print("\n[Step 9] Launching Interactive 3D Block Model Explorer...")
-        print("  • Drag 'Cut-off Grade' slider to dynamically peel away waste blocks.")
-        print("  • Drag 'Max Elevation' slider to slice downward through benches.")
-        print("  • Click & drag 3D axes to rotate, scroll/right-click to zoom.")
-        fig_int, ax_int, controls = plot_block_model_3d_interactive(
-            block_model=block_model,
-            grade_col="estimated_grade",
-            initial_cutoff=0.80,
-            samples_xyz=samples_xyz,
-            sample_grades=sample_grades,
-            grade_bins=grade_bins,
-            grade_unit="% Cu",
-            title="Interactive 3D Block Model Explorer (Porphyry Cu Deposit)",
-        )
+        print("\n[Step 9] Launching Interactive 3D Block Model Explorers...")
+        active_view = getattr(args, "interactive_view", "all")
+        interactive_figs = []
+
+        if active_view in ("all", "grade"):
+            print("  • Launching Continuous Grade 3D Explorer (Cut-off & Elevation Sliders)...")
+            fig_grade, _, _ = plot_block_model_3d_interactive(
+                block_model=block_model,
+                grade_col="estimated_grade",
+                initial_cutoff=0.80,
+                samples_xyz=samples_xyz,
+                sample_grades=sample_grades,
+                grade_bins=grade_bins,
+                grade_unit="% Cu",
+                title="Interactive 3D Block Model Explorer (Continuous Grade Cu %)",
+            )
+            interactive_figs.append(fig_grade)
+
+        if active_view in ("all", "resource"):
+            print("  • Launching Mineral Resource Classification 3D Explorer (Category Checkboxes & Bench Slider)...")
+            fig_res, _, _ = plot_resource_classification_3d_interactive(
+                block_model=block_model,
+                category_col="category",
+                samples_xyz=samples_xyz,
+                title="Interactive 3D Mineral Resource Classification Explorer (CIM / JORC)",
+            )
+            interactive_figs.append(fig_res)
+
+        if active_view in ("all", "reserve"):
+            print("  • Launching Mineral Reserve Status 3D Explorer (Reserve Checkboxes & Bench Slider)...")
+            fig_rev, _, _ = plot_reserve_classification_3d_interactive(
+                block_model=reserve_block_model,
+                status_col="status",
+                samples_xyz=samples_xyz,
+                title="Interactive 3D Mineral Reserve Status Explorer (Modifying Factors Applied)",
+            )
+            interactive_figs.append(fig_rev)
+
+        print("\n  • Click & drag 3D axes to rotate, scroll/right-click to zoom.")
+        print("  • Use UI controls (sliders, checkboxes, reset buttons) to dynamically explore block subsets.")
         plt.show()
 
     print("\n" + "=" * 80)
