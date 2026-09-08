@@ -36,9 +36,10 @@ from drs_mining.components.estimation import (
     ordinary_kriging_block_estimation,
     inverse_distance_weighting_block_estimation,
     nearest_neighbor_block_estimation,
-    kriging_quality_metrics,
+    kriging_neighborhood_analysis,
     classify_resources_by_sor,
     classify_mineral_resources,
+    smooth_resource_categories,
     convert_resource_to_reserve,
     classify_reserve_status,
     format_reserve_statement,
@@ -241,6 +242,10 @@ def main():
     range_param = 90.0
     discretization = (4, 4, 2)  # 32 internal discretization sub-points per SMU
 
+    # Best-practice 3D search neighborhood configuration (SME Mining Engineering Handbook §4.5 & CIM MRMR):
+    # - Rule 6: Max 4 composites per drillhole trace to prevent downhole collinear strings from dominating.
+    # - Rule 7: Octant search with max 3 samples per octant and min 2 octants to enforce 3D spatial spread.
+    # - Deutsch (1996): Negative kriging weight clipping and renormalization to eliminate screen-effect artifacts.
     estimates, variances, dispersion_var, lagrange_multipliers = (
         ordinary_kriging_block_estimation(
             samples_xyz=samples_xyz,
@@ -254,6 +259,11 @@ def main():
             k_neighbors=16,
             max_radius=110.0,
             min_samples=2,
+            max_per_octant=3,
+            min_sectors=2,
+            max_per_drillhole=4,
+            sample_hole_ids=df_dh["hole_id"].tolist(),
+            clip_negative_weights=True,
         )
     )
 
@@ -261,7 +271,7 @@ def main():
     block_model["kriging_variance"] = variances
 
     # Kriging Neighborhood Analysis (KNA) Quality Metrics
-    kriging_eff, slope_regr = kriging_quality_metrics(
+    kriging_eff, slope_regr = kriging_neighborhood_analysis(
         kriging_variances=variances,
         block_dispersion_variance=dispersion_var,
         lagrange_multipliers=lagrange_multipliers,
@@ -309,7 +319,7 @@ def main():
     )
 
     # Multi-criteria Resource Classification (Multi-hole independence + Spacing + SoR + KE)
-    resource_categories = classify_mineral_resources(
+    raw_resource_categories = classify_mineral_resources(
         grid_points=block_model[["x", "y", "z"]].values,
         samples_xy=samples_xyz,
         sample_hole_ids=df_dh["hole_id"].tolist(),
@@ -322,6 +332,14 @@ def main():
         sor_threshold_measured=0.80,
         sor_threshold_indicated=0.50,
         min_kriging_efficiency=0.0,
+    )
+    # Post-processing spatial smoothing to eliminate 'spotted dog' artifacts (CIM MRMR Guidelines §6.11)
+    resource_categories = smooth_resource_categories(
+        grid_points=block_model[["x", "y", "z"]].values,
+        categories=raw_resource_categories,
+        k_neighbors=18,
+        min_cluster_size=8,
+        downgrade_isolated=False,
     )
     block_model["category"] = resource_categories
 

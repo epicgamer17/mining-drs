@@ -18,7 +18,7 @@ from drs_mining.components.estimation import (
     ordinary_kriging_grid_estimation,
     plot_grade_tonnage_curve,
     cell_declustering,
-    kriging_quality_metrics,
+    kriging_neighborhood_analysis,
     classify_resources_by_drill_spacing,
     classify_resources_by_sor,
     classify_resources_by_kriging_variance,
@@ -68,6 +68,9 @@ from drs_mining.components.estimation import (
     plot_block_model_grade_uncertainty,
     _theoretical_covariance,
     _solve_ordinary_kriging_system,
+    _clip_and_renormalize_weights,
+    _compute_quadratic_estimation_variance,
+    _filter_neighborhood_sectors,
     compute_anisotropy_rotation_matrix,
     transform_anisotropic_coordinates,
     compute_anisotropic_distance,
@@ -945,11 +948,11 @@ def test_classify_resources_with_spotted_dog_smoothing():
         )
 
 
-def test_kriging_quality_metrics():
+def test_kriging_neighborhood_analysis():
     # 1. Standard calculation without lagrange multipliers
     bv = 0.5
     variances = np.array([0.0, 0.1, 0.25, 0.5, 0.6])
-    ke, sor = kriging_quality_metrics(variances, block_dispersion_variance=bv)
+    ke, sor = kriging_neighborhood_analysis(variances, block_dispersion_variance=bv)
 
     assert sor is None
     expected_ke = (bv - variances) / bv
@@ -960,7 +963,7 @@ def test_kriging_quality_metrics():
 
     # 2. Calculation with lagrange multipliers (SoR)
     mus = np.array([0.0, 0.02, -0.05, 0.1, 0.1])
-    ke, sor = kriging_quality_metrics(
+    ke, sor = kriging_neighborhood_analysis(
         variances, block_dispersion_variance=bv, lagrange_multipliers=mus
     )
     assert sor is not None
@@ -973,13 +976,13 @@ def test_kriging_quality_metrics():
     assert np.isclose(sor[2], 0.30 / 0.35)
 
     # 3. Edge case: empty input arrays
-    ke_empty, sor_empty = kriging_quality_metrics(
+    ke_empty, sor_empty = kriging_neighborhood_analysis(
         [], block_dispersion_variance=0.5
     )
     assert len(ke_empty) == 0
     assert sor_empty is None
 
-    ke_empty2, sor_empty2 = kriging_quality_metrics(
+    ke_empty2, sor_empty2 = kriging_neighborhood_analysis(
         [], block_dispersion_variance=0.5, lagrange_multipliers=[]
     )
     assert len(ke_empty2) == 0
@@ -987,17 +990,17 @@ def test_kriging_quality_metrics():
 
     # 4. Edge case: non-positive or invalid dispersion variance
     with pytest.raises(ValueError, match="strictly positive"):
-        kriging_quality_metrics(variances, block_dispersion_variance=0.0)
+        kriging_neighborhood_analysis(variances, block_dispersion_variance=0.0)
 
     with pytest.raises(ValueError, match="strictly positive"):
-        kriging_quality_metrics(variances, block_dispersion_variance=-0.2)
+        kriging_neighborhood_analysis(variances, block_dispersion_variance=-0.2)
 
     with pytest.raises(ValueError, match="valid numeric scalar"):
-        kriging_quality_metrics(variances, block_dispersion_variance=np.nan)
+        kriging_neighborhood_analysis(variances, block_dispersion_variance=np.nan)
 
     # 5. Edge case: shape mismatch
     with pytest.raises(ValueError, match="Shape mismatch"):
-        kriging_quality_metrics(
+        kriging_neighborhood_analysis(
             variances,
             block_dispersion_variance=bv,
             lagrange_multipliers=np.array([0.01, 0.02]),
@@ -1005,7 +1008,7 @@ def test_kriging_quality_metrics():
 
     # 6. Edge case: zero denominator in SoR guarded with NaN
     # Denominator: bv - var - 2*mu = 0.5 - 0.7 - 2*(-0.1) = 0.0
-    _, sor_div_zero = kriging_quality_metrics(
+    _, sor_div_zero = kriging_neighborhood_analysis(
         np.array([0.7]),
         block_dispersion_variance=0.5,
         lagrange_multipliers=np.array([-0.1]),
@@ -2517,8 +2520,8 @@ def test_create_block_model():
     # Block kriging variance should not exceed the total sill
     assert np.all(var <= 1.1)
 
-    # Verify kriging_quality_metrics on actual block kriging outputs
-    ke, sor = kriging_quality_metrics(
+    # Verify kriging_neighborhood_analysis on actual block kriging outputs
+    ke, sor = kriging_neighborhood_analysis(
         kriging_variances=var,
         block_dispersion_variance=disp_var,
         lagrange_multipliers=lagrange,
@@ -4718,15 +4721,15 @@ def test_ordinary_kriging_block_estimation_instability_warnings():
     assert len(lags) == 1
 
 
-def test_kriging_quality_metrics_instability_warnings():
-    """Verifies that kriging_quality_metrics emits warnings for anomalous positive Lagrange multipliers and SoR > 1.05."""
+def test_kriging_neighborhood_analysis_instability_warnings():
+    """Verifies that kriging_neighborhood_analysis emits warnings for anomalous positive Lagrange multipliers and SoR > 1.05."""
     bv = 0.5
     # Construct block where SoR > 1.05 and mu_C > 0:
     # bv=0.5, var=0.1, mu=0.02 -> num=0.38, den=0.36 -> SoR=1.0556
     variances = np.array([0.1])
     mus = np.array([0.02])
     with pytest.warns(UserWarning, match=r"Kriging Neighborhood Instability.*positive Lagrange multipliers"):
-        ke, sor = kriging_quality_metrics(
+        ke, sor = kriging_neighborhood_analysis(
             variances, block_dispersion_variance=bv, lagrange_multipliers=mus
         )
     assert sor[0] > 1.05
@@ -4737,11 +4740,562 @@ def test_kriging_quality_metrics_instability_warnings():
     import warnings
     with warnings.catch_warnings(record=True) as recorded:
         warnings.simplefilter("always")
-        ke2, sor2 = kriging_quality_metrics(
+        ke2, sor2 = kriging_neighborhood_analysis(
             variances_ok, block_dispersion_variance=bv, lagrange_multipliers=mus_neg
         )
         assert len(recorded) == 0
     assert sor2[0] < 1.0
+
+
+def test_filter_neighborhood_sectors_2d_quadrants():
+    """Verifies that 2D quadrant partitioning correctly caps samples per quadrant (SW, SE, NW, NE)."""
+    target = np.array([50.0, 50.0])
+    # 4 samples in NE (quadrant 3), 1 in SW (quadrant 0), 1 in NW (quadrant 2), 1 in SE (quadrant 1)
+    coords = np.array([
+        [55.0, 55.0],  # NE (sec 3), dist = 7.07
+        [60.0, 60.0],  # NE (sec 3), dist = 14.14
+        [65.0, 65.0],  # NE (sec 3), dist = 21.21
+        [70.0, 70.0],  # NE (sec 3), dist = 28.28
+        [40.0, 40.0],  # SW (sec 0), dist = 14.14
+        [40.0, 60.0],  # NW (sec 2), dist = 14.14
+        [60.0, 40.0],  # SE (sec 1), dist = 14.14
+    ])
+    dists = np.linalg.norm(coords - target, axis=1)
+    indices = np.arange(len(coords))
+
+    # Without sector limits: takes all 4 NE samples first
+    sel_idx, sel_dist = _filter_neighborhood_sectors(
+        candidate_coords=coords,
+        candidate_indices=indices,
+        candidate_distances=dists,
+        target_coord=target,
+        k_neighbors=4,
+        max_per_sector=None,
+    )
+    assert len(sel_idx) == 4
+    assert list(sel_idx[:4]) == [0, 1, 4, 5] or set(sel_idx[:2]) == {0, 1}
+
+    # With max_per_sector = 1: takes only 1 from NE, plus 1 from SW, 1 from NW, 1 from SE
+    sel_idx_cap, sel_dist_cap = _filter_neighborhood_sectors(
+        candidate_coords=coords,
+        candidate_indices=indices,
+        candidate_distances=dists,
+        target_coord=target,
+        k_neighbors=4,
+        max_per_sector=1,
+    )
+    assert len(sel_idx_cap) == 4
+    # Sample 0 is in NE; sample 1, 2, 3 in NE must be skipped!
+    assert 0 in sel_idx_cap
+    assert 1 not in sel_idx_cap
+    assert 2 not in sel_idx_cap
+    assert 3 not in sel_idx_cap
+    assert 4 in sel_idx_cap  # SW
+    assert 5 in sel_idx_cap  # NW
+    assert 6 in sel_idx_cap  # SE
+
+
+def test_filter_neighborhood_sectors_3d_octants():
+    """Verifies that 3D octant partitioning correctly identifies and caps across 8 octants."""
+    target = np.array([0.0, 0.0, 0.0])
+    # Build 1 sample in each of the 8 octants (+/- dx, +/- dy, +/- dz)
+    coords_list = []
+    for dx in [-5.0, 5.0]:
+        for dy in [-5.0, 5.0]:
+            for dz in [-5.0, 5.0]:
+                coords_list.append([dx, dy, dz])
+    # Add extra collocated/close samples in octant 7 (+5, +5, +5)
+    coords_list.append([6.0, 6.0, 6.0])
+    coords_list.append([7.0, 7.0, 7.0])
+
+    coords = np.array(coords_list)
+    dists = np.linalg.norm(coords - target, axis=1)
+    indices = np.arange(len(coords))
+
+    # Cap at 1 per octant, k_neighbors = 8
+    sel_idx, _ = _filter_neighborhood_sectors(
+        candidate_coords=coords,
+        candidate_indices=indices,
+        candidate_distances=dists,
+        target_coord=target,
+        k_neighbors=8,
+        max_per_sector=1,
+    )
+    assert len(sel_idx) == 8
+
+
+def test_filter_neighborhood_sectors_drillhole_capping():
+    """Verifies SME Handbook §4.5 Rule 6: maximum samples per drillhole trace."""
+    target = np.array([10.0, 10.0, 20.0])
+    # Drillhole DH_01: 8 vertical composites at (12, 10)
+    dh1_coords = [[12.0, 10.0, z] for z in range(10, 30, 2)]
+    # Drillhole DH_02: 4 vertical composites at (18, 10)
+    dh2_coords = [[18.0, 10.0, z] for z in range(16, 24, 2)]
+
+    coords = np.array(dh1_coords + dh2_coords)
+    dists = np.linalg.norm(coords - target, axis=1)
+    indices = np.arange(len(coords))
+    hole_ids = ["DH_01"] * len(dh1_coords) + ["DH_02"] * len(dh2_coords)
+
+    # Without cap, DH_01 dominates the top 8 positions
+    sel_uncapped, _ = _filter_neighborhood_sectors(
+        candidate_coords=coords,
+        candidate_indices=indices,
+        candidate_distances=dists,
+        target_coord=target,
+        k_neighbors=6,
+        max_per_drillhole=None,
+    )
+    assert all(hole_ids[i] == "DH_01" for i in sel_uncapped)
+
+    # With max_per_drillhole = 3, takes at most 3 from DH_01 and the rest from DH_02
+    sel_capped, _ = _filter_neighborhood_sectors(
+        candidate_coords=coords,
+        candidate_indices=indices,
+        candidate_distances=dists,
+        target_coord=target,
+        k_neighbors=6,
+        max_per_drillhole=3,
+        sample_hole_ids=hole_ids,
+    )
+    assert len(sel_capped) == 6
+    dh1_count = sum(1 for i in sel_capped if hole_ids[i] == "DH_01")
+    dh2_count = sum(1 for i in sel_capped if hole_ids[i] == "DH_02")
+    assert dh1_count == 3
+    assert dh2_count == 3
+
+
+def test_filter_neighborhood_sectors_min_sectors_rejection():
+    """Verifies that min_sectors > 1 rejects blocks when informing samples only span 1 sector."""
+    target = np.array([50.0, 50.0])
+    # All 5 samples located strictly in North-East (quadrant 3)
+    coords = np.array([
+        [55.0, 55.0],
+        [56.0, 56.0],
+        [57.0, 57.0],
+        [58.0, 58.0],
+        [59.0, 59.0],
+    ])
+    dists = np.linalg.norm(coords - target, axis=1)
+    indices = np.arange(len(coords))
+
+    # With min_sectors = 2, rejected (empty array returned)
+    sel_idx, sel_dist = _filter_neighborhood_sectors(
+        candidate_coords=coords,
+        candidate_indices=indices,
+        candidate_distances=dists,
+        target_coord=target,
+        k_neighbors=4,
+        min_sectors=2,
+    )
+    assert len(sel_idx) == 0
+    assert len(sel_dist) == 0
+
+    # With min_sectors = 1, accepted
+    sel_idx1, _ = _filter_neighborhood_sectors(
+        candidate_coords=coords,
+        candidate_indices=indices,
+        candidate_distances=dists,
+        target_coord=target,
+        k_neighbors=4,
+        min_sectors=1,
+    )
+    assert len(sel_idx1) == 4
+
+
+def test_estimation_sector_search_validation_errors():
+    """Verifies strict input validation for sector and drillhole search parameters."""
+    samples_xyz = np.array([[10.0, 10.0, 10.0], [20.0, 20.0, 10.0]])
+    sample_grades = np.array([1.0, 2.0])
+    bm = pd.DataFrame({"x": [15.0], "y": [15.0], "z": [10.0], "dx": [5.0], "dy": [5.0], "dz": [5.0]})
+
+    # min_sectors < 1
+    with pytest.raises(ValueError, match="min_sectors must be >= 1"):
+        ordinary_kriging_block_estimation(
+            samples_xyz, sample_grades, bm, sill=1.0, min_sectors=0
+        )
+
+    # max_per_sector <= 0
+    with pytest.raises(ValueError, match="max_per_sector must be positive"):
+        ordinary_kriging_block_estimation(
+            samples_xyz, sample_grades, bm, sill=1.0, max_per_sector=0
+        )
+
+    # max_per_drillhole <= 0
+    with pytest.raises(ValueError, match="max_per_drillhole must be positive"):
+        ordinary_kriging_block_estimation(
+            samples_xyz, sample_grades, bm, sill=1.0, max_per_drillhole=-1
+        )
+
+    # sample_hole_ids length mismatch
+    with pytest.raises(ValueError, match="sample_hole_ids length"):
+        ordinary_kriging_block_estimation(
+            samples_xyz, sample_grades, bm, sill=1.0, sample_hole_ids=["DH1"]
+        )
+
+
+def test_ordinary_kriging_block_estimation_octant_and_drillhole_cap():
+    """Tests 3D Ordinary Block Kriging with octant search and drillhole capping enabled."""
+    np.random.seed(42)
+    # 2 vertical drillholes: DH_A at (10, 10) with 6 samples, DH_B at (20, 20) with 6 samples
+    dh_a = [[10.0, 10.0, z] for z in range(5, 35, 5)]
+    dh_b = [[20.0, 20.0, z] for z in range(5, 35, 5)]
+    samples = np.array(dh_a + dh_b)
+    grades = np.ones(len(samples)) * 1.5
+    hole_ids = ["DH_A"] * len(dh_a) + ["DH_B"] * len(dh_b)
+
+    bm = pd.DataFrame({
+        "x": [15.0, 15.0],
+        "y": [15.0, 15.0],
+        "z": [10.0, 20.0],
+        "dx": [5.0, 5.0],
+        "dy": [5.0, 5.0],
+        "dz": [5.0, 5.0],
+    })
+
+    est, var, disp, lag = ordinary_kriging_block_estimation(
+        samples_xyz=samples,
+        sample_grades=grades,
+        block_model=bm,
+        sill=1.0,
+        range_param=50.0,
+        nugget=0.1,
+        k_neighbors=8,
+        max_per_octant=2,
+        max_per_drillhole=3,
+        sample_hole_ids=hole_ids,
+        min_sectors=1,
+    )
+    assert len(est) == 2
+    assert np.all(np.isfinite(est))
+    assert np.allclose(est, 1.5, atol=1e-3)
+    assert np.all(var >= 0.0)
+
+
+def test_ordinary_kriging_grid_estimation_quadrant_search():
+    """Tests 2D Ordinary Kriging grid estimation with quadrant search."""
+    samples = np.array([
+        [10.0, 10.0],
+        [12.0, 10.0],
+        [50.0, 10.0],
+        [10.0, 50.0],
+        [50.0, 50.0],
+    ])
+    grades = np.array([1.0, 1.2, 2.0, 3.0, 4.0])
+    grid = np.array([[30.0, 30.0]])
+
+    est, var = ordinary_kriging_grid_estimation(
+        samples_xy=samples,
+        sample_grades=grades,
+        grid_points=grid,
+        sill=1.0,
+        range_param=60.0,
+        k_neighbors=4,
+        max_per_quadrant=1,
+        min_sectors=2,
+    )
+    assert len(est) == 1
+    assert np.isfinite(est[0])
+    assert var[0] >= 0.0
+
+
+def test_clip_and_renormalize_weights_positive_only():
+    """Tests that arrays with only non-negative weights are unchanged and was_clipped is False."""
+    weights = np.array([0.2, 0.5, 0.3])
+    renorm, was_clipped = _clip_and_renormalize_weights(weights)
+    assert not was_clipped
+    assert np.allclose(renorm, weights)
+
+
+def test_clip_and_renormalize_weights_with_negatives():
+    """Tests clipping negative weights to zero and renormalizing positive weights to sum to 1.0."""
+    # Typical screen-effect weights: central sample gets positive, shielded gets negative
+    weights = np.array([1.2, -0.3, 0.1])
+    renorm, was_clipped = _clip_and_renormalize_weights(weights)
+    assert was_clipped
+    assert np.all(renorm >= 0.0)
+    assert renorm[1] == 0.0
+    assert np.isclose(np.sum(renorm), 1.0)
+    # Ratio between positive weights must be preserved: 1.2 / 0.1 = 12
+    assert np.isclose(renorm[0] / renorm[2], 1.2 / 0.1)
+
+
+def test_clip_and_renormalize_weights_all_negative():
+    """Tests fallback to uniform weights when all weights are non-positive."""
+    weights = np.array([-0.2, -0.5, -0.1])
+    renorm, was_clipped = _clip_and_renormalize_weights(weights)
+    assert was_clipped
+    assert np.all(renorm >= 0.0)
+    assert np.allclose(renorm, 1.0 / 3.0)
+    assert np.isclose(np.sum(renorm), 1.0)
+
+
+def test_solve_ordinary_kriging_system_clipping_flag():
+    """Tests _solve_ordinary_kriging_system with clip_negative_weights toggle."""
+    # Build a collinear 1D geometry with strong screening:
+    # Geometry where sample 2 (at 1.2) is screened by sample 1 (at 1.0) and sample 3 is at -1.0
+    coords = np.array([[1.0], [1.2], [-1.0]])
+    dists = np.abs(coords - coords.T)
+    d_target = np.abs(coords - np.array([0.0])).flatten()
+    K = _theoretical_covariance(dists, "spherical", 0.0, 1.0, 5.0)
+    k0 = _theoretical_covariance(d_target, "spherical", 0.0, 1.0, 5.0)
+
+    # Standard solve without clipping (sample 2 gets negative weight)
+    weights_raw, mu_raw = _solve_ordinary_kriging_system(K, k0, clip_negative_weights=False)
+    assert weights_raw[1] < 0.0, "Screened sample at 1.2 must yield a negative weight"
+    assert np.isclose(np.sum(weights_raw), 1.0)
+
+    # Solve with clipping enabled
+    weights_clipped, mu_clipped = _solve_ordinary_kriging_system(K, k0, clip_negative_weights=True)
+    assert np.all(weights_clipped >= 0.0)
+    assert weights_clipped[1] == 0.0
+    assert weights_clipped[0] > 0.0 and weights_clipped[2] > 0.0
+    assert np.isclose(np.sum(weights_clipped), 1.0)
+
+
+def test_ordinary_kriging_grid_estimation_clip_negative_weights():
+    """Tests 2D Ordinary Kriging grid estimation with clip_negative_weights=True."""
+    # Collinear samples causing screen effect
+    samples = np.array([
+        [1.0, 0.0],
+        [2.0, 0.0],
+        [0.0, 1.0],
+    ])
+    grades = np.array([2.0, 1.0, 3.0])
+    grid = np.array([[0.0, 0.0]])
+
+    # Without clipping
+    est_raw, var_raw = ordinary_kriging_grid_estimation(
+        samples_xy=samples,
+        sample_grades=grades,
+        grid_points=grid,
+        sill=1.0,
+        range_param=10.0,
+        clip_negative_weights=False,
+    )
+    # With clipping
+    est_clip, var_clip = ordinary_kriging_grid_estimation(
+        samples_xy=samples,
+        sample_grades=grades,
+        grid_points=grid,
+        sill=1.0,
+        range_param=10.0,
+        clip_negative_weights=True,
+    )
+    assert np.isfinite(est_clip[0])
+    assert var_clip[0] >= 0.0
+    # Both estimates must be valid floats and non-trivial
+    assert np.isfinite(est_raw[0])
+    assert var_raw[0] >= 0.0
+
+
+def test_ordinary_kriging_block_estimation_clip_negative_weights():
+    """Tests 3D Ordinary Kriging block estimation with clip_negative_weights=True."""
+    samples = np.array([
+        [10.0, 10.0, 0.0],
+        [20.0, 10.0, 0.0],
+        [10.0, 20.0, 0.0],
+        [30.0, 10.0, 0.0],
+    ])
+    grades = np.array([1.5, 2.5, 1.0, 3.0])
+    bm = pd.DataFrame({
+        "x": [12.0],
+        "y": [12.0],
+        "z": [0.0],
+        "dx": [5.0],
+        "dy": [5.0],
+        "dz": [5.0],
+    })
+
+    est_clip, var_clip, disp_clip, lag_clip = ordinary_kriging_block_estimation(
+        samples_xyz=samples,
+        sample_grades=grades,
+        block_model=bm,
+        sill=1.0,
+        range_param=50.0,
+        clip_negative_weights=True,
+    )
+    assert len(est_clip) == 1
+    assert np.isfinite(est_clip[0])
+    assert var_clip[0] >= 0.0
+    assert np.isfinite(lag_clip[0])
+
+
+def test_compute_quadratic_estimation_variance():
+    """Verifies the universal quadratic error variance formula: sigma_E^2 = c_vv + w^T K w - 2 w^T k0."""
+    # 1. Single sample with perfect correlation (zero error variance)
+    w_single = np.array([1.0])
+    K_single = np.array([[1.0]])
+    k0_single = np.array([1.0])
+    var_zero = _compute_quadratic_estimation_variance(1.0, w_single, K_single, k0_single)
+    assert np.isclose(var_zero, 0.0)
+
+    # 2. Known 2-sample case with analytic calculation
+    # w = [0.6, 0.4], K = [[1.0, 0.2], [0.2, 1.0]], k0 = [0.8, 0.7], c_vv = 1.0
+    # w^T K w = 0.36 + 0.16 + 2*0.6*0.4*0.2 = 0.616
+    # 2 w^T k0 = 2*(0.48 + 0.28) = 1.52
+    # sigma_E^2 = 1.0 + 0.616 - 1.52 = 0.096
+    w2 = np.array([0.6, 0.4])
+    K2 = np.array([[1.0, 0.2], [0.2, 1.0]])
+    k0_2 = np.array([0.8, 0.7])
+    var2 = _compute_quadratic_estimation_variance(1.0, w2, K2, k0_2)
+    assert np.isclose(var2, 0.096)
+
+    # 3. Guard against small negative numerical roundoff
+    # If c_vv + w^T K w - 2 w^T k0 evaluates to -1e-15, max(0.0, ...) must return 0.0
+    var_clamped = _compute_quadratic_estimation_variance(1.0 - 1e-14, w_single, K_single, k0_single)
+    assert var_clamped == 0.0
+
+
+def test_clip_and_renormalize_weights_preserve_sum():
+    """Verifies weight clipping and renormalization with preserve_sum=True for Simple Kriging."""
+    # 1. Original weights summing to 1.0 with a negative weight
+    w = np.array([0.8, -0.2, 0.4])
+    w_clipped, was_clipped = _clip_and_renormalize_weights(w, preserve_sum=True)
+    assert was_clipped is True
+    assert np.all(w_clipped >= 0.0)
+    assert np.isclose(np.sum(w_clipped), 1.0)
+    # Expected relative ratio: 0.8 : 0.4 -> 2/3 and 1/3
+    assert np.isclose(w_clipped[0], 2.0 / 3.0)
+    assert w_clipped[1] == 0.0
+    assert np.isclose(w_clipped[2], 1.0 / 3.0)
+
+    # 2. Original weights summing to S = 0.6 (where mean weight is 1 - S = 0.4 in SK)
+    w_sk = np.array([0.5, -0.1, 0.2])
+    w_sk_clipped, was_clipped_sk = _clip_and_renormalize_weights(w_sk, preserve_sum=True)
+    assert was_clipped_sk is True
+    assert np.all(w_sk_clipped >= 0.0)
+    assert np.isclose(np.sum(w_sk_clipped), 0.6)
+    # Ratio between positive weights 0.5 and 0.2: 5/7 and 2/7 of 0.6
+    assert np.isclose(w_sk_clipped[0], 0.5 / 0.7 * 0.6)
+    assert w_sk_clipped[1] == 0.0
+    assert np.isclose(w_sk_clipped[2], 0.2 / 0.7 * 0.6)
+
+    # 3. All non-negative weights are untouched
+    w_pos = np.array([0.3, 0.2, 0.1])
+    w_pos_res, was_pos_clipped = _clip_and_renormalize_weights(w_pos, preserve_sum=True)
+    assert was_pos_clipped is False
+    np.testing.assert_allclose(w_pos_res, w_pos)
+
+    # 4. Pure clipping mode without renormalization: target_sum=None, preserve_sum=False
+    w_pure, was_pure_clipped = _clip_and_renormalize_weights(w, target_sum=None, preserve_sum=False)
+    assert was_pure_clipped is True
+    np.testing.assert_allclose(w_pure, np.array([0.8, 0.0, 0.4]))
+
+    # 5. All negative weights fallback
+    w_all_neg = np.array([-0.2, -0.5])
+    w_fallback_ok, was_all_clipped = _clip_and_renormalize_weights(w_all_neg, target_sum=1.0)
+    assert was_all_clipped is True
+    np.testing.assert_allclose(w_fallback_ok, np.array([0.5, 0.5]))
+
+
+def test_simple_kriging_grid_estimation_clip_negative_weights():
+    """Verifies that simple_kriging_grid_estimation handles clip_negative_weights=True properly."""
+    # Collinear samples along x axis to trigger screen effect
+    samples_xy = np.array([[10.0, 10.0], [20.0, 10.0], [30.0, 10.0], [50.0, 10.0]])
+    sample_grades = np.array([1.0, 2.0, 1.5, 3.0])
+    grid_points = np.array([[15.0, 10.0], [25.0, 10.0]])
+
+    # Without clipping
+    est_raw, var_raw = simple_kriging_grid_estimation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        mean=1.5,
+        sill=1.0,
+        range_param=40.0,
+        variogram_model="spherical",
+        clip_negative_weights=False,
+    )
+    assert len(est_raw) == 2
+    assert np.all(np.isfinite(est_raw))
+    assert np.all(var_raw >= 0.0)
+
+    # With clipping
+    est_clip, var_clip = simple_kriging_grid_estimation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        mean=1.5,
+        sill=1.0,
+        range_param=40.0,
+        variogram_model="spherical",
+        clip_negative_weights=True,
+    )
+    assert len(est_clip) == 2
+    assert np.all(np.isfinite(est_clip))
+    assert np.all(var_clip >= 0.0)
+
+    # Test domain grouping with clip_negative_weights=True
+    domains = np.array([1, 1, 1, 1])
+    est_dom, var_dom = simple_kriging_grid_estimation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        mean=1.5,
+        sill=1.0,
+        range_param=40.0,
+        sample_domains=domains,
+        grid_domains=np.array([1, 1]),
+        clip_negative_weights=True,
+    )
+    assert len(est_dom) == 2
+    assert np.all(np.isfinite(est_dom))
+
+
+def test_simple_kriging_block_estimation_clip_negative_weights():
+    """Verifies that simple_kriging_block_estimation handles clip_negative_weights=True properly."""
+    samples = np.array([
+        [10.0, 10.0, 0.0],
+        [20.0, 10.0, 0.0],
+        [10.0, 20.0, 0.0],
+        [30.0, 10.0, 0.0],
+    ])
+    grades = np.array([1.5, 2.5, 1.0, 3.0])
+    bm = pd.DataFrame({
+        "x": [12.0],
+        "y": [12.0],
+        "z": [0.0],
+        "dx": [5.0],
+        "dy": [5.0],
+        "dz": [5.0],
+    })
+
+    # Test single block estimation with clipping
+    est_clip, var_clip, disp_clip = simple_kriging_block_estimation(
+        samples_xyz=samples,
+        sample_grades=grades,
+        block_model=bm,
+        mean=2.0,
+        sill=1.0,
+        range_param=50.0,
+        clip_negative_weights=True,
+    )
+    assert len(est_clip) == 1
+    assert np.isfinite(est_clip[0])
+    assert var_clip[0] >= 0.0
+    assert disp_clip > 0.0
+
+    # Test domain partitioned estimation with clipping
+    bm_dom = bm.copy()
+    bm_dom["domain"] = ["A"]
+    est_dom, var_dom, disp_dom = simple_kriging_block_estimation(
+        samples_xyz=samples,
+        sample_grades=grades,
+        block_model=bm_dom,
+        mean=2.0,
+        sill=1.0,
+        range_param=50.0,
+        domain_col="domain",
+        sample_domains=["A", "A", "A", "A"],
+        clip_negative_weights=True,
+    )
+    assert len(est_dom) == 1
+    assert np.isfinite(est_dom[0])
+    assert var_dom[0] >= 0.0
+
+
+
 
 
 

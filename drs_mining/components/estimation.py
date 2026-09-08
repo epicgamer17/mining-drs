@@ -927,14 +927,215 @@ def _deduplicate_collocated_samples(
     return coords, grades, h_matrix, d_target
 
 
+def _filter_neighborhood_sectors(
+    candidate_coords: np.ndarray,
+    candidate_indices: np.ndarray,
+    candidate_distances: np.ndarray,
+    target_coord: np.ndarray,
+    k_neighbors: int,
+    max_per_sector: Optional[int] = None,
+    min_sectors: int = 1,
+    max_per_drillhole: Optional[int] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Filters neighbor candidates into spatial sectors (2D quadrants or 3D octants) and drillhole caps.
+
+    Adheres to the SME Mining Engineering Handbook (§4.5, Rule 6 & Rule 7) (TODO: Manually Verify):
+    - Rule 6: Restricts the maximum number of samples taken per drillhole trace (`max_per_drillhole`).
+    - Rule 7: Partitions the search neighborhood into angular sectors (4 quadrants in 2D, 8 octants in 3D)
+      and limits samples per sector (`max_per_sector`) with a minimum active sector threshold (`min_sectors`).
+
+    Parameters
+    ----------
+    candidate_coords : np.ndarray
+        Array of candidate sample coordinates of shape (M, D), where D is 2 or 3.
+    candidate_indices : np.ndarray
+        Array of candidate sample indices of shape (M,).
+    candidate_distances : np.ndarray
+        Array of candidate distances from target coordinate of shape (M,).
+    target_coord : np.ndarray
+        Target coordinate of shape (D,).
+    k_neighbors : int
+        Maximum total number of neighbors to select.
+    max_per_sector : int, optional
+        Maximum samples allowed per sector (quadrant in 2D, octant in 3D).
+    min_sectors : int, default 1
+        Minimum number of distinct sectors that must be populated. If fewer sectors
+        are present among accepted samples, empty arrays are returned.
+    max_per_drillhole : int, optional
+        Maximum samples allowed per drillhole trace.
+    sample_hole_ids : Sequence[Any], optional
+        Drillhole identifiers corresponding to candidate samples.
+
+    Returns
+    -------
+    selected_indices : np.ndarray
+        Indices of selected samples of shape (k_selected,).
+    selected_distances : np.ndarray
+        Distances of selected samples of shape (k_selected,).
+    """
+    if len(candidate_indices) == 0:
+        return np.array([], dtype=int), np.array([], dtype=float)
+
+    if max_per_sector is None and max_per_drillhole is None and min_sectors <= 1:
+        take = min(k_neighbors, len(candidate_indices))
+        return candidate_indices[:take], candidate_distances[:take]
+
+    dim = len(target_coord)
+    diffs = candidate_coords - target_coord
+
+    if dim == 2:
+        sectors = (diffs[:, 0] >= 0).astype(int) | ((diffs[:, 1] >= 0).astype(int) << 1)
+    else:
+        sectors = (
+            (diffs[:, 0] >= 0).astype(int)
+            | ((diffs[:, 1] >= 0).astype(int) << 1)
+            | ((diffs[:, 2] >= 0).astype(int) << 2)
+        )
+
+    hole_ids_arr = np.asarray(sample_hole_ids) if sample_hole_ids is not None else None
+
+    selected_indices: List[int] = []
+    selected_distances: List[float] = []
+    sector_counts: Dict[int, int] = {}
+    hole_counts: Dict[Any, int] = {}
+
+    for idx, dist, sec in zip(candidate_indices, candidate_distances, sectors):
+        if max_per_sector is not None and sector_counts.get(sec, 0) >= max_per_sector:
+            continue
+        if max_per_drillhole is not None and hole_ids_arr is not None:
+            h_id = hole_ids_arr[idx]
+            if hole_counts.get(h_id, 0) >= max_per_drillhole:
+                continue
+            hole_counts[h_id] = hole_counts.get(h_id, 0) + 1
+
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+        selected_indices.append(int(idx))
+        selected_distances.append(float(dist))
+        if len(selected_indices) >= k_neighbors:
+            break
+
+    if min_sectors > 1 and len(sector_counts) < min_sectors:
+        return np.array([], dtype=int), np.array([], dtype=float)
+
+    return np.asarray(selected_indices, dtype=int), np.asarray(selected_distances, dtype=float)
+
+
+def _compute_quadratic_estimation_variance(
+    c_vv: float,
+    weights: np.ndarray,
+    K: np.ndarray,
+    k0: np.ndarray,
+) -> float:
+    """Computes the exact quadratic estimation variance for an arbitrary linear estimator.
+
+    sigma_E^2 = C_bar(V, V) + lambda^T * K * lambda - 2 * lambda^T * k0
+
+    Valid for any linear combination of weights (Ordinary Kriging, Simple Kriging, IDW, Polygonal),
+    and strictly required whenever weights are modified or clipped away from the unconstrained
+    Lagrangian solution.
+
+    Parameters
+    ----------
+    c_vv : float
+        A priori point sill C(0) or block self-covariance C_bar(V, V).
+    weights : np.ndarray
+        Array of kriging weights of shape (k,).
+    K : np.ndarray
+        Sample-to-sample covariance matrix of shape (k, k).
+    k0 : np.ndarray
+        Sample-to-target covariance vector of shape (k,).
+
+    Returns
+    -------
+    float
+        Non-negative estimation variance sigma_E^2 >= 0.0.
+    """
+    quad = float(weights @ K @ weights)
+    cov_term = 2.0 * float(np.sum(weights * k0))
+    raw_var = c_vv + quad - cov_term
+    return max(0.0, raw_var)
+
+
+def _clip_and_renormalize_weights(
+    weights: np.ndarray,
+    target_sum: Optional[float] = 1.0,
+    preserve_sum: bool = False,
+) -> Tuple[np.ndarray, bool]:
+    """Clips negative kriging weights to zero and optionally renormalizes.
+
+    Adheres to Deutsch (1996) and Isaaks & Srivastava (1989) (TODO: Manually Verify):
+    when negative weights occur due to the screen effect, clipping them to zero eliminates
+    physically impossible grade extrapolations (e.g. negative grades or extreme spikes).
+
+    For Ordinary Kriging, normalizing to target_sum=1.0 ensures the unbiasedness condition
+    sum(weights) == 1.0 is strictly preserved.
+    For Simple Kriging, setting preserve_sum=True scales the positive weights so their sum
+    matches the original sample weight sum S = sum(weights) (clamped to [0.0, 1.0]),
+    preserving the weight assigned to the stationary global mean lambda_0 = 1.0 - sum(weights).
+
+    Parameters
+    ----------
+    weights : np.ndarray
+        Array of kriging weights of shape (k,).
+    target_sum : float, optional, default 1.0
+        If supplied and preserve_sum is False, positive weights are rescaled to sum to target_sum.
+    preserve_sum : bool, default False
+        If True, rescales clipped positive weights so their sum matches the original sample
+        weight sum S = sum(weights) (clamped to [0.0, 1.0]). If both target_sum is None and
+        preserve_sum is False, unconstrained non-negative clipping is performed.
+
+    Returns
+    -------
+    renorm_weights : np.ndarray
+        Array of non-negative weights.
+    was_clipped : bool
+        True if any weight was negative and modified, False otherwise.
+    """
+    if not np.any(weights < 0.0):
+        return weights, False
+
+    clipped = np.maximum(weights, 0.0)
+    pos_sum = float(np.sum(clipped))
+
+    if preserve_sum:
+        orig_sum = float(np.sum(weights))
+        desired_sum = max(0.0, min(1.0, orig_sum))
+        if pos_sum > 0.0 and desired_sum > 0.0:
+            renorm = clipped * (desired_sum / pos_sum)
+        else:
+            renorm = np.zeros_like(weights)
+        return renorm, True
+
+    if target_sum is not None:
+        if pos_sum > 0.0:
+            renorm = clipped * (target_sum / pos_sum)
+        else:
+            renorm = np.full_like(weights, target_sum / len(weights))
+        return renorm, True
+
+    return clipped, True
+
+
 def _solve_ordinary_kriging_system(
     K: np.ndarray,
     k0: np.ndarray,
+    clip_negative_weights: bool = False,
 ) -> Tuple[np.ndarray, float]:
     """Solves the augmented Ordinary Kriging linear system for weights and Lagrange multiplier.
 
     [ K   1 ] [ lambda ] = [ k0 ]
     [ 1^T 0 ] [   mu   ]   [  1 ]
+
+    Parameters
+    ----------
+    K : np.ndarray
+        Sample-to-sample covariance matrix of shape (k, k).
+    k0 : np.ndarray
+        Sample-to-target covariance vector of shape (k,).
+    clip_negative_weights : bool, default False
+        If True, clips any negative weights (screen-effect artifacts) to zero and renormalizes
+        positive weights so they sum to 1.0 (Deutsch, 1996; Isaaks & Srivastava, 1989).
 
     Returns
     -------
@@ -962,10 +1163,13 @@ def _solve_ordinary_kriging_system(
         )
 
     solution = np.linalg.solve(A, rhs)
-    # TODO: Add clipping and renormalization as an option to deal with negative kriging weights
-    # (Deutsch 1996; Isaaks & Srivastava): when negative weights occur due to the screen effect,
-    # optionally clip lambda_i < 0 to 0.0 and renormalize positive weights so sum(lambda_i) == 1.0.
-    return solution[:k], float(solution[k])
+    weights = solution[:k]
+    mu = float(solution[k])
+
+    if clip_negative_weights:
+        weights, _ = _clip_and_renormalize_weights(weights, target_sum=1.0)
+
+    return weights, mu
 
 
 def inverse_distance_weighting(
@@ -1664,10 +1868,18 @@ def simple_kriging_grid_estimation(
     anisotropy_angles: Optional[
         Union[float, Sequence[float], Mapping[Any, Any]]
     ] = None,
+    max_per_sector: Optional[int] = None,
+    min_sectors: int = 1,
+    max_per_drillhole: Optional[int] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+    max_per_octant: Optional[int] = None,
+    max_per_quadrant: Optional[int] = None,
+    clip_negative_weights: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Simple Kriging (SK) grid interpolation with known stationary mean.
 
-    Supports geological domain boundaries and 2D/3D spatial anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
+    Supports geological domain boundaries, 2D/3D spatial anisotropy, quadrant/octant
+    search limits, and drillhole trace caps (SME Handbook §4.5, Rule 6 & Rule 7) (TODO: Manually Verify):
     when `sample_domains` and `grid_domains` are provided, estimation is strictly segregated
     so that grid nodes are only informed by samples sharing the same geological domain.
     Parameter mappings (mean, sill, range, nugget, anisotropy) can be supplied per-domain.
@@ -1706,6 +1918,25 @@ def simple_kriging_grid_estimation(
     anisotropy_angles : float, Sequence[float], or Mapping, optional
         Rotation angles: azimuth in 2D or (azimuth, dip, plunge) in 3D.
         Can be supplied per-domain as a dict mapping domain identifier to angles.
+    max_per_sector : int, optional
+        Maximum conditioning samples allowed per angular sector (quadrant in 2D, octant in 3D).
+        Adheres to SME Mining Engineering Handbook §4.5 Rule 7 (TODO: Manually Verify).
+    min_sectors : int, default 1
+        Minimum number of distinct angular sectors that must contain samples for a grid node
+        to be estimated.
+    max_per_drillhole : int, optional
+        Maximum conditioning samples allowed per drillhole trace. Adheres to SME Handbook
+        §4.5 Rule 6 (TODO: Manually Verify).
+    sample_hole_ids : Sequence[Any], optional
+        Drillhole identifiers corresponding to conditioning samples.
+    max_per_octant : int, optional
+        Alias for max_per_sector in 3D.
+    max_per_quadrant : int, optional
+        Alias for max_per_sector in 2D.
+    clip_negative_weights : bool, default False
+        If True, clips negative kriging weights to zero and rescales positive weights
+        to preserve the original sample weight sum (preserving the weight assigned to
+        the global mean). Estimation variance is computed via the universal quadratic formula.
 
     Returns
     -------
@@ -1714,6 +1945,22 @@ def simple_kriging_grid_estimation(
     kriging_variance : np.ndarray
         Estimation variance sigma_SK^2 of shape (M,).
     """
+    sec_max = (
+        max_per_sector
+        if max_per_sector is not None
+        else (max_per_octant if max_per_octant is not None else max_per_quadrant)
+    )
+    if min_sectors < 1:
+        raise ValueError(f"min_sectors must be >= 1, got {min_sectors}")
+    if sec_max is not None and sec_max <= 0:
+        raise ValueError(f"max_per_sector must be positive, got {sec_max}")
+    if max_per_drillhole is not None and max_per_drillhole <= 0:
+        raise ValueError(f"max_per_drillhole must be positive, got {max_per_drillhole}")
+    if sample_hole_ids is not None and len(sample_hole_ids) != len(samples_xy):
+        raise ValueError(
+            f"sample_hole_ids length ({len(sample_hole_ids)}) must match samples_xy ({len(samples_xy)})."
+        )
+
     s_dom, g_dom = _validate_domain_pairing(
         sample_domains, grid_domains, len(samples_xy), len(grid_points)
     )
@@ -1738,6 +1985,11 @@ def simple_kriging_grid_estimation(
                 variances[g_mask] = dom_sill + dom_nugget
                 continue
 
+            sub_hole_ids = (
+                np.asarray(sample_hole_ids)[s_mask].tolist()
+                if sample_hole_ids is not None
+                else None
+            )
             est_dom, var_dom = simple_kriging_grid_estimation(
                 samples_xy=samples_xy[s_mask],
                 sample_grades=sample_grades[s_mask],
@@ -1754,6 +2006,11 @@ def simple_kriging_grid_estimation(
                 grid_domains=None,
                 anisotropy_ranges=dom_aniso_ranges,
                 anisotropy_angles=dom_aniso_angles,
+                max_per_sector=sec_max,
+                min_sectors=min_sectors,
+                max_per_drillhole=max_per_drillhole,
+                sample_hole_ids=sub_hole_ids,
+                clip_negative_weights=clip_negative_weights,
             )
             estimates[g_mask] = est_dom
             variances[g_mask] = var_dom
@@ -1797,7 +2054,14 @@ def simple_kriging_grid_estimation(
     )
 
     # 1. Query k nearest neighbors using KDTree in transformed space
-    k_query = min(k_neighbors, len(samples_xy))
+    has_sector_search = (
+        (sec_max is not None) or (max_per_drillhole is not None) or (min_sectors > 1)
+    )
+    if has_sector_search:
+        k_query = min(len(samples_xy), max(k_neighbors * 8, 128))
+    else:
+        k_query = min(k_neighbors, len(samples_xy))
+
     tree = KDTree(samples_t)
     upper_bound = max_radius if max_radius is not None else float("inf")
     distances, indices = tree.query(grid_t, k=k_query, distance_upper_bound=upper_bound)
@@ -1813,8 +2077,23 @@ def simple_kriging_grid_estimation(
         if not np.any(valid_mask):
             continue  # No samples within range: remains prior mean and total sill
 
-        d_m = distances[m][valid_mask]
-        idx_m = indices[m][valid_mask]
+        if has_sector_search:
+            idx_m, d_m = _filter_neighborhood_sectors(
+                candidate_coords=samples_t[indices[m][valid_mask]],
+                candidate_indices=indices[m][valid_mask],
+                candidate_distances=distances[m][valid_mask],
+                target_coord=grid_t[m],
+                k_neighbors=k_neighbors,
+                max_per_sector=sec_max,
+                min_sectors=min_sectors,
+                max_per_drillhole=max_per_drillhole,
+                sample_hole_ids=sample_hole_ids,
+            )
+            if len(idx_m) == 0:
+                continue
+        else:
+            d_m = distances[m][valid_mask]
+            idx_m = indices[m][valid_mask]
         k_m = len(idx_m)
 
         # Exact collocation: if target lies directly on a sample point
@@ -1848,12 +2127,20 @@ def simple_kriging_grid_estimation(
 
         # Solve linear system K_m * lambda_m = k0_m
         weights_m = np.linalg.solve(K_m, k0_m)
+        if clip_negative_weights:
+            weights_m, _ = _clip_and_renormalize_weights(weights_m, preserve_sum=True)
 
         # Simple Kriging estimate: Z*_SK = mean + sum_i lambda_i * (Z_i - mean)
         estimates[m] = base_mean + np.sum(weights_m * (grades_m - base_mean))
 
-        # Simple Kriging variance: sigma_SK^2 = C(0) - sum_i lambda_i * k0_i
-        var_val = total_sill - np.sum(weights_m * k0_m)
+        # Simple Kriging variance:
+        if clip_negative_weights:
+            var_val = _compute_quadratic_estimation_variance(
+                total_sill, weights_m, K_m, k0_m
+            )
+        else:
+            # Simple Kriging variance: sigma_SK^2 = C(0) - sum_i lambda_i * k0_i
+            var_val = total_sill - np.sum(weights_m * k0_m)
         variances[m] = max(0.0, float(var_val))
 
     # 3. Handle extrapolation masking
@@ -1882,10 +2169,18 @@ def ordinary_kriging_grid_estimation(
     anisotropy_angles: Optional[
         Union[float, Sequence[float], Mapping[Any, Any]]
     ] = None,
+    max_per_sector: Optional[int] = None,
+    min_sectors: int = 1,
+    max_per_drillhole: Optional[int] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+    max_per_octant: Optional[int] = None,
+    max_per_quadrant: Optional[int] = None,
+    clip_negative_weights: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Ordinary Kriging (OK) grid interpolation with unknown local mean.
 
-    Supports geological domain boundaries and 2D/3D spatial anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
+    Supports geological domain boundaries, 2D/3D spatial anisotropy, quadrant/octant
+    search limits, and drillhole trace caps (SME Handbook §4.5, Rule 6 & Rule 7) (TODO: Manually Verify):
     when `sample_domains` and `grid_domains` are provided, estimation is strictly segregated
     so that grid nodes are only informed by samples sharing the same geological domain.
     Parameter mappings (sill, range, nugget, anisotropy) can be supplied per-domain.
@@ -1922,6 +2217,25 @@ def ordinary_kriging_grid_estimation(
     anisotropy_angles : float, Sequence[float], or Mapping, optional
         Rotation angles: azimuth in 2D or (azimuth, dip, plunge) in 3D.
         Can be supplied per-domain as a dict mapping domain identifier to angles.
+    max_per_sector : int, optional
+        Maximum conditioning samples allowed per angular sector (quadrant in 2D, octant in 3D).
+        Adheres to SME Mining Engineering Handbook §4.5 Rule 7 (TODO: Manually Verify).
+    min_sectors : int, default 1
+        Minimum number of distinct angular sectors that must contain samples for a grid node
+        to be estimated.
+    max_per_drillhole : int, optional
+        Maximum conditioning samples allowed per drillhole trace. Adheres to SME Handbook
+        §4.5 Rule 6 (TODO: Manually Verify).
+    sample_hole_ids : Sequence[Any], optional
+        Drillhole identifiers corresponding to conditioning samples.
+    max_per_octant : int, optional
+        Alias for max_per_sector in 3D.
+    max_per_quadrant : int, optional
+        Alias for max_per_sector in 2D.
+    clip_negative_weights : bool, default False
+        If True, clips negative kriging weights to zero and renormalizes positive weights
+        so they sum to 1.0 (Deutsch, 1996; Isaaks & Srivastava, 1989). Grid estimation
+        variance is then computed using the quadratic error variance formulation.
 
     Returns
     -------
@@ -1930,6 +2244,22 @@ def ordinary_kriging_grid_estimation(
     kriging_variance : np.ndarray
         Estimation variance sigma_OK^2 of shape (M,).
     """
+    sec_max = (
+        max_per_sector
+        if max_per_sector is not None
+        else (max_per_octant if max_per_octant is not None else max_per_quadrant)
+    )
+    if min_sectors < 1:
+        raise ValueError(f"min_sectors must be >= 1, got {min_sectors}")
+    if sec_max is not None and sec_max <= 0:
+        raise ValueError(f"max_per_sector must be positive, got {sec_max}")
+    if max_per_drillhole is not None and max_per_drillhole <= 0:
+        raise ValueError(f"max_per_drillhole must be positive, got {max_per_drillhole}")
+    if sample_hole_ids is not None and len(sample_hole_ids) != len(samples_xy):
+        raise ValueError(
+            f"sample_hole_ids length ({len(sample_hole_ids)}) must match samples_xy ({len(samples_xy)})."
+        )
+
     # Handle domain-segregated estimation
     if sample_domains is not None or grid_domains is not None:
         s_dom, g_dom = _validate_domain_pairing(
@@ -1955,6 +2285,11 @@ def ordinary_kriging_grid_estimation(
             if not np.any(s_mask):
                 continue
 
+            sub_hole_ids = (
+                np.asarray(sample_hole_ids)[s_mask].tolist()
+                if sample_hole_ids is not None
+                else None
+            )
             est_dom, var_dom = ordinary_kriging_grid_estimation(
                 samples_xy=samples_xy[s_mask],
                 sample_grades=sample_grades[s_mask],
@@ -1970,6 +2305,11 @@ def ordinary_kriging_grid_estimation(
                 grid_domains=None,
                 anisotropy_ranges=dom_aniso_ranges,
                 anisotropy_angles=dom_aniso_angles,
+                max_per_sector=sec_max,
+                min_sectors=min_sectors,
+                max_per_drillhole=max_per_drillhole,
+                sample_hole_ids=sub_hole_ids,
+                clip_negative_weights=clip_negative_weights,
             )
             estimates[g_mask] = est_dom
             variances[g_mask] = var_dom
@@ -2012,10 +2352,14 @@ def ordinary_kriging_grid_estimation(
     )
 
     # 1. Query k nearest neighbors using KDTree in transformed space
-    # TODO: Add quadrant/octant search limits (SME Mining Engineering Handbook §4.5, Rule 7 & Figure 4.5-14)
-    # and maximum samples per drillhole trace cap (Rule 6: max 3-5 composites per hole) to prevent
-    # clustered samples from dominating the search neighborhood.
-    k_query = min(k_neighbors, len(samples_xy))
+    has_sector_search = (
+        (sec_max is not None) or (max_per_drillhole is not None) or (min_sectors > 1)
+    )
+    if has_sector_search:
+        k_query = min(len(samples_xy), max(k_neighbors * 8, 128))
+    else:
+        k_query = min(k_neighbors, len(samples_xy))
+
     tree = KDTree(samples_t)
     upper_bound = max_radius if max_radius is not None else float("inf")
     distances, indices = tree.query(grid_t, k=k_query, distance_upper_bound=upper_bound)
@@ -2031,8 +2375,23 @@ def ordinary_kriging_grid_estimation(
         if not np.any(valid_mask):
             continue  # No samples within range: remains NaN and total sill
 
-        d_m = distances[m][valid_mask]
-        idx_m = indices[m][valid_mask]
+        if has_sector_search:
+            idx_m, d_m = _filter_neighborhood_sectors(
+                candidate_coords=samples_t[indices[m][valid_mask]],
+                candidate_indices=indices[m][valid_mask],
+                candidate_distances=distances[m][valid_mask],
+                target_coord=grid_t[m],
+                k_neighbors=k_neighbors,
+                max_per_sector=sec_max,
+                min_sectors=min_sectors,
+                max_per_drillhole=max_per_drillhole,
+                sample_hole_ids=sample_hole_ids,
+            )
+            if len(idx_m) == 0:
+                continue
+        else:
+            d_m = distances[m][valid_mask]
+            idx_m = indices[m][valid_mask]
 
         # Exact collocation: if target lies directly on a sample point
         if d_m[0] < 1e-6:
@@ -2063,16 +2422,22 @@ def ordinary_kriging_grid_estimation(
         )
 
         # Solve linear system: K_aug * [lambda; mu_lagrange] = k0_aug
-        weights_m, mu_lagrange = _solve_ordinary_kriging_system(K_m, k0_m)
-        # TODO: Add clipping and renormalization as an option to deal with negative kriging weights
-        # (Deutsch 1996; Isaaks & Srivastava): optionally clip weights_m < 0 to 0.0 and renormalize
-        # positive weights so sum(weights_m) == 1.0.
+        weights_m, mu_lagrange = _solve_ordinary_kriging_system(
+            K_m, k0_m, clip_negative_weights=clip_negative_weights
+        )
 
         # Ordinary Kriging estimate: Z*_OK = sum_i lambda_i * Z(x_i)
         estimates[m] = np.sum(weights_m * grades_m)
 
-        # Ordinary Kriging variance: sigma_OK^2 = C(0) - sum_i lambda_i * k0_i - mu_lagrange
-        var_val = total_sill - np.sum(weights_m * k0_m) - mu_lagrange
+        # Ordinary Kriging variance:
+        if clip_negative_weights:
+            # Universal quadratic estimation variance formula for non-optimal linear weights
+            var_val = _compute_quadratic_estimation_variance(
+                total_sill, weights_m, K_m, k0_m
+            )
+        else:
+            # Standard Ordinary Kriging variance: sigma_OK^2 = C(0) - sum_i lambda_i * k0_i - mu_lagrange
+            var_val = total_sill - np.sum(weights_m * k0_m) - mu_lagrange
         variances[m] = max(0.0, float(var_val))
 
     # 3. Handle extrapolation masking
@@ -2242,10 +2607,18 @@ def ordinary_kriging_block_estimation(
     anisotropy_angles: Optional[
         Union[float, Sequence[float], Mapping[Any, Any]]
     ] = None,
+    max_per_sector: Optional[int] = None,
+    min_sectors: int = 1,
+    max_per_drillhole: Optional[int] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+    max_per_octant: Optional[int] = None,
+    max_per_quadrant: Optional[int] = None,
+    clip_negative_weights: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     """Estimates block grades using 3D Ordinary Block Kriging with internal discretization.
 
-    Supports geological domain boundaries and 3D spatial anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
+    Supports geological domain boundaries, 3D spatial anisotropy, quadrant/octant search limits,
+    and drillhole trace caps (SME Handbook §4.5, Rule 6 & Rule 7; CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
     when `anisotropy_ranges` and/or `anisotropy_angles` are supplied, block discretization
     points, sample points, and search ellipsoids are evaluated in the rotated anisotropic metric.
 
@@ -2285,12 +2658,47 @@ def ordinary_kriging_block_estimation(
     anisotropy_angles : float, Sequence[float], or Mapping, optional
         Rotation angles (azimuth, dip, plunge) in 3D.
         Can be supplied per-domain as a dict mapping domain identifier to angles.
+    max_per_sector : int, optional
+        Maximum conditioning samples allowed per angular sector (quadrant in 2D, octant in 3D).
+        Adheres to SME Mining Engineering Handbook §4.5 Rule 7 (TODO: Manually Verify).
+    min_sectors : int, default 1
+        Minimum number of distinct angular sectors that must contain samples for a block
+        to be estimated.
+    max_per_drillhole : int, optional
+        Maximum conditioning samples allowed per drillhole trace. Adheres to SME Handbook
+        §4.5 Rule 6 (TODO: Manually Verify).
+    sample_hole_ids : Sequence[Any], optional
+        Drillhole identifiers corresponding to conditioning samples.
+    max_per_octant : int, optional
+        Alias for max_per_sector in 3D.
+    max_per_quadrant : int, optional
+        Alias for max_per_sector in 2D.
+    clip_negative_weights : bool, default False
+        If True, clips negative kriging weights to zero and renormalizes positive weights
+        so they sum to 1.0 (Deutsch, 1996; Isaaks & Srivastava, 1989). Block estimation
+        variance is then computed using the quadratic error variance formulation.
 
     Returns
     -------
     Tuple[np.ndarray, np.ndarray, float, np.ndarray]
         (block_estimates, block_variances, block_dispersion_variance, lagrange_multipliers).
     """
+    sec_max = (
+        max_per_sector
+        if max_per_sector is not None
+        else (max_per_octant if max_per_octant is not None else max_per_quadrant)
+    )
+    if min_sectors < 1:
+        raise ValueError(f"min_sectors must be >= 1, got {min_sectors}")
+    if sec_max is not None and sec_max <= 0:
+        raise ValueError(f"max_per_sector must be positive, got {sec_max}")
+    if max_per_drillhole is not None and max_per_drillhole <= 0:
+        raise ValueError(f"max_per_drillhole must be positive, got {max_per_drillhole}")
+    if sample_hole_ids is not None and len(sample_hole_ids) != len(samples_xyz):
+        raise ValueError(
+            f"sample_hole_ids length ({len(sample_hole_ids)}) must match samples_xyz ({len(samples_xyz)})."
+        )
+
     n_blocks = len(block_model)
     if n_blocks == 0:
         return np.array([]), np.array([]), 0.0, np.array([])
@@ -2331,6 +2739,11 @@ def ordinary_kriging_block_estimation(
                 continue
 
             sub_bm = block_model[b_mask].copy()
+            sub_hole_ids = (
+                np.asarray(sample_hole_ids)[s_mask].tolist()
+                if sample_hole_ids is not None
+                else None
+            )
             est_dom, var_dom, disp_dom, lag_dom = ordinary_kriging_block_estimation(
                 samples_xyz=samples_xyz[s_mask],
                 sample_grades=sample_grades[s_mask],
@@ -2347,13 +2760,23 @@ def ordinary_kriging_block_estimation(
                 sample_domains=None,
                 anisotropy_ranges=dom_aniso_ranges,
                 anisotropy_angles=dom_aniso_angles,
+                max_per_sector=sec_max,
+                min_sectors=min_sectors,
+                max_per_drillhole=max_per_drillhole,
+                sample_hole_ids=sub_hole_ids,
+                clip_negative_weights=clip_negative_weights,
             )
             block_estimates[b_mask] = est_dom
             block_variances[b_mask] = var_dom
             lagrange_multipliers[b_mask] = lag_dom
             overall_disp_var = disp_dom
 
-        return block_estimates, block_variances, overall_disp_var, lagrange_multipliers
+        return (
+            block_estimates,
+            block_variances,
+            overall_disp_var,
+            lagrange_multipliers,
+        )
 
     base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
     base_nugget = (
@@ -2421,12 +2844,15 @@ def ordinary_kriging_block_estimation(
         block_coords, ranges=eff_ranges, angles=anisotropy_angles
     )
 
-    # TODO: Add quadrant/octant search limits (SME Mining Engineering Handbook §4.5, Rule 7 & Figure 4.5-14)
-    # and maximum samples per drillhole trace cap (Rule 6: max 3-5 composites per hole) to prevent
-    # collinear downhole composite strings from dominating the neighborhood and causing screen-effect instability.
-    tree = KDTree(samples_xyz_t)
-    k_query = min(k_neighbors, len(samples_xyz))
+    has_sector_search = (
+        (sec_max is not None) or (max_per_drillhole is not None) or (min_sectors > 1)
+    )
+    if has_sector_search:
+        k_query = min(len(samples_xyz), max(k_neighbors * 8, 128))
+    else:
+        k_query = min(k_neighbors, len(samples_xyz))
 
+    tree = KDTree(samples_xyz_t)
     distances, indices = tree.query(
         block_coords_t,
         k=k_query,
@@ -2446,7 +2872,22 @@ def ordinary_kriging_block_estimation(
         if not np.any(valid_mask) or np.sum(valid_mask) < min_samples:
             continue  # Insufficient sample support: remains NaN and c_vv
 
-        active_indices = indices[b][valid_mask]
+        if has_sector_search:
+            active_indices, _ = _filter_neighborhood_sectors(
+                candidate_coords=samples_xyz_t[indices[b][valid_mask]],
+                candidate_indices=indices[b][valid_mask],
+                candidate_distances=distances[b][valid_mask],
+                target_coord=block_coords_t[b],
+                k_neighbors=k_neighbors,
+                max_per_sector=sec_max,
+                min_sectors=min_sectors,
+                max_per_drillhole=max_per_drillhole,
+                sample_hole_ids=sample_hole_ids,
+            )
+            if len(active_indices) < min_samples:
+                continue
+        else:
+            active_indices = indices[b][valid_mask]
         coords_active = samples_xyz_t[active_indices]  # shape (k, 3)
         grades_active = sample_grades[active_indices]  # shape (k,)
         k_active = len(active_indices)
@@ -2475,16 +2916,22 @@ def ordinary_kriging_block_estimation(
         K_mat[np.diag_indices(k_active)] += 1e-9
 
         try:
-            weights, mu = _solve_ordinary_kriging_system(K_mat, k0_block)
-            # TODO: Add clipping and renormalization as an option to deal with negative kriging weights /
-            # screen effects (Deutsch 1996; Isaaks & Srivastava): optionally clip weights < 0 to 0.0 and renormalize
-            # sum(weights) == 1.0 to prevent anomalous grade extrapolation and conditional bias distortion.
+            weights, mu = _solve_ordinary_kriging_system(
+                K_mat, k0_block, clip_negative_weights=clip_negative_weights
+            )
             if np.any(weights < -0.01):
                 neg_weight_block_count += 1
             # Block Grade Estimate: Z*(V) = sum(lambda_i * Z_i)
             block_estimates[b] = float(np.sum(weights * grades_active))
-            # Block Kriging Variance: sigma_OK^2 = C_bar(V, V) - sum(lambda_i * C_bar(x_i, V)) - mu
-            raw_variance = c_vv - np.sum(weights * k0_block) - mu
+            # Block Kriging Variance:
+            if clip_negative_weights:
+                # Universal quadratic estimation variance formula for non-optimal linear weights
+                raw_variance = _compute_quadratic_estimation_variance(
+                    c_vv, weights, K_mat, k0_block
+                )
+            else:
+                # Standard Ordinary Kriging variance: sigma_OK^2 = C_bar(V, V) - sum(lambda_i * C_bar(x_i, V)) - mu
+                raw_variance = c_vv - np.sum(weights * k0_block) - mu
             block_variances[b] = max(0.0, float(raw_variance))
             lagrange_multipliers[b] = float(mu)
         except np.linalg.LinAlgError:
@@ -2539,10 +2986,18 @@ def simple_kriging_block_estimation(
     anisotropy_angles: Optional[
         Union[float, Sequence[float], Mapping[Any, Any]]
     ] = None,
+    max_per_sector: Optional[int] = None,
+    min_sectors: int = 1,
+    max_per_drillhole: Optional[int] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+    max_per_octant: Optional[int] = None,
+    max_per_quadrant: Optional[int] = None,
+    clip_negative_weights: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Estimates block grades using 3D Simple Block Kriging with a known stationary mean.
 
-    Supports geological domain boundaries and 3D spatial anisotropy (CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
+    Supports geological domain boundaries, 3D spatial anisotropy, quadrant/octant search limits,
+    and drillhole trace caps (SME Handbook §4.5, Rule 6 & Rule 7; CIM MRMR §6.8/§6.9) (TODO: Manually Verify):
     when `anisotropy_ranges` and/or `anisotropy_angles` are supplied, block discretization
     points, sample points, and search ellipsoids are evaluated in the rotated anisotropic metric.
 
@@ -2584,12 +3039,47 @@ def simple_kriging_block_estimation(
     anisotropy_angles : float, Sequence[float], or Mapping, optional
         Rotation angles (azimuth, dip, plunge) in 3D.
         Can be supplied per-domain as a dict mapping domain identifier to angles.
+    max_per_sector : int, optional
+        Maximum conditioning samples allowed per angular sector (quadrant in 2D, octant in 3D).
+        Adheres to SME Mining Engineering Handbook §4.5 Rule 7 (TODO: Manually Verify).
+    min_sectors : int, default 1
+        Minimum number of distinct angular sectors that must contain samples for a block
+        to be estimated.
+    max_per_drillhole : int, optional
+        Maximum conditioning samples allowed per drillhole trace. Adheres to SME Handbook
+        §4.5 Rule 6 (TODO: Manually Verify).
+    sample_hole_ids : Sequence[Any], optional
+        Drillhole identifiers corresponding to conditioning samples.
+    max_per_octant : int, optional
+        Alias for max_per_sector in 3D.
+    max_per_quadrant : int, optional
+        Alias for max_per_sector in 2D.
+    clip_negative_weights : bool, default False
+        Whether to clip negative Simple Kriging weights to 0.0 and renormalize them
+        preserving the total sample weight sum, recalculating estimation variance
+        via the universal quadratic error variance formula (Deutsch, 1996).
 
     Returns
     -------
     Tuple[np.ndarray, np.ndarray, float]
         (block_estimates, block_variances, block_dispersion_variance).
     """
+    sec_max = (
+        max_per_sector
+        if max_per_sector is not None
+        else (max_per_octant if max_per_octant is not None else max_per_quadrant)
+    )
+    if min_sectors < 1:
+        raise ValueError(f"min_sectors must be >= 1, got {min_sectors}")
+    if sec_max is not None and sec_max <= 0:
+        raise ValueError(f"max_per_sector must be positive, got {sec_max}")
+    if max_per_drillhole is not None and max_per_drillhole <= 0:
+        raise ValueError(f"max_per_drillhole must be positive, got {max_per_drillhole}")
+    if sample_hole_ids is not None and len(sample_hole_ids) != len(samples_xyz):
+        raise ValueError(
+            f"sample_hole_ids length ({len(sample_hole_ids)}) must match samples_xyz ({len(samples_xyz)})."
+        )
+
     n_blocks = len(block_model)
     if n_blocks == 0:
         return np.array([]), np.array([]), 0.0
@@ -2630,6 +3120,11 @@ def simple_kriging_block_estimation(
                 continue
 
             sub_bm = block_model[b_mask].copy()
+            sub_hole_ids = (
+                np.asarray(sample_hole_ids)[s_mask].tolist()
+                if sample_hole_ids is not None
+                else None
+            )
             est_dom, var_dom, disp_dom = simple_kriging_block_estimation(
                 samples_xyz=samples_xyz[s_mask],
                 sample_grades=sample_grades[s_mask],
@@ -2647,6 +3142,11 @@ def simple_kriging_block_estimation(
                 sample_domains=None,
                 anisotropy_ranges=dom_aniso_ranges,
                 anisotropy_angles=dom_aniso_angles,
+                max_per_sector=sec_max,
+                min_sectors=min_sectors,
+                max_per_drillhole=max_per_drillhole,
+                sample_hole_ids=sub_hole_ids,
+                clip_negative_weights=clip_negative_weights,
             )
             block_estimates[b_mask] = est_dom
             block_variances[b_mask] = var_dom
@@ -2712,12 +3212,15 @@ def simple_kriging_block_estimation(
     )
 
     # 5. Neighbor Search Setup & Spatial Query
-    # TODO: Add quadrant/octant search limits (SME Mining Engineering Handbook §4.5, Rule 7 & Figure 4.5-14)
-    # and maximum samples per drillhole trace cap (Rule 6: max 3-5 composites per hole) to prevent
-    # collinear downhole composite strings from dominating the neighborhood.
-    tree = KDTree(samples_xyz_t)
-    k_query = min(k_neighbors, len(samples_xyz))
+    has_sector_search = (
+        (sec_max is not None) or (max_per_drillhole is not None) or (min_sectors > 1)
+    )
+    if has_sector_search:
+        k_query = min(len(samples_xyz), max(k_neighbors * 8, 128))
+    else:
+        k_query = min(k_neighbors, len(samples_xyz))
 
+    tree = KDTree(samples_xyz_t)
     distances, indices = tree.query(
         block_coords_t,
         k=k_query,
@@ -2733,7 +3236,22 @@ def simple_kriging_block_estimation(
         if not np.any(valid_mask) or np.sum(valid_mask) < min_samples:
             continue
 
-        active_indices = indices[b][valid_mask]
+        if has_sector_search:
+            active_indices, _ = _filter_neighborhood_sectors(
+                candidate_coords=samples_xyz_t[indices[b][valid_mask]],
+                candidate_indices=indices[b][valid_mask],
+                candidate_distances=distances[b][valid_mask],
+                target_coord=block_coords_t[b],
+                k_neighbors=k_neighbors,
+                max_per_sector=sec_max,
+                min_sectors=min_sectors,
+                max_per_drillhole=max_per_drillhole,
+                sample_hole_ids=sample_hole_ids,
+            )
+            if len(active_indices) < min_samples:
+                continue
+        else:
+            active_indices = indices[b][valid_mask]
         coords_active = samples_xyz_t[active_indices]
         grades_active = sample_grades[active_indices]
         k_active = len(active_indices)
@@ -2756,13 +3274,18 @@ def simple_kriging_block_estimation(
 
         try:
             weights = np.linalg.solve(K_mat, k0_block)
-            # TODO: Add clipping and renormalization as an option to deal with negative kriging weights
-            # (Deutsch 1996): optionally clip weights < 0 to 0.0 and rescale weights.
+            if clip_negative_weights:
+                weights, _ = _clip_and_renormalize_weights(weights, preserve_sum=True)
+                raw_variance = _compute_quadratic_estimation_variance(
+                    c_vv, weights, K_mat, k0_block
+                )
+            else:
+                # SK block variance: C_bar(V, V) - sum(lambda_i * C_bar(x_i, V))
+                raw_variance = c_vv - np.sum(weights * k0_block)
+
             # SK estimate: m + sum(lambda_i * (Z_i - m))
             residual = grades_active - base_mean
             block_estimates[b] = float(base_mean + np.sum(weights * residual))
-            # SK block variance: C_bar(V, V) - sum(lambda_i * C_bar(x_i, V))
-            raw_variance = c_vv - np.sum(weights * k0_block)
             block_variances[b] = max(0.0, float(raw_variance))
         except np.linalg.LinAlgError:
             continue
@@ -3330,8 +3853,7 @@ def plot_cell_declustering_curve(
     return fig, ax
 
 
-# TODO: is kriging_neighborhood_analysis a better name?
-def kriging_quality_metrics(
+def kriging_neighborhood_analysis(
     kriging_variances: np.ndarray,
     block_dispersion_variance: float,
     lagrange_multipliers: Optional[np.ndarray] = None,
