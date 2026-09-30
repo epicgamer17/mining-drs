@@ -15,6 +15,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from drs_mining.components.estimation import (
+    analyze_crm_standards,
+    plot_crm_control_chart,
+    analyze_analytical_blanks,
+    plot_blanks_performance,
+    analyze_assay_duplicates,
+    plot_duplicate_analysis,
+    generate_qaqc_compliance_summary,
     composite_drillhole_intervals,
     apply_grade_capping,
     exploratory_data_analysis,
@@ -35,6 +42,9 @@ from drs_mining.components.estimation import (
     plot_production_reconciliation,
     cell_declustering,
     is_within_convex_hull,
+    calculate_net_smelter_return,
+    calculate_equivalent_grade,
+    plot_net_smelter_return_breakdown,
 )
 
 
@@ -88,6 +98,41 @@ def generate_synthetic_deposit() -> pd.DataFrame:
     return df
 
 
+def generate_synthetic_qaqc_data(n_samples: int = 650):
+    """Generates synthetic CRM standards, analytical blanks, and duplicate assays."""
+    np.random.seed(101)
+    # Ensure >= 5.2% insertion rate per stream (and > 15.5% overall)
+    n_ctrl = max(30, int(np.ceil(n_samples * 0.052)))
+
+    # 1. CRM Standards: insertions of OREAS-501 (certified mean=1.25%, std=0.04%)
+    crm_grades = np.random.normal(1.249, 0.038, n_ctrl)
+    # Keep within +/-2.5s for compliant pass rate >= 98%
+    crm_grades = np.clip(crm_grades, 1.25 - 2.4 * 0.04, 1.25 + 2.4 * 0.04)
+    crm_df = pd.DataFrame({
+        "standard_id": ["OREAS-501"] * n_ctrl,
+        "grade": crm_grades,
+        "insertion_idx": np.linspace(1, n_samples, n_ctrl, dtype=int),
+    })
+
+    # 2. Analytical Blanks: coarse & pulp blanks (LLD = 0.005% Cu)
+    blank_grades = np.random.uniform(0.001, 0.006, n_ctrl)
+    blanks_df = pd.DataFrame({
+        "sample_type": ["blank"] * n_ctrl,
+        "grade": blank_grades,
+        "insertion_idx": np.linspace(5, n_samples - 5, n_ctrl, dtype=int),
+    })
+
+    # 3. Duplicate Assays: pairs of pulp duplicates
+    orig_grades = np.random.uniform(0.35, 2.80, n_ctrl)
+    dup_grades = orig_grades * np.random.normal(1.0, 0.032, n_ctrl)
+    dup_df = pd.DataFrame({
+        "original": orig_grades,
+        "duplicate": dup_grades,
+    })
+
+    return crm_df, blanks_df, dup_df
+
+
 def main():
     parser = argparse.ArgumentParser(description="End-to-End Resource Estimation Workflow")
     parser.add_argument(
@@ -105,12 +150,80 @@ def main():
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     # -------------------------------------------------------------------------
-    # STAGE 1: DATA PREPARATION (COMPOSITING & CAPPING)
+    # STAGE 0: DRILLHOLE ASSAY QA/QC VERIFICATION (NI 43-101 ITEM 11 & JORC TABLE 1)
     # -------------------------------------------------------------------------
-    print("\n>>> STAGE 1: DATA PREPARATION (Support Effect & Capping)")
+    print("\n>>> STAGE 0: DRILLHOLE ASSAY QA/QC VERIFICATION (NI 43-101 Item 11 & JORC Table 1)")
     raw_df = generate_synthetic_deposit()
     print(f"  • Loaded {len(raw_df)} raw drill core assay intervals across 16 holes.")
     print(f"  • Raw interval lengths: min={raw_df['length'].min():.2f}m, max={raw_df['length'].max():.2f}m.")
+
+    crm_df, blanks_df, dup_df = generate_synthetic_qaqc_data(len(raw_df))
+    certified_vals = {"OREAS-501": {"mean": 1.25, "std": 0.04}}
+
+    # 1. CRM Accuracy & Drift Analysis (Shewhart Control Rules)
+    crm_res = analyze_crm_standards(
+        assay_df=crm_df,
+        standard_id_col="standard_id",
+        grade_col="grade",
+        certified_values=certified_vals,
+        date_or_seq_col="insertion_idx",
+    )
+    print(f"  • CRM Standard OREAS-501: Pass Rate = {crm_res.attrs['overall_pass_rate_pct']:.1f}% ({crm_res.attrs['compliance_verdict']})")
+
+    # 2. Analytical Blanks Carryover & Cross-Contamination Analysis
+    blanks_res = analyze_analytical_blanks(
+        assay_df=blanks_df,
+        blank_flag_col="sample_type",
+        grade_col="grade",
+        detection_limit=0.005,
+        date_or_seq_col="insertion_idx",
+    )
+    print(f"  • Analytical Blanks (LLD=0.005%): Pass Rate = {blanks_res.attrs['pass_rate_pct']:.1f}% ({blanks_res.attrs['compliance_verdict']})")
+
+    # 3. Duplicate Precision Assessment (HARD & RMA Regression)
+    dup_res = analyze_assay_duplicates(
+        duplicate_df=dup_df,
+        original_col="original",
+        duplicate_col="duplicate",
+        pair_type="pulp",
+        detection_limit=0.005,
+    )
+    print(f"  • Pulp Duplicates: {dup_res.attrs['pct_meeting_hard_threshold']:.1f}% meeting HARD <= 10% (Target >= 90%, RMA Slope = {dup_res.attrs['rma_slope']:.3f})")
+
+    # 4. Official QA/QC Compliance Table (NI 43-101 Chapter 11 / JORC Code)
+    qaqc_summary = generate_qaqc_compliance_summary(
+        total_drillhole_samples=len(raw_df),
+        crm_results=crm_res,
+        blanks_results=blanks_res,
+        duplicate_results=dup_res,
+    )
+    print("\n--- NI 43-101 Item 11 QA/QC Insertion & Compliance Summary ---")
+    print(qaqc_summary[["sample_type", "count", "insertion_rate_pct", "pass_rate_pct", "compliance_verdict"]].to_string(index=False))
+
+    # Save Stage 0 Plots
+    if not args.no_plot:
+        fig_crm, _ = plot_crm_control_chart(crm_res, standard_name="OREAS-501", grade_unit="% Cu")
+        crm_path = plots_dir / "workflow_crm_control_chart.png"
+        fig_crm.savefig(crm_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_crm)
+        print(f"  • CRM Shewhart control chart saved to: {crm_path}")
+
+        fig_blk, _ = plot_blanks_performance(blanks_res, grade_unit="% Cu")
+        blk_path = plots_dir / "workflow_blanks_performance.png"
+        fig_blk.savefig(blk_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_blk)
+        print(f"  • Blanks performance chart saved to: {blk_path}")
+
+        fig_dup, _ = plot_duplicate_analysis(dup_res, grade_unit="% Cu")
+        dup_path = plots_dir / "workflow_duplicate_precision.png"
+        fig_dup.savefig(dup_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_dup)
+        print(f"  • Duplicate precision charts saved to: {dup_path}")
+
+    # -------------------------------------------------------------------------
+    # STAGE 1: DATA PREPARATION (COMPOSITING & CAPPING)
+    # -------------------------------------------------------------------------
+    print("\n>>> STAGE 1: DATA PREPARATION (Support Effect & Capping)")
 
     # 1. Down-hole regular compositing to 2.0m with domain boundary constraint
     comp_df = composite_drillhole_intervals(
@@ -351,6 +464,81 @@ def main():
         fig_rev_map.savefig(rev_map_path, dpi=180, bbox_inches="tight")
         plt.close(fig_rev_map)
         print(f"  • Reserve classification map saved to: {rev_map_path}")
+
+    # -------------------------------------------------------------------------
+    # STAGE 4B: POLYMETALLIC VALUATION & NET SMELTER RETURN (CIM §7.2, JORC CL 50)
+    # -------------------------------------------------------------------------
+    print("\n--- Polymetallic Equivalency & Net Smelter Return Valuation ---")
+    # Porphyry Cu-Au co-product: synthesize associated gold grades
+    np.random.seed(99)
+    au_grades = np.maximum(0.05, 0.35 * ok_estimates + np.random.normal(0.0, 0.04, len(ok_estimates)))
+    block_res_df["grade_cu"] = ok_estimates
+    block_res_df["grade_au"] = au_grades
+
+    # 1. JORC Clause 50 Metal Equivalency (CuEq)
+    secondary_cfg = {
+        "Au": {
+            "grade_col": "grade_au",
+            "price": 1900.0,              # $/oz
+            "recovery": 0.75,
+            "conversion_factor": 0.0321507, # g/t to oz/t
+        }
+    }
+    eq_block_df = calculate_equivalent_grade(
+        block_model=block_res_df,
+        primary_commodity="Cu",
+        primary_grade_col="grade_cu",
+        primary_price=3.80,
+        primary_recovery=0.88,
+        secondary_commodities=secondary_cfg,
+        primary_unit_conversion=22.0462,
+    )
+    print(f"  • Primary Metal Grade (Cu) : {eq_block_df.attrs['mean_primary_grade']:.3f}% Cu")
+    print(f"  • Secondary Metal Grade (Au): {block_res_df['grade_au'].mean():.3f} g/t Au")
+    print(f"  • Equivalent Grade (CuEq)  : {eq_block_df.attrs['mean_equivalent_grade']:.3f}% CuEq")
+    print(f"  • JORC Cl. 50 Disclosure   : {eq_block_df.attrs['formula_string']}")
+
+    # 2. CIM MRMR §7.2 Net Smelter Return ($/t)
+    commodities_cfg = {
+        "Cu": {
+            "grade_col": "grade_cu",
+            "price": 3.80,
+            "unit_conversion": 22.0462,
+            "recovery": 0.88,
+            "payability": 0.95,
+            "refining_charge": 0.08,
+            "treatment_charge_per_metal_unit": 0.05,
+        },
+        "Au": {
+            "grade_col": "grade_au",
+            "price": 1900.0,
+            "unit_conversion": 0.0321507,
+            "recovery": 0.75,
+            "payability": 0.90,
+            "refining_charge": 5.0,
+        },
+    }
+    nsr_block_df = calculate_net_smelter_return(
+        block_model=block_res_df,
+        commodities_config=commodities_cfg,
+        royalty_pct=2.0,
+        offsite_costs_per_tonne=2.50,
+        currency="$",
+    )
+    print(f"  • Mean Gross Realized Revenue: ${nsr_block_df.attrs['mean_gross_nsr']:.2f}/t")
+    print(f"  • Mean Net Smelter Return (NSR): ${nsr_block_df.attrs['mean_nsr']:.2f}/t")
+    shares_str = ", ".join([f"{c}: {s:.1f}%" for c, s in nsr_block_df.attrs["commodity_percentage_shares"].items()])
+    print(f"  • Revenue Share by Metal      : {shares_str}")
+
+    if not args.no_plot:
+        fig_nsr, _ = plot_net_smelter_return_breakdown(
+            nsr_block_df,
+            title="Stage 4: Polymetallic Net Smelter Return Breakdown (Cu-Au Deposit)",
+        )
+        nsr_plot_path = plots_dir / "workflow_nsr_breakdown.png"
+        fig_nsr.savefig(nsr_plot_path, dpi=180, bbox_inches="tight")
+        plt.close(fig_nsr)
+        print(f"  • NSR breakdown dashboard saved to: {nsr_plot_path}")
 
     # -------------------------------------------------------------------------
     # STAGE 5: PRODUCTION RECONCILIATION (PARKER F1, F2, F3 FACTORS)

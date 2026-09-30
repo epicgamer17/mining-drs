@@ -6,7 +6,8 @@ from gymnasium import spaces
 import numpy as np
 
 import drs
-from drs import DRSEngine, Telemetry, Processor, Storage, Flow, blend_flows
+from drs import DRSEngine, Telemetry, Processor, Storage
+from drs.material import Flow, blend_flows
 from drs_mining.components import (
     MaterialSource,
     autocorrelated_generator,

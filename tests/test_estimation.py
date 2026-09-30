@@ -2,6 +2,7 @@ import pytest
 import pandas as pd
 import numpy as np
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -53,9 +54,18 @@ from drs_mining.components.estimation import (
     plot_contact_profile,
     reconcile_production_to_reserve,
     plot_production_reconciliation,
-    sequential_gaussian_simulation,
+    normal_score_transform,
+    normal_score_back_transform,
+    lu_gaussian_grid_simulation,
+    lu_gaussian_block_simulation,
+    sequential_gaussian_grid_simulation,
+    sequential_gaussian_block_simulation,
     compute_etype_mtype_maps,
     plot_simulation_realizations_dashboard,
+    check_multigaussian_order_ratios,
+    check_multigaussian_indicators,
+    compute_h_scatter_statistics,
+    plot_multigaussian_diagnostics,
     create_block_model,
     ordinary_kriging_block_estimation,
     simple_kriging_block_estimation,
@@ -74,38 +84,66 @@ from drs_mining.components.estimation import (
     compute_anisotropy_rotation_matrix,
     transform_anisotropic_coordinates,
     compute_anisotropic_distance,
+    calculate_experimental_semivariogram,
+    calculate_directional_semivariograms,
+    calculate_downhole_variogram,
+    fit_variogram_model,
+    plot_variogram_model,
+    _build_multigrid_levels,
+    kriging_cross_validation,
+    plot_cross_validation_diagnostics,
+    compare_model_estimation_methods,
+    analyze_crm_standards,
+    plot_crm_control_chart,
+    analyze_analytical_blanks,
+    plot_blanks_performance,
+    analyze_assay_duplicates,
+    plot_duplicate_analysis,
+    generate_qaqc_compliance_summary,
+    check_simulation_variogram_reproduction,
+    plot_simulation_variogram_reproduction,
+    compute_simulation_grade_tonnage_envelopes,
+    plot_simulation_grade_tonnage_envelopes,
+    drill_spacing_analysis_by_simulation,
+    calculate_net_smelter_return,
+    calculate_equivalent_grade,
+    plot_net_smelter_return_breakdown,
 )
 
 
 @pytest.fixture
 def sample_polygons_df():
     """Sample polygonal reserve table with known values for testing."""
-    return pd.DataFrame({
-        "hole_id": ["DH01", "DH02", "DH03"],
-        "x": [100.0, 200.0, 300.0],
-        "y": [100.0, 200.0, 100.0],
-        "grade": [1.0, 2.0, 0.5],
-        "thickness": [10.0, 10.0, 10.0],
-        "area_m2": [1000.0, 2000.0, 1000.0],
-        "volume_m3": [10000.0, 20000.0, 10000.0],
-        "tonnes": [27000.0, 54000.0, 27000.0],  # 2.7 t/m3 density
-        "contained_metal": [270.0, 1080.0, 135.0],  # tonnes * grade * 0.01
-        "vertices": [
-            [(50, 50), (150, 50), (150, 150), (50, 150)],
-            [(150, 150), (250, 150), (250, 250), (150, 250)],
-            [(250, 50), (350, 50), (350, 150), (250, 150)],
-        ],
-    })
+    return pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH02", "DH03"],
+            "x": [100.0, 200.0, 300.0],
+            "y": [100.0, 200.0, 100.0],
+            "grade": [1.0, 2.0, 0.5],
+            "thickness": [10.0, 10.0, 10.0],
+            "area_m2": [1000.0, 2000.0, 1000.0],
+            "volume_m3": [10000.0, 20000.0, 10000.0],
+            "tonnes": [27000.0, 54000.0, 27000.0],  # 2.7 t/m3 density
+            "contained_metal": [270.0, 1080.0, 135.0],  # tonnes * grade * 0.01
+            "vertices": [
+                [(50, 50), (150, 50), (150, 150), (50, 150)],
+                [(150, 150), (250, 150), (250, 250), (150, 250)],
+                [(250, 50), (350, 50), (350, 150), (250, 150)],
+            ],
+        }
+    )
 
 
 def test_polygonal_estimation_execution():
-    df_holes = pd.DataFrame({
-        "hole_id": ["DH01", "DH02", "DH03"],
-        "x": [100.0, 200.0, 300.0],
-        "y": [100.0, 200.0, 100.0],
-        "grade": [1.2, 0.8, 1.5],
-        "thickness": [15.0, 15.0, 15.0],
-    })
+    df_holes = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH02", "DH03"],
+            "x": [100.0, 200.0, 300.0],
+            "y": [100.0, 200.0, 100.0],
+            "grade": [1.2, 0.8, 1.5],
+            "thickness": [15.0, 15.0, 15.0],
+        }
+    )
     boundary = [(0.0, 0.0), (400.0, 0.0), (400.0, 300.0), (0.0, 300.0)]
     polys = polygonal_estimation(
         df_holes,
@@ -128,17 +166,21 @@ def test_polygonal_estimation_execution():
         max_radius=100.0,
         metal_factor=1e-6,
     )
-    assert np.allclose(polys_gold["contained_metal"], polys["tonnes"] * polys["grade"] * 1e-6)
+    assert np.allclose(
+        polys_gold["contained_metal"], polys["tonnes"] * polys["grade"] * 1e-6
+    )
 
 
 def test_polygonal_estimation_clip_to_convex_hull():
-    df_holes = pd.DataFrame({
-        "hole_id": ["DH01", "DH02", "DH03"],
-        "x": [100.0, 300.0, 200.0],
-        "y": [100.0, 100.0, 200.0],
-        "grade": [1.0, 1.0, 1.0],
-        "thickness": [10.0, 10.0, 10.0],
-    })
+    df_holes = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH02", "DH03"],
+            "x": [100.0, 300.0, 200.0],
+            "y": [100.0, 100.0, 200.0],
+            "grade": [1.0, 1.0, 1.0],
+            "thickness": [10.0, 10.0, 10.0],
+        }
+    )
     boundary = [(0.0, 0.0), (500.0, 0.0), (500.0, 500.0), (0.0, 500.0)]
 
     # 1. Unclipped: polygons expand across entire 500x500 boundary (250,000 m2)
@@ -165,7 +207,7 @@ def test_polygonal_estimation_clip_to_convex_hull():
 
 def test_polygonal_resource_summary(sample_polygons_df):
     summary = polygonal_resource_summary(sample_polygons_df)
-    
+
     assert summary["total_tonnes"] == pytest.approx(108000.0)
     assert summary["total_area_m2"] == pytest.approx(4000.0)
     assert summary["total_volume_m3"] == pytest.approx(40000.0)
@@ -236,7 +278,9 @@ def test_grade_tonnage_table(sample_polygons_df):
         sample_polygons_df, cutoffs=[0.75], external_waste_tonnes=162000.0
     )
     assert "strip_ratio" in gt_pit.columns
-    assert gt_pit.loc[0.75, "strip_ratio"] == pytest.approx((162000.0 + 27000.0) / 81000.0)
+    assert gt_pit.loc[0.75, "strip_ratio"] == pytest.approx(
+        (162000.0 + 27000.0) / 81000.0
+    )
 
 
 def test_plot_polygonal_map(sample_polygons_df):
@@ -253,7 +297,12 @@ def test_inverse_distance_weighting_symmetric():
     grid_points = np.array([[5.0, 5.0], [0.0, 0.0], [100.0, 100.0]])
 
     grades, dists = inverse_distance_weighting(
-        samples_xy, sample_grades, grid_points, power=2.0, k_neighbors=4, max_radius=20.0
+        samples_xy,
+        sample_grades,
+        grid_points,
+        power=2.0,
+        k_neighbors=4,
+        max_radius=20.0,
     )
 
     # Center point is symmetrically equidistant -> exact arithmetic mean = 2.5
@@ -285,11 +334,13 @@ def test_nearest_neighbor_grid_estimation():
 
 def test_is_within_convex_hull():
     samples_xy = np.array([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]])
-    grid_points = np.array([
-        [5.0, 2.0],    # Centroid of triangle -> True
-        [15.0, 15.0],  # Far outside -> False
-        [-1.0, 0.0],   # Just outside -> False
-    ])
+    grid_points = np.array(
+        [
+            [5.0, 2.0],  # Centroid of triangle -> True
+            [15.0, 15.0],  # Far outside -> False
+            [-1.0, 0.0],  # Just outside -> False
+        ]
+    )
     mask = is_within_convex_hull(samples_xy, grid_points)
     assert mask[0] == True
     assert mask[1] == False
@@ -304,7 +355,11 @@ def test_idw_mask_extrapolation():
 
     # Without masking: both points get estimated
     grades_nomask, _ = inverse_distance_weighting(
-        samples_xy, sample_grades, grid_points, max_radius=10.0, mask_extrapolation=False
+        samples_xy,
+        sample_grades,
+        grid_points,
+        max_radius=10.0,
+        mask_extrapolation=False,
     )
     assert not np.isnan(grades_nomask[0])
     assert not np.isnan(grades_nomask[1])
@@ -320,7 +375,9 @@ def test_idw_mask_extrapolation():
 def test_theoretical_covariance():
     h = np.array([0.0, 50.0, 100.0, 150.0])
     # Spherical model: range=100, nugget=0.2, sill=0.8 -> total sill = 1.0
-    cov = _theoretical_covariance(h, model="spherical", nugget=0.2, sill=0.8, range_param=100.0)
+    cov = _theoretical_covariance(
+        h, model="spherical", nugget=0.2, sill=0.8, range_param=100.0
+    )
 
     # At h=0: Covariance = total sill = 1.0
     assert cov[0] == pytest.approx(1.0)
@@ -332,11 +389,15 @@ def test_theoretical_covariance():
     assert cov[3] == pytest.approx(0.0)
 
     # Exponential and Gaussian models run without error
-    cov_exp = _theoretical_covariance(h, model="exponential", nugget=0.1, sill=0.9, range_param=100.0)
+    cov_exp = _theoretical_covariance(
+        h, model="exponential", nugget=0.1, sill=0.9, range_param=100.0
+    )
     assert cov_exp[0] == pytest.approx(1.0)
     assert cov_exp[1] < 1.0
 
-    cov_gau = _theoretical_covariance(h, model="gaussian", nugget=0.1, sill=0.9, range_param=100.0)
+    cov_gau = _theoretical_covariance(
+        h, model="gaussian", nugget=0.1, sill=0.9, range_param=100.0
+    )
     assert cov_gau[0] == pytest.approx(1.0)
     assert cov_gau[1] < 1.0
 
@@ -349,12 +410,14 @@ def test_simple_kriging_collocation_and_reversion():
     sample_grades = np.array([2.0, 4.0])
     mean = 3.0
 
-    grid_points = np.array([
-        [0.0, 0.0],     # Exact match with sample 0
-        [10.0, 0.0],    # Exact match with sample 1
-        [5.0, 0.0],     # Symmetrical midpoint
-        [1000.0, 0.0],  # Far beyond range
-    ])
+    grid_points = np.array(
+        [
+            [0.0, 0.0],  # Exact match with sample 0
+            [10.0, 0.0],  # Exact match with sample 1
+            [5.0, 0.0],  # Symmetrical midpoint
+            [1000.0, 0.0],  # Far beyond range
+        ]
+    )
 
     estimates, variances = simple_kriging_grid_estimation(
         samples_xy,
@@ -386,10 +449,12 @@ def test_simple_kriging_collocation_and_reversion():
 def test_simple_kriging_mask_extrapolation():
     samples_xy = np.array([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]])
     sample_grades = np.array([1.0, 2.0, 3.0])
-    grid_points = np.array([
-        [5.0, 2.0],     # Inside triangle hull
-        [5.0, -5.0],    # Outside hull
-    ])
+    grid_points = np.array(
+        [
+            [5.0, 2.0],  # Inside triangle hull
+            [5.0, -5.0],  # Outside hull
+        ]
+    )
 
     # Unmasked: both evaluated
     est_unmasked, var_unmasked = simple_kriging_grid_estimation(
@@ -424,12 +489,14 @@ def test_ordinary_kriging_collocation_and_unbiasedness():
     samples_xy = np.array([[0.0, 0.0], [10.0, 0.0]])
     sample_grades = np.array([2.0, 4.0])
 
-    grid_points = np.array([
-        [0.0, 0.0],    # Exact match with sample 0
-        [10.0, 0.0],   # Exact match with sample 1
-        [5.0, 0.0],    # Symmetrical midpoint
-        [50.0, 0.0],   # Far point within search
-    ])
+    grid_points = np.array(
+        [
+            [0.0, 0.0],  # Exact match with sample 0
+            [10.0, 0.0],  # Exact match with sample 1
+            [5.0, 0.0],  # Symmetrical midpoint
+            [50.0, 0.0],  # Far point within search
+        ]
+    )
 
     estimates, variances = ordinary_kriging_grid_estimation(
         samples_xy,
@@ -456,11 +523,13 @@ def test_ordinary_kriging_collocation_and_unbiasedness():
 def test_ordinary_kriging_max_radius_and_mask_extrapolation():
     samples_xy = np.array([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]])
     sample_grades = np.array([1.0, 2.0, 3.0])
-    grid_points = np.array([
-        [5.0, 2.0],     # Inside triangle hull
-        [5.0, -5.0],    # Outside hull
-        [100.0, 100.0], # Far beyond max_radius
-    ])
+    grid_points = np.array(
+        [
+            [5.0, 2.0],  # Inside triangle hull
+            [5.0, -5.0],  # Outside hull
+            [100.0, 100.0],  # Far beyond max_radius
+        ]
+    )
 
     # Unmasked with max_radius: far point gets NaN, others estimated
     est, var = ordinary_kriging_grid_estimation(
@@ -492,10 +561,12 @@ def test_ordinary_kriging_max_radius_and_mask_extrapolation():
 
 
 def test_plot_grade_tonnage_curve_single_table():
-    df = pd.DataFrame({
-        "grade": [0.5, 0.8, 1.2, 1.5, 2.0],
-        "tonnes": [10000.0, 10000.0, 10000.0, 10000.0, 10000.0],
-    })
+    df = pd.DataFrame(
+        {
+            "grade": [0.5, 0.8, 1.2, 1.5, 2.0],
+            "tonnes": [10000.0, 10000.0, 10000.0, 10000.0, 10000.0],
+        }
+    )
     gt = grade_tonnage_table(df, cutoffs=[0.0, 0.5, 1.0, 1.5])
 
     fig, ax = plot_grade_tonnage_curve(
@@ -511,14 +582,18 @@ def test_plot_grade_tonnage_curve_single_table():
 
 
 def test_plot_grade_tonnage_curve_multi_model():
-    df1 = pd.DataFrame({
-        "grade": [0.5, 0.8, 1.2, 1.5],
-        "tonnes": [10000.0, 10000.0, 10000.0, 10000.0],
-    })
-    df2 = pd.DataFrame({
-        "grade": [0.6, 0.9, 1.1, 1.4],
-        "tonnes": [10000.0, 10000.0, 10000.0, 10000.0],
-    })
+    df1 = pd.DataFrame(
+        {
+            "grade": [0.5, 0.8, 1.2, 1.5],
+            "tonnes": [10000.0, 10000.0, 10000.0, 10000.0],
+        }
+    )
+    df2 = pd.DataFrame(
+        {
+            "grade": [0.6, 0.9, 1.1, 1.4],
+            "tonnes": [10000.0, 10000.0, 10000.0, 10000.0],
+        }
+    )
     gt1 = grade_tonnage_table(df1, cutoffs=[0.0, 0.5, 1.0])
     gt2 = grade_tonnage_table(df2, cutoffs=[0.0, 0.5, 1.0])
 
@@ -545,11 +620,13 @@ def test_classify_resources_by_drill_spacing():
     # pt0: close to all 3 samples (at (15, 20), dists to all <= 20)
     # pt1: close to 1 sample within 25m, but 3 samples within 50m (at (10, 50))
     # pt2: far from all samples (at (100, 100))
-    pts = np.array([
-        [15.0, 20.0],
-        [10.0, 50.0],
-        [100.0, 100.0],
-    ])
+    pts = np.array(
+        [
+            [15.0, 20.0],
+            [10.0, 50.0],
+            [100.0, 100.0],
+        ]
+    )
 
     # 1. Standard classification with min_holes_measured=3, min_holes_indicated=2
     cats = classify_resources_by_drill_spacing(
@@ -561,9 +638,9 @@ def test_classify_resources_by_drill_spacing():
         min_holes_indicated=2,
         max_radius_inferred=80.0,
     )
-    assert cats[0] == "Measured"     # 3 samples within 25m
-    assert cats[1] == "Indicated"    # 2 samples within 50m (samples 0 and 1)
-    assert cats[2] == "Unclassified" # >80m from all samples
+    assert cats[0] == "Measured"  # 3 samples within 25m
+    assert cats[1] == "Indicated"  # 2 samples within 50m (samples 0 and 1)
+    assert cats[2] == "Unclassified"  # >80m from all samples
 
     # 2. When max_radius_inferred is None, pt2 defaults to Inferred
     cats_inf = classify_resources_by_drill_spacing(
@@ -587,8 +664,10 @@ def test_classify_resources_by_drill_spacing():
         min_holes_indicated=2,
         is_interpolated=np.array([False, True, False]),
     )
-    assert cats_masked[0] == "Inferred"  # Even though close to 3 holes, not interpolated -> capped at Inferred
-    assert cats_masked[1] == "Indicated" # Interpolated and satisfies Indicated
+    assert (
+        cats_masked[0] == "Inferred"
+    )  # Even though close to 3 holes, not interpolated -> capped at Inferred
+    assert cats_masked[1] == "Indicated"  # Interpolated and satisfies Indicated
 
     # 4. 3D grid points support
     pts_3d = np.array([[10.0, 10.0, 5.0], [50.0, 50.0, 5.0]])
@@ -620,7 +699,10 @@ def test_classify_resources_by_drill_spacing():
         classify_resources_by_drill_spacing(pts, samples)  # missing required radii
     with pytest.raises(ValueError, match="must have shape"):
         classify_resources_by_drill_spacing(
-            pts, np.array([[10.0, 10.0, 10.0]]), max_radius_measured=25.0, max_radius_indicated=50.0
+            pts,
+            np.array([[10.0, 10.0, 10.0]]),
+            max_radius_measured=25.0,
+            max_radius_indicated=50.0,
         )
     with pytest.raises(ValueError, match="Search radii"):
         classify_resources_by_drill_spacing(
@@ -632,7 +714,12 @@ def test_classify_resources_by_drill_spacing():
         )
     with pytest.raises(ValueError, match=r"min_holes_measured .* must be >="):
         classify_resources_by_drill_spacing(
-            pts, samples, max_radius_measured=25.0, max_radius_indicated=50.0, min_holes_measured=1, min_holes_indicated=3
+            pts,
+            samples,
+            max_radius_measured=25.0,
+            max_radius_indicated=50.0,
+            min_holes_measured=1,
+            min_holes_indicated=3,
         )
 
 
@@ -648,10 +735,12 @@ def test_classify_resources_by_sor():
         min_kriging_efficiency=0.0,
     )
 
-    assert cats[0] == "Measured"      # SoR 0.95, KE 0.70
-    assert cats[1] == "Indicated"     # SoR 0.65, KE 0.40
-    assert cats[2] == "Inferred"      # SoR 0.35
-    assert cats[3] == "Measured"      # SoR 1.20 >= threshold_measured -> Measured (no default cap)
+    assert cats[0] == "Measured"  # SoR 0.95, KE 0.70
+    assert cats[1] == "Indicated"  # SoR 0.65, KE 0.40
+    assert cats[2] == "Inferred"  # SoR 0.35
+    assert (
+        cats[3] == "Measured"
+    )  # SoR 1.20 >= threshold_measured -> Measured (no default cap)
     assert cats[4] == "Unclassified"  # NaN SoR
 
     # With explicit max_slope_measured=1.05 cap:
@@ -680,14 +769,31 @@ def test_classify_resources_by_sor():
     # Validations
     with pytest.raises(TypeError):
         classify_resources_by_sor(sor)  # missing required thresholds
-    assert len(classify_resources_by_sor(np.array([]), threshold_measured=0.80, threshold_indicated=0.50)) == 0
+    assert (
+        len(
+            classify_resources_by_sor(
+                np.array([]), threshold_measured=0.80, threshold_indicated=0.50
+            )
+        )
+        == 0
+    )
     with pytest.raises(ValueError, match=r"threshold_measured .* must be >"):
-        classify_resources_by_sor(sor, threshold_measured=0.40, threshold_indicated=0.60)
+        classify_resources_by_sor(
+            sor, threshold_measured=0.40, threshold_indicated=0.60
+        )
     with pytest.raises(ValueError, match=r"max_slope_measured .* must be >="):
-        classify_resources_by_sor(sor, threshold_measured=0.80, threshold_indicated=0.50, max_slope_measured=0.75)
+        classify_resources_by_sor(
+            sor,
+            threshold_measured=0.80,
+            threshold_indicated=0.50,
+            max_slope_measured=0.75,
+        )
     with pytest.raises(ValueError, match="Shape mismatch"):
         classify_resources_by_sor(
-            sor, threshold_measured=0.80, threshold_indicated=0.50, kriging_efficiencies=np.array([0.5, 0.5])
+            sor,
+            threshold_measured=0.80,
+            threshold_indicated=0.50,
+            kriging_efficiencies=np.array([0.5, 0.5]),
         )
 
 
@@ -701,12 +807,12 @@ def test_classify_resources_by_kriging_variance():
         variance_threshold_inferred=0.70,
     )
 
-    assert cats[0] == "Measured"     # 0.05 <= 0.10
-    assert cats[1] == "Indicated"    # 0.10 < 0.15 <= 0.30
-    assert cats[2] == "Inferred"     # 0.30 < 0.45 <= 0.70
-    assert cats[3] == "Unclassified" # 0.85 > 0.70
-    assert cats[4] == "Unclassified" # Negative variance
-    assert cats[5] == "Unclassified" # NaN variance
+    assert cats[0] == "Measured"  # 0.05 <= 0.10
+    assert cats[1] == "Indicated"  # 0.10 < 0.15 <= 0.30
+    assert cats[2] == "Inferred"  # 0.30 < 0.45 <= 0.70
+    assert cats[3] == "Unclassified"  # 0.85 > 0.70
+    assert cats[4] == "Unclassified"  # Negative variance
+    assert cats[5] == "Unclassified"  # NaN variance
 
     # Without inferred threshold, 0.85 defaults to Inferred
     cats_no_inf = classify_resources_by_kriging_variance(
@@ -719,22 +825,34 @@ def test_classify_resources_by_kriging_variance():
 
     # Validations
     assert len(classify_resources_by_kriging_variance(np.array([]), 0.1, 0.2)) == 0
-    with pytest.raises(ValueError, match="Variance thresholds must be strictly positive"):
+    with pytest.raises(
+        ValueError, match="Variance thresholds must be strictly positive"
+    ):
         classify_resources_by_kriging_variance(variances, -0.1, 0.2)
     with pytest.raises(ValueError, match=r"variance_threshold_measured .* must be <"):
         classify_resources_by_kriging_variance(variances, 0.3, 0.2)
     with pytest.raises(ValueError, match=r"variance_threshold_inferred .* must be >"):
-        classify_resources_by_kriging_variance(variances, 0.1, 0.3, variance_threshold_inferred=0.25)
+        classify_resources_by_kriging_variance(
+            variances, 0.1, 0.3, variance_threshold_inferred=0.25
+        )
 
 
 def test_classify_mineral_resources_unified():
     # Grid points and samples
     samples = np.array([[10.0, 10.0], [10.0, 30.0], [30.0, 20.0]])
-    pts = np.array([
-        [15.0, 20.0],  # Close to 3 samples -> Spacing: Measured (3)
-        [10.0, 50.0],  # Close to 1 sample within 25m, 3 samples within 50m -> Spacing: Indicated (2)
-        [80.0, 80.0],  # Extrapolated (>50m from all samples) -> Spacing: Inferred (1)
-    ])
+    pts = np.array(
+        [
+            [15.0, 20.0],  # Close to 3 samples -> Spacing: Measured (3)
+            [
+                10.0,
+                50.0,
+            ],  # Close to 1 sample within 25m, 3 samples within 50m -> Spacing: Indicated (2)
+            [
+                80.0,
+                80.0,
+            ],  # Extrapolated (>50m from all samples) -> Spacing: Inferred (1)
+        ]
+    )
 
     # 1. Pure drill spacing mode
     cats_spacing = classify_mineral_resources(
@@ -789,7 +907,9 @@ def test_classify_mineral_resources_unified():
         kriging_efficiencies=ke,
     )
     assert cats_triple[0] == "Measured"
-    assert cats_triple[1] == "Inferred"  # Downgraded from Indicated to Inferred because SoR < 0.50
+    assert (
+        cats_triple[1] == "Inferred"
+    )  # Downgraded from Indicated to Inferred because SoR < 0.50
 
     # 4. Extrapolation mask
     cats_interp = classify_mineral_resources(
@@ -801,18 +921,31 @@ def test_classify_mineral_resources_unified():
         min_holes_indicated=2,
         is_interpolated=np.array([False, True, True]),
     )
-    assert cats_interp[0] == "Inferred"  # Outside interpolation mask -> capped at Inferred
+    assert (
+        cats_interp[0] == "Inferred"
+    )  # Outside interpolation mask -> capped at Inferred
 
     # 5. Error handling and validations
     with pytest.raises(ValueError, match="At least one classification criterion"):
         classify_mineral_resources(grid_points=pts)
-    with pytest.raises(ValueError, match="max_radius_measured and max_radius_indicated must be explicitly specified"):
+    with pytest.raises(
+        ValueError,
+        match="max_radius_measured and max_radius_indicated must be explicitly specified",
+    ):
         classify_mineral_resources(grid_points=pts, samples_xy=samples)
-    with pytest.raises(ValueError, match="sor_threshold_measured and sor_threshold_indicated must be explicitly specified"):
+    with pytest.raises(
+        ValueError,
+        match="sor_threshold_measured and sor_threshold_indicated must be explicitly specified",
+    ):
         classify_mineral_resources(grid_points=pts, slopes_of_regression=sor)
-    with pytest.raises(ValueError, match="variance_threshold_measured and variance_threshold_indicated must be specified"):
+    with pytest.raises(
+        ValueError,
+        match="variance_threshold_measured and variance_threshold_indicated must be specified",
+    ):
         classify_mineral_resources(grid_points=pts, kriging_variances=ok_vars)
-    with pytest.raises(ValueError, match="kriging_variances must be provided when variance thresholds"):
+    with pytest.raises(
+        ValueError, match="kriging_variances must be provided when variance thresholds"
+    ):
         classify_mineral_resources(grid_points=pts, variance_threshold_measured=0.10)
     with pytest.raises(ValueError, match="Shape mismatch"):
         classify_mineral_resources(
@@ -823,7 +956,17 @@ def test_classify_mineral_resources_unified():
         )
 
     # Empty inputs
-    assert len(classify_mineral_resources(np.empty((0, 2)), samples_xy=samples, max_radius_measured=25.0, max_radius_indicated=50.0)) == 0
+    assert (
+        len(
+            classify_mineral_resources(
+                np.empty((0, 2)),
+                samples_xy=samples,
+                max_radius_measured=25.0,
+                max_radius_indicated=50.0,
+            )
+        )
+        == 0
+    )
 
 
 def test_smooth_resource_categories_spotted_dog():
@@ -854,11 +997,15 @@ def test_smooth_resource_categories_spotted_dog():
     cats_hole[0:4] = "Measured"
     cats_hole[5:9] = "Measured"
     cats_hole[4] = "Inferred"  # Center is Inferred
-    smoothed_hole = smooth_resource_categories(pts, cats_hole, smoothing_radius=15.0, downgrade_isolated=True)
+    smoothed_hole = smooth_resource_categories(
+        pts, cats_hole, smoothing_radius=15.0, downgrade_isolated=True
+    )
     assert smoothed_hole[4] == "Inferred"  # Preserves conservative classification
 
     # If downgrade_isolated=False, full mode filter can fill the hole
-    smoothed_filled = smooth_resource_categories(pts, cats_hole, smoothing_radius=15.0, downgrade_isolated=False)
+    smoothed_filled = smooth_resource_categories(
+        pts, cats_hole, smoothing_radius=15.0, downgrade_isolated=False
+    )
     assert smoothed_filled[4] == "Measured"
 
     # 3. Minimum cluster size filtering:
@@ -871,11 +1018,20 @@ def test_smooth_resource_categories_spotted_dog():
     assert smoothed_clust[1] == "Indicated"
 
     # 4. 3D block model coordinates support:
-    pts3d = np.array([
-        [0, 0, 0], [10, 0, 0], [20, 0, 0],
-        [0, 10, 0], [10, 10, 0], [20, 10, 0],
-        [0, 20, 0], [10, 20, 0], [20, 20, 0],
-    ], dtype=float)
+    pts3d = np.array(
+        [
+            [0, 0, 0],
+            [10, 0, 0],
+            [20, 0, 0],
+            [0, 10, 0],
+            [10, 10, 0],
+            [20, 10, 0],
+            [0, 20, 0],
+            [10, 20, 0],
+            [20, 20, 0],
+        ],
+        dtype=float,
+    )
     smoothed_3d = smooth_resource_categories(pts3d, cats, smoothing_radius=15.0)
     assert smoothed_3d[4] == "Indicated"
 
@@ -893,11 +1049,19 @@ def test_smooth_resource_categories_spotted_dog():
 
 def test_classify_resources_with_spotted_dog_smoothing():
     # 3x3 block model
-    pts = np.array([
-        [0.0, 0.0], [10.0, 0.0], [20.0, 0.0],
-        [0.0, 10.0], [10.0, 10.0], [20.0, 10.0],
-        [0.0, 20.0], [10.0, 20.0], [20.0, 20.0],
-    ])
+    pts = np.array(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [20.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 10.0],
+            [20.0, 10.0],
+            [0.0, 20.0],
+            [10.0, 20.0],
+            [20.0, 20.0],
+        ]
+    )
     # Center block has low kriging variance (0.05 <= 0.10 -> Measured), outer blocks have 0.20 (Indicated)
     vars_grid = np.array([0.20, 0.20, 0.20, 0.20, 0.05, 0.20, 0.20, 0.20, 0.20])
 
@@ -1021,19 +1185,25 @@ def test_plot_swath_analysis_dual_axis():
     np.random.seed(42)
     x_coords = np.linspace(50, 350, 60)
     y_coords = np.linspace(100, 400, 60)
-    block_model = pd.DataFrame({
-        "x": x_coords,
-        "y": y_coords,
-        "grade": 0.8 + 0.3 * np.sin(x_coords / 50.0),
-        "nn_grade": 0.8 + 0.35 * np.sin(x_coords / 50.0) + np.random.normal(0, 0.05, len(x_coords)),
-        "tonnes": 50000.0,
-    })
+    block_model = pd.DataFrame(
+        {
+            "x": x_coords,
+            "y": y_coords,
+            "grade": 0.8 + 0.3 * np.sin(x_coords / 50.0),
+            "nn_grade": 0.8
+            + 0.35 * np.sin(x_coords / 50.0)
+            + np.random.normal(0, 0.05, len(x_coords)),
+            "tonnes": 50000.0,
+        }
+    )
 
-    drillholes = pd.DataFrame({
-        "x": [80.0, 150.0, 220.0, 290.0],
-        "y": [120.0, 200.0, 280.0, 350.0],
-        "grade": [0.95, 1.15, 0.75, 0.55],
-    })
+    drillholes = pd.DataFrame(
+        {
+            "x": [80.0, 150.0, 220.0, 290.0],
+            "y": [120.0, 200.0, 280.0, 350.0],
+            "grade": [0.95, 1.15, 0.75, 0.55],
+        }
+    )
 
     # Test along Easting (X)
     fig_x, ax_x = plot_swath_analysis(
@@ -1068,13 +1238,27 @@ def test_plot_swath_analysis_dual_axis():
 
 def test_format_resource_statement_sig_figs_and_footnotes():
     # Synthetic block model with Measured, Indicated, and Inferred blocks
-    block_df = pd.DataFrame({
-        "category": [
-            "Measured", "Measured", "Indicated", "Indicated", "Inferred", "Inferred"
-        ],
-        "grade": [1.234, 1.456, 0.876, 0.954, 0.654, 0.432],
-        "tonnes": [1_000_000.0, 2_450_000.0, 3_120_000.0, 1_850_000.0, 4_560_000.0, 2_100_000.0],
-    })
+    block_df = pd.DataFrame(
+        {
+            "category": [
+                "Measured",
+                "Measured",
+                "Indicated",
+                "Indicated",
+                "Inferred",
+                "Inferred",
+            ],
+            "grade": [1.234, 1.456, 0.876, 0.954, 0.654, 0.432],
+            "tonnes": [
+                1_000_000.0,
+                2_450_000.0,
+                3_120_000.0,
+                1_850_000.0,
+                4_560_000.0,
+                2_100_000.0,
+            ],
+        }
+    )
 
     statement = format_resource_statement(
         block_df,
@@ -1093,7 +1277,10 @@ def test_format_resource_statement_sig_figs_and_footnotes():
     assert isinstance(statement, pd.DataFrame)
     assert len(statement) == 4  # Measured, Indicated, Measured + Indicated, Inferred
     assert list(statement["Classification"]) == [
-        "Measured", "Indicated", "Measured + Indicated", "Inferred"
+        "Measured",
+        "Indicated",
+        "Measured + Indicated",
+        "Inferred",
     ]
 
     # Check footnotes metadata
@@ -1120,10 +1307,15 @@ def test_format_resource_statement_sig_figs_and_footnotes():
         point_of_reference="Run-of-Mine / Plant feed",
     )
     assert stmt_custom_por.attrs["point_of_reference"] == "Run-of-Mine / Plant feed"
-    assert any("Point of Reference: Run-of-Mine / Plant feed" in fn for fn in stmt_custom_por.attrs["footnotes"])
+    assert any(
+        "Point of Reference: Run-of-Mine / Plant feed" in fn
+        for fn in stmt_custom_por.attrs["footnotes"]
+    )
 
     # Test invalid point of reference raises ValueError
-    with pytest.raises(ValueError, match="point_of_reference must be a non-empty string"):
+    with pytest.raises(
+        ValueError, match="point_of_reference must be a non-empty string"
+    ):
         format_resource_statement(block_df, cutoff_grade=0.50, point_of_reference="")
 
     # Test inclusive reporting basis
@@ -1133,25 +1325,33 @@ def test_format_resource_statement_sig_figs_and_footnotes():
         reporting_basis="inclusive",
     )
     assert stmt_incl.attrs["reporting_basis"] == "inclusive"
-    assert any("inclusive of Mineral Reserves" in fn for fn in stmt_incl.attrs["footnotes"])
+    assert any(
+        "inclusive of Mineral Reserves" in fn for fn in stmt_incl.attrs["footnotes"]
+    )
 
     # Test invalid reporting basis raises ValueError
     with pytest.raises(ValueError, match="Invalid reporting_basis"):
-        format_resource_statement(block_df, cutoff_grade=0.50, reporting_basis="invalid_basis")
+        format_resource_statement(
+            block_df, cutoff_grade=0.50, reporting_basis="invalid_basis"
+        )
 
 
 def test_cell_declustering_removes_clustering_bias():
     # 4 clustered drillholes in high-grade sweet spot (grade=2.0)
     # 1 isolated drillhole in background (grade=0.5)
-    df = pd.DataFrame({
-        "x": [10.0, 11.0, 10.0, 12.0, 100.0],
-        "y": [10.0, 10.0, 11.0, 11.0, 100.0],
-        "grade": [2.0, 2.0, 2.0, 2.0, 0.5],
-    })
+    df = pd.DataFrame(
+        {
+            "x": [10.0, 11.0, 10.0, 12.0, 100.0],
+            "y": [10.0, 10.0, 11.0, 11.0, 100.0],
+            "grade": [2.0, 2.0, 2.0, 2.0, 0.5],
+        }
+    )
     naive_mean = df["grade"].mean()  # (4*2.0 + 0.5) / 5 = 1.70
 
     cell_sizes = [5.0, 15.0, 25.0, 50.0, 80.0, 150.0]
-    weights, sensitivity_df, opt_cs = cell_declustering(df, cell_sizes=cell_sizes, min_mean=True)
+    weights, sensitivity_df, opt_cs = cell_declustering(
+        df, cell_sizes=cell_sizes, min_mean=True
+    )
 
     # Weights must sum to 1.0
     assert np.isclose(weights.sum(), 1.0)
@@ -1233,13 +1433,23 @@ def test_cell_declustering_3d_vertical_clustering():
 
 def test_cell_declustering_domain_segregation():
     """Verifies domain segregation in cell declustering per CIM MRMR §4.2."""
-    df = pd.DataFrame({
-        "x": [10.0, 11.0, 10.0, 100.0, 10.0, 12.0, 100.0],
-        "y": [10.0, 10.0, 11.0, 100.0, 10.0, 11.0, 100.0],
-        "z": [10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0],
-        "grade": [2.5, 2.5, 2.5, 0.6, 1.8, 1.8, 0.4],
-        "domain": ["Oxide", "Oxide", "Oxide", "Oxide", "Sulphide", "Sulphide", "Sulphide"],
-    })
+    df = pd.DataFrame(
+        {
+            "x": [10.0, 11.0, 10.0, 100.0, 10.0, 12.0, 100.0],
+            "y": [10.0, 10.0, 11.0, 100.0, 10.0, 11.0, 100.0],
+            "z": [10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0],
+            "grade": [2.5, 2.5, 2.5, 0.6, 1.8, 1.8, 0.4],
+            "domain": [
+                "Oxide",
+                "Oxide",
+                "Oxide",
+                "Oxide",
+                "Sulphide",
+                "Sulphide",
+                "Sulphide",
+            ],
+        }
+    )
 
     weights, sensitivity_df, opt_cs = cell_declustering(
         df,
@@ -1257,11 +1467,13 @@ def test_cell_declustering_domain_segregation():
 
 
 def test_cell_declustering_validations():
-    df = pd.DataFrame({
-        "x": [10.0, 20.0],
-        "y": [10.0, 20.0],
-        "grade": [1.0, 2.0],
-    })
+    df = pd.DataFrame(
+        {
+            "x": [10.0, 20.0],
+            "y": [10.0, 20.0],
+            "grade": [1.0, 2.0],
+        }
+    )
     # Missing z_col
     with pytest.raises(ValueError, match="Z coordinate column 'nonexistent' not found"):
         cell_declustering(df, z_col="nonexistent")
@@ -1279,13 +1491,14 @@ def test_cell_declustering_validations():
         cell_declustering(df, z_col="y", cell_sizes=[(10.0, 10.0, -5.0)])
 
 
-
 def test_plot_cell_declustering_curve():
-    sensitivity_df = pd.DataFrame({
-        "cell_size": [10.0, 25.0, 50.0, 100.0],
-        "declustered_mean": [1.60, 1.35, 1.25, 1.50],
-        "declustered_variance": [0.35, 0.40, 0.45, 0.38],
-    })
+    sensitivity_df = pd.DataFrame(
+        {
+            "cell_size": [10.0, 25.0, 50.0, 100.0],
+            "declustered_mean": [1.60, 1.35, 1.25, 1.50],
+            "declustered_variance": [0.35, 0.40, 0.45, 0.38],
+        }
+    )
 
     fig, ax = plot_cell_declustering_curve(
         sensitivity_df,
@@ -1307,7 +1520,13 @@ def test_kriging_twin_holes_duplicate_handling():
 
     # Simple Kriging must not raise LinAlgError
     sk_est, sk_var = simple_kriging_grid_estimation(
-        samples_xy, sample_grades, target, mean=2.0, sill=0.5, nugget=0.1, range_param=50.0
+        samples_xy,
+        sample_grades,
+        target,
+        mean=2.0,
+        sill=0.5,
+        nugget=0.1,
+        range_param=50.0,
     )
     assert not np.isnan(sk_est[0])
 
@@ -1327,11 +1546,15 @@ def test_kriging_missing_required_sill_and_range_raises_type_error():
 
     # Simple kriging requires sill and range_param
     with pytest.raises(TypeError):
-        simple_kriging_grid_estimation(samples_xy, grades, target, mean=1.5)  # Missing sill & range_param
+        simple_kriging_grid_estimation(
+            samples_xy, grades, target, mean=1.5
+        )  # Missing sill & range_param
 
     # Ordinary kriging requires sill and range_param
     with pytest.raises(TypeError):
-        ordinary_kriging_grid_estimation(samples_xy, grades, target)  # Missing sill & range_param
+        ordinary_kriging_grid_estimation(
+            samples_xy, grades, target
+        )  # Missing sill & range_param
 
 
 def test_calculate_cut_off_grade_breakeven_and_marginal():
@@ -1455,7 +1678,7 @@ def test_calculate_cut_off_grade_breakeven_and_marginal():
         mining_cost=2.50,
         commodity_price=3.80,
         selling_cost=0.30,  # $0.30/lb deduction
-        royalty_pct=2.0,    # 2% NSR royalty
+        royalty_pct=2.0,  # 2% NSR royalty
         metallurgical_recovery=88.0,
         payable_metal_factor=1.0,
         metal_conversion_factor=22.0462,
@@ -1465,39 +1688,71 @@ def test_calculate_cut_off_grade_breakeven_and_marginal():
     # Validation errors
     with pytest.raises(ValueError, match="negative"):
         calculate_cut_off_grade(
-            processing_cost=-5.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95
+            processing_cost=-5.0,
+            ga_cost=2.0,
+            commodity_price=3.80,
+            metallurgical_recovery=88.0,
+            payable_metal_factor=0.95,
         )
     with pytest.raises(ValueError, match="positive"):
         calculate_cut_off_grade(
-            processing_cost=12.0, ga_cost=2.0, commodity_price=-3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95
+            processing_cost=12.0,
+            ga_cost=2.0,
+            commodity_price=-3.80,
+            metallurgical_recovery=88.0,
+            payable_metal_factor=0.95,
         )
     with pytest.raises(ValueError, match="payable_metal_factor"):
         calculate_cut_off_grade(
-            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.0
+            processing_cost=12.0,
+            ga_cost=2.0,
+            commodity_price=3.80,
+            metallurgical_recovery=88.0,
+            payable_metal_factor=0.0,
         )
     with pytest.raises(ValueError, match="payable_metal_factor"):
         calculate_cut_off_grade(
-            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=150.0
+            processing_cost=12.0,
+            ga_cost=2.0,
+            commodity_price=3.80,
+            metallurgical_recovery=88.0,
+            payable_metal_factor=150.0,
         )
     with pytest.raises(ValueError, match="(?i)sustaining capital"):
         calculate_cut_off_grade(
-            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95,
-            sustaining_capital=-1.0
+            processing_cost=12.0,
+            ga_cost=2.0,
+            commodity_price=3.80,
+            metallurgical_recovery=88.0,
+            payable_metal_factor=0.95,
+            sustaining_capital=-1.0,
         )
     with pytest.raises(ValueError, match="mining_dilution_pct"):
         calculate_cut_off_grade(
-            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95,
-            mining_dilution_pct=-5.0
+            processing_cost=12.0,
+            ga_cost=2.0,
+            commodity_price=3.80,
+            metallurgical_recovery=88.0,
+            payable_metal_factor=0.95,
+            mining_dilution_pct=-5.0,
         )
     with pytest.raises(ValueError, match="mining_dilution_pct"):
         calculate_cut_off_grade(
-            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95,
-            mining_dilution_pct=100.0
+            processing_cost=12.0,
+            ga_cost=2.0,
+            commodity_price=3.80,
+            metallurgical_recovery=88.0,
+            payable_metal_factor=0.95,
+            mining_dilution_pct=100.0,
         )
     with pytest.raises(ValueError, match="dilution_grade"):
         calculate_cut_off_grade(
-            processing_cost=12.0, ga_cost=2.0, commodity_price=3.80, metallurgical_recovery=88.0, payable_metal_factor=0.95,
-            dilution_grade=-0.1
+            processing_cost=12.0,
+            ga_cost=2.0,
+            commodity_price=3.80,
+            metallurgical_recovery=88.0,
+            payable_metal_factor=0.95,
+            dilution_grade=-0.1,
         )
 
 
@@ -1553,11 +1808,13 @@ def test_cut_off_grade_breakdown():
 
 def test_convert_resource_to_reserve_strict_inferred_exclusion_and_modifying_factors():
     # 4 blocks: Measured, Indicated, Inferred, and low-grade Measured
-    resource_df = pd.DataFrame({
-        "category": ["Measured", "Indicated", "Inferred", "Measured"],
-        "grade": [1.20, 0.90, 1.50, 0.30],  # 0.30 is below cutoff
-        "tonnes": [1000.0, 2000.0, 5000.0, 1000.0],
-    })
+    resource_df = pd.DataFrame(
+        {
+            "category": ["Measured", "Indicated", "Inferred", "Measured"],
+            "grade": [1.20, 0.90, 1.50, 0.30],  # 0.30 is below cutoff
+            "tonnes": [1000.0, 2000.0, 5000.0, 1000.0],
+        }
+    )
 
     cutoff = 0.50
     dilution_pct = 10.0  # 10% dilution with 0.0% grade
@@ -1580,7 +1837,10 @@ def test_convert_resource_to_reserve_strict_inferred_exclusion_and_modifying_fac
 
     # 3. Verification of category mapping:
     # Measured -> Proven Reserve, Indicated -> Probable Reserve
-    assert list(reserve_df["reserve_category"]) == ["Proven Reserve", "Probable Reserve"]
+    assert list(reserve_df["reserve_category"]) == [
+        "Proven Reserve",
+        "Probable Reserve",
+    ]
 
     # 4. Verification of Modifying Factors on Block 0 (Measured: 1000t in-situ, 1.20% grade):
     # Dilution: T_dil = 1000 * 1.10 = 1100t, g_dil = (1000 * 1.20 + 100 * 0.0) / 1100 = 1.0909%
@@ -1592,7 +1852,9 @@ def test_convert_resource_to_reserve_strict_inferred_exclusion_and_modifying_fac
 
     # Missing required modifying factor raises TypeError
     with pytest.raises(TypeError):
-        convert_resource_to_reserve(resource_df, mining_dilution_pct=5.0, cutoff_grade=0.5)  # Missing mining_recovery_pct
+        convert_resource_to_reserve(
+            resource_df, mining_dilution_pct=5.0, cutoff_grade=0.5
+        )  # Missing mining_recovery_pct
 
     # allow_inferred is completely removed from the API (per CONTRIBUTING.md) and raises TypeError
     with pytest.raises(TypeError, match="unexpected keyword argument 'allow_inferred'"):
@@ -1605,11 +1867,13 @@ def test_convert_resource_to_reserve_strict_inferred_exclusion_and_modifying_fac
         )
 
     # Verification that unclassified/waste blocks are also excluded
-    res_with_unclass = pd.DataFrame({
-        "category": ["Measured", "Indicated", "Inferred", "Unclassified"],
-        "grade": [1.20, 0.90, 1.50, 1.80],  # 1.80 is high grade but unclassified
-        "tonnes": [1000.0, 2000.0, 5000.0, 3000.0],
-    })
+    res_with_unclass = pd.DataFrame(
+        {
+            "category": ["Measured", "Indicated", "Inferred", "Unclassified"],
+            "grade": [1.20, 0.90, 1.50, 1.80],  # 1.80 is high grade but unclassified
+            "tonnes": [1000.0, 2000.0, 5000.0, 3000.0],
+        }
+    )
     res_out = convert_resource_to_reserve(
         res_with_unclass,
         mining_dilution_pct=dilution_pct,
@@ -1624,11 +1888,17 @@ def test_convert_resource_to_reserve_strict_inferred_exclusion_and_modifying_fac
 def test_convert_resource_to_reserve_dilution_cutoff_spoilage():
     # Demonstrates Item 2.1: In-situ blocks that meet cut-off in-situ (e.g. 0.52% >= 0.50%)
     # but fall below cut-off after dilution (0.52 / 1.10 = 0.4727% < 0.50%)
-    resource_df = pd.DataFrame({
-        "category": ["Measured", "Indicated", "Measured"],
-        "grade": [1.20, 0.52, 0.45],  # 0.52 is in-situ above 0.50 cutoff, 0.45 is in-situ below
-        "tonnes": [1000.0, 1000.0, 1000.0],
-    })
+    resource_df = pd.DataFrame(
+        {
+            "category": ["Measured", "Indicated", "Measured"],
+            "grade": [
+                1.20,
+                0.52,
+                0.45,
+            ],  # 0.52 is in-situ above 0.50 cutoff, 0.45 is in-situ below
+            "tonnes": [1000.0, 1000.0, 1000.0],
+        }
+    )
 
     cutoff = 0.50
     dilution_pct = 10.0  # 10% zero-grade dilution
@@ -1657,7 +1927,11 @@ def test_convert_resource_to_reserve_dilution_cutoff_spoilage():
     assert np.isclose(res_rom.attrs["excluded_subeconomic_diluted_tonnes"], 1045.0)
     assert np.isclose(res_rom.attrs["excluded_subeconomic_insitu_tonnes"], 1000.0)
     expected_spoilage_metal = 1045.0 * (0.52 / 1.10) * 0.01
-    assert np.isclose(res_rom.attrs["excluded_subeconomic_diluted_metal"], expected_spoilage_metal, atol=1e-3)
+    assert np.isclose(
+        res_rom.attrs["excluded_subeconomic_diluted_metal"],
+        expected_spoilage_metal,
+        atol=1e-3,
+    )
     assert res_rom.attrs["cutoff_type"] == "rom"
 
     # 2. In-situ cut-off mode (e.g., when cutoff was pre-adjusted by practitioner):
@@ -1693,11 +1967,13 @@ def test_convert_resource_to_reserve_dilution_cutoff_spoilage():
         )
 
     # 4. Scenario where ALL candidate blocks become sub-economic after dilution:
-    all_marginal_df = pd.DataFrame({
-        "category": ["Measured"],
-        "grade": [0.52],
-        "tonnes": [1000.0],
-    })
+    all_marginal_df = pd.DataFrame(
+        {
+            "category": ["Measured"],
+            "grade": [0.52],
+            "tonnes": [1000.0],
+        }
+    )
     res_empty = convert_resource_to_reserve(
         all_marginal_df,
         mining_dilution_pct=dilution_pct,
@@ -1725,14 +2001,23 @@ def test_convert_resource_to_reserve_dilution_cutoff_spoilage():
 
 def test_classify_reserve_status():
     """Test classify_reserve_status for assigning 100% of spatial blocks to the 4 regulatory statuses."""
-    df = pd.DataFrame({
-        "x": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-        "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-        "z": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
-        "category": ["Measured", "Indicated", "Inferred", "Inferred", "Measured", "Unclassified"],
-        "grade": [1.5, 0.8, 1.2, 0.2, 0.3, 0.9],
-        "tonnes": [1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0],
-    })
+    df = pd.DataFrame(
+        {
+            "x": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            "z": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+            "category": [
+                "Measured",
+                "Indicated",
+                "Inferred",
+                "Inferred",
+                "Measured",
+                "Unclassified",
+            ],
+            "grade": [1.5, 0.8, 1.2, 0.2, 0.3, 0.9],
+            "tonnes": [1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0],
+        }
+    )
 
     cutoff = 0.5
     classified = classify_reserve_status(
@@ -1791,10 +2076,14 @@ def test_classify_reserve_status():
 
     # Error handling tests
     # Missing required column
-    with pytest.raises(ValueError, match="Required column 'grade' not found in block_model"):
+    with pytest.raises(
+        ValueError, match="Required column 'grade' not found in block_model"
+    ):
         classify_reserve_status(df.drop(columns=["grade"]), cutoff_grade=cutoff)
 
-    with pytest.raises(ValueError, match="Required column 'category' not found in block_model"):
+    with pytest.raises(
+        ValueError, match="Required column 'category' not found in block_model"
+    ):
         classify_reserve_status(df.drop(columns=["category"]), cutoff_grade=cutoff)
 
     # Empty DataFrame
@@ -1814,11 +2103,17 @@ def test_classify_reserve_status():
 
 
 def test_format_reserve_statement_sig_figs_and_footnotes():
-    reserve_df = pd.DataFrame({
-        "reserve_category": ["Proven Reserve", "Probable Reserve", "Proven Reserve"],
-        "rom_tonnes": [1_234_567.0, 3_456_789.0, 2_345_678.0],
-        "rom_grade": [1.25, 0.85, 1.15],
-    })
+    reserve_df = pd.DataFrame(
+        {
+            "reserve_category": [
+                "Proven Reserve",
+                "Probable Reserve",
+                "Proven Reserve",
+            ],
+            "rom_tonnes": [1_234_567.0, 3_456_789.0, 2_345_678.0],
+            "rom_grade": [1.25, 0.85, 1.15],
+        }
+    )
 
     stmt = format_reserve_statement(
         reserve_df,
@@ -1834,7 +2129,11 @@ def test_format_reserve_statement_sig_figs_and_footnotes():
 
     # 3 rows: Proven Reserve, Probable Reserve, Total Proven + Probable
     assert len(stmt) == 3
-    assert list(stmt["Classification"]) == ["Proven Reserve", "Probable Reserve", "Total Proven + Probable"]
+    assert list(stmt["Classification"]) == [
+        "Proven Reserve",
+        "Probable Reserve",
+        "Total Proven + Probable",
+    ]
 
     # Verify regulatory footnotes
     fns = stmt.attrs["footnotes"]
@@ -1844,8 +2143,14 @@ def test_format_reserve_statement_sig_figs_and_footnotes():
     assert any("Mining Recovery = 94.0%" in f for f in fns)
     assert any("Metallurgical Recovery = 88.5%" in f for f in fns)
     assert any("Pre-Feasibility" in f for f in fns)
-    assert stmt.attrs["point_of_reference"] == "Run-of-Mine (ROM) delivered to processing facility"
-    assert any("Point of Reference: Run-of-Mine (ROM) delivered to processing facility" in f for f in fns)
+    assert (
+        stmt.attrs["point_of_reference"]
+        == "Run-of-Mine (ROM) delivered to processing facility"
+    )
+    assert any(
+        "Point of Reference: Run-of-Mine (ROM) delivered to processing facility" in f
+        for f in fns
+    )
 
     # Test custom point of reference
     stmt_custom_por = format_reserve_statement(
@@ -1857,11 +2162,19 @@ def test_format_reserve_statement_sig_figs_and_footnotes():
         metallurgical_recovery=88.5,
         point_of_reference="Plant feed delivered to concentrator",
     )
-    assert stmt_custom_por.attrs["point_of_reference"] == "Plant feed delivered to concentrator"
-    assert any("Point of Reference: Plant feed delivered to concentrator" in f for f in stmt_custom_por.attrs["footnotes"])
+    assert (
+        stmt_custom_por.attrs["point_of_reference"]
+        == "Plant feed delivered to concentrator"
+    )
+    assert any(
+        "Point of Reference: Plant feed delivered to concentrator" in f
+        for f in stmt_custom_por.attrs["footnotes"]
+    )
 
     # Test invalid point of reference raises ValueError
-    with pytest.raises(ValueError, match="point_of_reference must be a non-empty string"):
+    with pytest.raises(
+        ValueError, match="point_of_reference must be a non-empty string"
+    ):
         format_reserve_statement(
             reserve_df,
             cutoff_grade=0.50,
@@ -1874,11 +2187,13 @@ def test_format_reserve_statement_sig_figs_and_footnotes():
 
 
 def test_plot_resource_to_reserve_waterfall():
-    res_df = pd.DataFrame({
-        "category": ["Measured", "Indicated", "Inferred", "Measured"],
-        "grade": [1.2, 0.9, 1.5, 0.3],
-        "tonnes": [1e6, 2e6, 3e6, 0.5e6],
-    })
+    res_df = pd.DataFrame(
+        {
+            "category": ["Measured", "Indicated", "Inferred", "Measured"],
+            "grade": [1.2, 0.9, 1.5, 0.3],
+            "tonnes": [1e6, 2e6, 3e6, 0.5e6],
+        }
+    )
     res_reserve = convert_resource_to_reserve(
         res_df,
         mining_dilution_pct=5.0,
@@ -1904,11 +2219,18 @@ def test_plot_resource_to_reserve_waterfall():
 
 
 def test_plot_reserve_classification_map():
-    block_model = pd.DataFrame({
-        "x": [10.0, 20.0, 30.0, 40.0],
-        "y": [10.0, 20.0, 30.0, 40.0],
-        "status": ["Proven Reserve", "Probable Reserve", "Inferred Resource (Excluded)", "Sub-Economic / Waste"],
-    })
+    block_model = pd.DataFrame(
+        {
+            "x": [10.0, 20.0, 30.0, 40.0],
+            "y": [10.0, 20.0, 30.0, 40.0],
+            "status": [
+                "Proven Reserve",
+                "Probable Reserve",
+                "Inferred Resource (Excluded)",
+                "Sub-Economic / Waste",
+            ],
+        }
+    )
     boundary = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0), (0.0, 50.0)]
     drillholes = pd.DataFrame({"x": [15.0, 35.0], "y": [15.0, 35.0]})
 
@@ -1924,11 +2246,13 @@ def test_plot_reserve_classification_map():
 
 
 def test_plot_resource_classification_map():
-    block_model = pd.DataFrame({
-        "x": [10.0, 20.0, 30.0, 40.0],
-        "y": [10.0, 20.0, 30.0, 40.0],
-        "category": ["Measured", "Indicated", "Inferred", "Unclassified"],
-    })
+    block_model = pd.DataFrame(
+        {
+            "x": [10.0, 20.0, 30.0, 40.0],
+            "y": [10.0, 20.0, 30.0, 40.0],
+            "category": ["Measured", "Indicated", "Inferred", "Unclassified"],
+        }
+    )
     boundary = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0), (0.0, 50.0)]
     drillholes = pd.DataFrame({"x": [15.0, 35.0], "y": [15.0, 35.0]})
 
@@ -1945,15 +2269,21 @@ def test_plot_resource_classification_map():
 
 def test_plot_in_situ_vs_diluted_curves():
     cutoffs = [0.0, 0.4, 0.8, 1.2]
-    insitu_gt = pd.DataFrame({
-        "ore_tonnes": [10e6, 8e6, 5e6, 2e6],
-        "ore_grade": [1.0, 1.2, 1.5, 1.8],
-    }, index=cutoffs)
+    insitu_gt = pd.DataFrame(
+        {
+            "ore_tonnes": [10e6, 8e6, 5e6, 2e6],
+            "ore_grade": [1.0, 1.2, 1.5, 1.8],
+        },
+        index=cutoffs,
+    )
 
-    diluted_gt = pd.DataFrame({
-        "ore_tonnes": [10.5e6, 8.4e6, 5.2e6, 2.1e6],
-        "ore_grade": [0.95, 1.14, 1.42, 1.71],
-    }, index=cutoffs)
+    diluted_gt = pd.DataFrame(
+        {
+            "ore_tonnes": [10.5e6, 8.4e6, 5.2e6, 2.1e6],
+            "ore_grade": [0.95, 1.14, 1.42, 1.71],
+        },
+        index=cutoffs,
+    )
 
     fig, ax = plot_in_situ_vs_diluted_curves(
         insitu_gt,
@@ -1972,14 +2302,16 @@ def test_composite_drillhole_intervals_length_weighting_and_domains():
     # 0.0 - 1.0m: grade 2.0%
     # 1.0 - 2.5m: grade 4.0%
     # 2.5 - 3.0m: grade 1.0%
-    assays_df = pd.DataFrame({
-        "hole_id": ["DH01", "DH01", "DH01"],
-        "from_m": [0.0, 1.0, 2.5],
-        "to_m": [1.0, 2.5, 3.0],
-        "grade": [2.0, 4.0, 1.0],
-        "x": [100.0, 100.0, 100.0],
-        "y": [200.0, 200.0, 200.0],
-    })
+    assays_df = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH01", "DH01"],
+            "from_m": [0.0, 1.0, 2.5],
+            "to_m": [1.0, 2.5, 3.0],
+            "grade": [2.0, 4.0, 1.0],
+            "x": [100.0, 100.0, 100.0],
+            "y": [200.0, 200.0, 200.0],
+        }
+    )
 
     # Composite to 2.0m with remnant_strategy="discard" and min_length_ratio=0.5
     # Comp 1: [0.0, 2.0] -> 1.0m @ 2.0 + 1.0m @ 4.0 -> grade = (2 + 4)/2 = 3.0%
@@ -2017,13 +2349,15 @@ def test_composite_drillhole_intervals_length_weighting_and_domains():
     assert np.isclose(comp_dist.iloc[1]["length"], 1.5)
 
     # Domain constraint test: Never cross domain boundaries!
-    domain_df = pd.DataFrame({
-        "hole_id": ["DH01", "DH01", "DH01"],
-        "from_m": [0.0, 1.5, 3.5],
-        "to_m": [1.5, 3.5, 5.0],
-        "grade": [0.5, 3.0, 4.0],
-        "domain": ["Waste", "Ore", "Ore"],
-    })
+    domain_df = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH01", "DH01"],
+            "from_m": [0.0, 1.5, 3.5],
+            "to_m": [1.5, 3.5, 5.0],
+            "grade": [0.5, 3.0, 4.0],
+            "domain": ["Waste", "Ore", "Ore"],
+        }
+    )
     # Target 2.0m composites:
     # Waste domain (0 to 1.5m): 1.5m run. With min_length_ratio=0.5 (1.0m), kept as [0, 1.5] (or discarded if > 1.5).
     # Ore domain (1.5 to 5.0m): 3.5m run -> [1.5, 3.5] (2.0m) and [3.5, 5.0] (1.5m).
@@ -2046,13 +2380,17 @@ def test_composite_drillhole_intervals_length_weighting_and_domains():
 
 def test_apply_grade_capping_and_metal_reduction():
     # Sample composites with a severe high-grade outlier (50.0 g/t)
-    df = pd.DataFrame({
-        "grade": [1.0, 1.5, 2.0, 1.2, 0.8, 1.4, 50.0],
-        "length": [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
-    })
+    df = pd.DataFrame(
+        {
+            "grade": [1.0, 1.5, 2.0, 1.2, 0.8, 1.4, 50.0],
+            "length": [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+        }
+    )
 
     # Capping at explicit threshold 5.0 g/t
-    capped_df = apply_grade_capping(df, cap_grade=5.0, grade_col="grade", length_col="length")
+    capped_df = apply_grade_capping(
+        df, cap_grade=5.0, grade_col="grade", length_col="length"
+    )
     assert "capped_grade" in capped_df.columns
     assert capped_df["capped_grade"].max() == 5.0
     assert capped_df.loc[6, "capped_grade"] == 5.0
@@ -2089,7 +2427,9 @@ def test_exploratory_data_analysis_metrics_and_clustering_bias():
     assert eda_naive.attrs["cv_status"].startswith("Highly skewed")
 
     # Run EDA with declustering weights
-    eda_dec = exploratory_data_analysis(df, grade_col="grade", weights_col="declust_weight")
+    eda_dec = exploratory_data_analysis(
+        df, grade_col="grade", weights_col="declust_weight"
+    )
     assert "Declustered" in eda_dec.columns
     # With low weight (0.1) on the high-grade outlier (10.0), declustered mean should be lower than naive
     assert eda_dec.loc["Mean", "Declustered"] < eda_dec.loc["Mean", "Naive"]
@@ -2132,11 +2472,13 @@ def test_contact_profile_analysis_hard_vs_soft_and_plot():
     grades_b = 1.80 + 0.10 * np.random.randn(30)
     dom_b = ["OreZone"] * 30
 
-    hard_df = pd.DataFrame({
-        "distance": np.concatenate([dists_a, dists_b]),
-        "grade": np.concatenate([grades_a, grades_b]),
-        "lithology": dom_a + dom_b,
-    })
+    hard_df = pd.DataFrame(
+        {
+            "distance": np.concatenate([dists_a, dists_b]),
+            "grade": np.concatenate([grades_a, grades_b]),
+            "lithology": dom_a + dom_b,
+        }
+    )
 
     profile_hard = contact_profile_analysis(
         hard_df,
@@ -2168,11 +2510,13 @@ def test_contact_profile_analysis_hard_vs_soft_and_plot():
     # Synthetic dataset with a Soft Boundary (continuous gradient, no step change)
     all_dists = np.linspace(-15.0, 15.0, 60)
     smooth_grades = 1.00 + 0.01 * all_dists  # ~1.00 on both sides of 0
-    soft_df = pd.DataFrame({
-        "distance": all_dists,
-        "grade": smooth_grades,
-        "zone": ["ZoneA" if d < 0 else "ZoneB" for d in all_dists],
-    })
+    soft_df = pd.DataFrame(
+        {
+            "distance": all_dists,
+            "grade": smooth_grades,
+            "zone": ["ZoneA" if d < 0 else "ZoneB" for d in all_dists],
+        }
+    )
 
     profile_soft = contact_profile_analysis(
         soft_df,
@@ -2190,21 +2534,27 @@ def test_contact_profile_analysis_hard_vs_soft_and_plot():
 
 def test_reconcile_production_to_reserve_f_factors_and_ratios():
     # Multi-period reconciliation (3 months)
-    reserve_df = pd.DataFrame({
-        "period": ["Jan", "Feb", "Mar"],
-        "tonnes": [100_000.0, 110_000.0, 105_000.0],
-        "grade": [1.00, 1.10, 0.95],
-    })
-    gc_df = pd.DataFrame({
-        "period": ["Jan", "Feb", "Mar"],
-        "tonnes": [105_000.0, 108_000.0, 104_000.0],
-        "grade": [0.98, 1.12, 0.96],
-    })
-    plant_df = pd.DataFrame({
-        "period": ["Jan", "Feb", "Mar"],
-        "tonnes": [103_000.0, 107_000.0, 103_500.0],
-        "grade": [0.97, 1.11, 0.95],
-    })
+    reserve_df = pd.DataFrame(
+        {
+            "period": ["Jan", "Feb", "Mar"],
+            "tonnes": [100_000.0, 110_000.0, 105_000.0],
+            "grade": [1.00, 1.10, 0.95],
+        }
+    )
+    gc_df = pd.DataFrame(
+        {
+            "period": ["Jan", "Feb", "Mar"],
+            "tonnes": [105_000.0, 108_000.0, 104_000.0],
+            "grade": [0.98, 1.12, 0.96],
+        }
+    )
+    plant_df = pd.DataFrame(
+        {
+            "period": ["Jan", "Feb", "Mar"],
+            "tonnes": [103_000.0, 107_000.0, 103_500.0],
+            "grade": [0.97, 1.11, 0.95],
+        }
+    )
 
     rec_df = reconcile_production_to_reserve(
         reserve_df,
@@ -2234,16 +2584,24 @@ def test_reconcile_production_to_reserve_f_factors_and_ratios():
 
     # Verify health status attribute
     assert "health_status" in rec_df.attrs
-    assert "EXCELLENT" in rec_df.attrs["health_status"] or "GOOD" in rec_df.attrs["health_status"]
+    assert (
+        "EXCELLENT" in rec_df.attrs["health_status"]
+        or "GOOD" in rec_df.attrs["health_status"]
+    )
 
     # Test single-period dictionary input
     res_dict = {"tonnes": 50_000.0, "grade": 1.20}
     plant_dict = {"tonnes": 51_000.0, "grade": 1.15}
-    rec_single = reconcile_production_to_reserve(res_dict, plant_dict, grade_unit="% Cu")
+    rec_single = reconcile_production_to_reserve(
+        res_dict, plant_dict, grade_unit="% Cu"
+    )
     assert len(rec_single) == 1
     assert "f3_metal_factor" in rec_single.columns
     assert np.isclose(rec_single.iloc[0]["f3_tonnes_ratio"], 51000.0 / 50000.0)
-    assert rec_single.attrs["stockpile_mode"] == "Direct feed (no intermediate stockpiling)"
+    assert (
+        rec_single.attrs["stockpile_mode"]
+        == "Direct feed (no intermediate stockpiling)"
+    )
 
 
 def test_reconcile_production_stockpile_adjustments():
@@ -2251,30 +2609,38 @@ def test_reconcile_production_stockpile_adjustments():
     # and how Harry Parker (2012) mass-balance adjustment restores true operational stability.
     # Month 1: Dig 100kt @ 1.0% Cu (1000t Cu). Mill only takes 70kt @ 1.0% Cu (700t Cu). 30kt stockpiled.
     # Month 2: Dig 50kt @ 1.0% Cu (500t Cu). Mill draws 30kt from stockpile + 50kt from pit = 80kt (800t Cu).
-    reserve_df = pd.DataFrame({
-        "period": ["M1", "M2"],
-        "tonnes": [100_000.0, 50_000.0],
-        "grade": [1.00, 1.00],
-    })
-    gc_df = pd.DataFrame({
-        "period": ["M1", "M2"],
-        "tonnes": [100_000.0, 50_000.0],
-        "grade": [1.00, 1.00],
-    })
-    plant_df = pd.DataFrame({
-        "period": ["M1", "M2"],
-        "tonnes": [70_000.0, 80_000.0],
-        "grade": [1.00, 1.00],
-    })
+    reserve_df = pd.DataFrame(
+        {
+            "period": ["M1", "M2"],
+            "tonnes": [100_000.0, 50_000.0],
+            "grade": [1.00, 1.00],
+        }
+    )
+    gc_df = pd.DataFrame(
+        {
+            "period": ["M1", "M2"],
+            "tonnes": [100_000.0, 50_000.0],
+            "grade": [1.00, 1.00],
+        }
+    )
+    plant_df = pd.DataFrame(
+        {
+            "period": ["M1", "M2"],
+            "tonnes": [70_000.0, 80_000.0],
+            "grade": [1.00, 1.00],
+        }
+    )
 
     # Test Format 1: Opening & closing stockpile balances
-    stockpile_balances = pd.DataFrame({
-        "period": ["M1", "M2"],
-        "opening_tonnes": [0.0, 30_000.0],
-        "opening_grade": [0.0, 1.00],
-        "closing_tonnes": [30_000.0, 0.0],
-        "closing_grade": [1.00, 0.0],
-    })
+    stockpile_balances = pd.DataFrame(
+        {
+            "period": ["M1", "M2"],
+            "opening_tonnes": [0.0, 30_000.0],
+            "opening_grade": [0.0, 1.00],
+            "closing_tonnes": [30_000.0, 0.0],
+            "closing_grade": [1.00, 0.0],
+        }
+    )
 
     rec_df = reconcile_production_to_reserve(
         reserve_data=reserve_df,
@@ -2317,27 +2683,39 @@ def test_reconcile_production_stockpile_adjustments():
     assert "EXCELLENT" in rec_df.attrs["health_status"]
 
     # Test Format 2: Movement receipts and reclaims
-    stockpile_movements = pd.DataFrame({
-        "period": ["M1", "M2"],
-        "added_tonnes": [30_000.0, 0.0],
-        "added_grade": [1.00, 0.0],
-        "reclaimed_tonnes": [0.0, 30_000.0],
-        "reclaimed_grade": [0.0, 1.00],
-    })
+    stockpile_movements = pd.DataFrame(
+        {
+            "period": ["M1", "M2"],
+            "added_tonnes": [30_000.0, 0.0],
+            "added_grade": [1.00, 0.0],
+            "reclaimed_tonnes": [0.0, 30_000.0],
+            "reclaimed_grade": [0.0, 1.00],
+        }
+    )
     rec_mvt = reconcile_production_to_reserve(
-        reserve_df, plant_df, gc_df, stockpile_data=stockpile_movements, period_col="period"
+        reserve_df,
+        plant_df,
+        gc_df,
+        stockpile_data=stockpile_movements,
+        period_col="period",
     )
     assert np.isclose(rec_mvt.iloc[0]["f2_adj_metal_factor"], 1.00)
     assert np.isclose(rec_mvt.iloc[1]["f2_adj_metal_factor"], 1.00)
 
     # Test Format 3: Direct deltas
-    stockpile_deltas = pd.DataFrame({
-        "period": ["M1", "M2"],
-        "delta_tonnes": [30_000.0, -30_000.0],
-        "delta_grade": [1.00, 1.00],
-    })
+    stockpile_deltas = pd.DataFrame(
+        {
+            "period": ["M1", "M2"],
+            "delta_tonnes": [30_000.0, -30_000.0],
+            "delta_grade": [1.00, 1.00],
+        }
+    )
     rec_deltas = reconcile_production_to_reserve(
-        reserve_df, plant_df, gc_df, stockpile_data=stockpile_deltas, period_col="period"
+        reserve_df,
+        plant_df,
+        gc_df,
+        stockpile_data=stockpile_deltas,
+        period_col="period",
     )
     assert np.isclose(rec_deltas.iloc[0]["f2_adj_metal_factor"], 1.00)
     assert np.isclose(rec_deltas.iloc[1]["f2_adj_metal_factor"], 1.00)
@@ -2346,7 +2724,12 @@ def test_reconcile_production_stockpile_adjustments():
     res_dict = {"tonnes": 100_000.0, "grade": 1.00}
     plant_dict = {"tonnes": 70_000.0, "grade": 1.00}
     gc_dict = {"tonnes": 100_000.0, "grade": 1.00}
-    sp_dict = {"opening_tonnes": 0.0, "opening_grade": 0.0, "closing_tonnes": 30_000.0, "closing_grade": 1.00}
+    sp_dict = {
+        "opening_tonnes": 0.0,
+        "opening_grade": 0.0,
+        "closing_tonnes": 30_000.0,
+        "closing_grade": 1.00,
+    }
     rec_single_sp = reconcile_production_to_reserve(
         res_dict, plant_dict, grade_control_data=gc_dict, stockpile_data=sp_dict
     )
@@ -2356,32 +2739,40 @@ def test_reconcile_production_stockpile_adjustments():
     # Invalid stockpile data format raises ValueError
     with pytest.raises(ValueError, match="stockpile_data must contain"):
         reconcile_production_to_reserve(
-            reserve_df, plant_df, gc_df, stockpile_data=pd.DataFrame({"invalid_col": [1, 2]}), period_col="period"
+            reserve_df,
+            plant_df,
+            gc_df,
+            stockpile_data=pd.DataFrame({"invalid_col": [1, 2]}),
+            period_col="period",
         )
 
 
 def test_plot_production_reconciliation():
-    rec_df = pd.DataFrame({
-        "period": ["Q1", "Q2", "Q3", "Total"],
-        "reserve_tonnes": [1.0, 1.1, 1.2, 3.3],
-        "reserve_grade": [1.0, 1.0, 1.0, 1.0],
-        "reserve_metal": [0.01, 0.011, 0.012, 0.033],
-        "gc_tonnes": [1.02, 1.08, 1.18, 3.28],
-        "gc_grade": [0.99, 1.01, 0.99, 1.0],
-        "gc_metal": [0.0101, 0.0109, 0.0117, 0.0327],
-        "plant_tonnes": [1.01, 1.09, 1.19, 3.29],
-        "plant_grade": [0.98, 1.00, 0.98, 0.99],
-        "plant_metal": [0.0099, 0.0109, 0.0117, 0.0325],
-        "plant_adj_tonnes": [1.02, 1.08, 1.18, 3.28],
-        "plant_adj_grade": [0.99, 1.01, 0.99, 1.00],
-        "plant_adj_metal": [0.0101, 0.0109, 0.0117, 0.0327],
-        "f1_metal_factor": [1.01, 0.99, 0.975, 0.99],
-        "f2_metal_factor": [0.98, 1.00, 1.00, 0.994],
-        "f2_adj_metal_factor": [1.00, 1.00, 1.00, 1.00],
-        "f3_metal_factor": [0.99, 0.99, 0.975, 0.985],
-        "f3_adj_metal_factor": [1.01, 0.99, 0.975, 0.99],
-    })
-    rec_df.attrs["health_status"] = "EXCELLENT: Production is within +/-5% of reserve model (stockpile-adjusted)."
+    rec_df = pd.DataFrame(
+        {
+            "period": ["Q1", "Q2", "Q3", "Total"],
+            "reserve_tonnes": [1.0, 1.1, 1.2, 3.3],
+            "reserve_grade": [1.0, 1.0, 1.0, 1.0],
+            "reserve_metal": [0.01, 0.011, 0.012, 0.033],
+            "gc_tonnes": [1.02, 1.08, 1.18, 3.28],
+            "gc_grade": [0.99, 1.01, 0.99, 1.0],
+            "gc_metal": [0.0101, 0.0109, 0.0117, 0.0327],
+            "plant_tonnes": [1.01, 1.09, 1.19, 3.29],
+            "plant_grade": [0.98, 1.00, 0.98, 0.99],
+            "plant_metal": [0.0099, 0.0109, 0.0117, 0.0325],
+            "plant_adj_tonnes": [1.02, 1.08, 1.18, 3.28],
+            "plant_adj_grade": [0.99, 1.01, 0.99, 1.00],
+            "plant_adj_metal": [0.0101, 0.0109, 0.0117, 0.0327],
+            "f1_metal_factor": [1.01, 0.99, 0.975, 0.99],
+            "f2_metal_factor": [0.98, 1.00, 1.00, 0.994],
+            "f2_adj_metal_factor": [1.00, 1.00, 1.00, 1.00],
+            "f3_metal_factor": [0.99, 0.99, 0.975, 0.985],
+            "f3_adj_metal_factor": [1.01, 0.99, 0.975, 0.99],
+        }
+    )
+    rec_df.attrs["health_status"] = (
+        "EXCELLENT: Production is within +/-5% of reserve model (stockpile-adjusted)."
+    )
 
     fig, axes = plot_production_reconciliation(
         rec_df,
@@ -2399,18 +2790,30 @@ def test_plot_production_reconciliation():
     plt.close(fig)
 
     # Test single-period plot with stockpile adjustments
-    rec_single = pd.DataFrame([{
-        "period": "Total",
-        "reserve_tonnes": 1.0, "reserve_grade": 1.0, "reserve_metal": 0.01,
-        "gc_tonnes": 1.0, "gc_grade": 1.0, "gc_metal": 0.01,
-        "plant_tonnes": 0.7, "plant_grade": 1.0, "plant_metal": 0.007,
-        "plant_adj_tonnes": 1.0, "plant_adj_grade": 1.0, "plant_adj_metal": 0.01,
-        "f1_metal_factor": 1.0,
-        "f2_metal_factor": 0.7,
-        "f2_adj_metal_factor": 1.0,
-        "f3_metal_factor": 0.7,
-        "f3_adj_metal_factor": 1.0,
-    }])
+    rec_single = pd.DataFrame(
+        [
+            {
+                "period": "Total",
+                "reserve_tonnes": 1.0,
+                "reserve_grade": 1.0,
+                "reserve_metal": 0.01,
+                "gc_tonnes": 1.0,
+                "gc_grade": 1.0,
+                "gc_metal": 0.01,
+                "plant_tonnes": 0.7,
+                "plant_grade": 1.0,
+                "plant_metal": 0.007,
+                "plant_adj_tonnes": 1.0,
+                "plant_adj_grade": 1.0,
+                "plant_adj_metal": 0.01,
+                "f1_metal_factor": 1.0,
+                "f2_metal_factor": 0.7,
+                "f2_adj_metal_factor": 1.0,
+                "f3_metal_factor": 0.7,
+                "f3_adj_metal_factor": 1.0,
+            }
+        ]
+    )
     fig_s, axes_s = plot_production_reconciliation(rec_single)
     assert fig_s is not None
     plt.close(fig_s)
@@ -2443,25 +2846,390 @@ def test_compute_etype_mtype_maps_and_smoothing_ratio():
 
     # Verify smoothing effect: Var(E-type) must be significantly lower than average realization variance
     smoothing_ratio = df_maps.attrs["smoothing_ratio"]
-    assert smoothing_ratio < 0.50, f"Expected smoothing ratio < 0.50, got {smoothing_ratio}"
+    assert (
+        smoothing_ratio < 0.50
+    ), f"Expected smoothing ratio < 0.50, got {smoothing_ratio}"
     assert "limitations_note" in df_maps.attrs
 
 
-def test_simulation_stubs_raise_not_implemented():
-    with pytest.raises(NotImplementedError):
-        sequential_gaussian_simulation(
-            samples_xy=np.zeros((5, 2)),
-            sample_grades=np.ones(5),
-            grid_points=np.zeros((10, 2)),
+def test_lu_gaussian_grid_simulation_execution_and_conditioning():
+    samples_xy = np.array([
+        [10.0, 10.0],
+        [30.0, 30.0],
+        [70.0, 70.0],
+    ])
+    sample_grades = np.array([0.5, 1.5, 3.0])
+    grid_points = np.array([
+        [10.0, 10.0],  # collocated with sample 0
+        [20.0, 20.0],  # between sample 0 and 1
+        [100.0, 100.0],  # outside
+    ])
+
+    realizations = lu_gaussian_grid_simulation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        sill=1.0,
+        range_param=50.0,
+        n_realizations=20,
+        seed=42,
+    )
+
+    assert realizations.shape == (3, 20)
+    # Exact conditioning at sample location: variance across realizations is ~0 and equals true grade
+    assert np.allclose(realizations[0, :], 0.5, atol=1e-2)
+
+    # Determinism test with identical seed
+    r2 = lu_gaussian_grid_simulation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        sill=1.0,
+        range_param=50.0,
+        n_realizations=20,
+        seed=42,
+    )
+    assert np.array_equal(realizations, r2)
+
+
+def test_sequential_gaussian_grid_simulation_execution_and_conditioning():
+    samples_xy = np.array([
+        [10.0, 10.0],
+        [30.0, 30.0],
+        [70.0, 70.0],
+    ])
+    sample_grades = np.array([0.5, 1.5, 3.0])
+    grid_points = np.array([
+        [10.0, 10.0],  # collocated with sample 0
+        [20.0, 20.0],  # between sample 0 and 1
+        [100.0, 100.0],  # outside
+    ])
+
+    # Validation: empty samples
+    with pytest.raises(ValueError, match="Cannot perform conditional simulation with 0 samples"):
+        sequential_gaussian_grid_simulation(
+            samples_xy=np.zeros((0, 2)),
+            sample_grades=np.zeros(0),
+            grid_points=grid_points,
             sill=1.0,
-            range_param=100.0,
+            range_param=50.0,
         )
 
-    with pytest.raises(NotImplementedError):
-        plot_simulation_realizations_dashboard(
-            realizations=np.zeros((10, 5)),
-            grid_xy=np.zeros((10, 2)),
+    # Validation: empty grid
+    empty_res = sequential_gaussian_grid_simulation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=np.zeros((0, 2)),
+        sill=1.0,
+        range_param=50.0,
+        n_realizations=5,
+    )
+    assert empty_res.shape == (0, 5)
+
+    # Validation: negative search_radius
+    with pytest.raises(ValueError, match="search_radius must be positive"):
+        sequential_gaussian_grid_simulation(
+            samples_xy=samples_xy,
+            sample_grades=sample_grades,
+            grid_points=grid_points,
+            sill=1.0,
+            range_param=50.0,
+            search_radius=-10.0,
         )
+
+    # Full execution
+    realizations = sequential_gaussian_grid_simulation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        sill=1.0,
+        range_param=50.0,
+        n_realizations=20,
+        seed=42,
+    )
+
+    assert realizations.shape == (3, 20)
+    # Exact conditioning at sample location: variance across realizations is ~0 and equals true grade
+    assert np.allclose(realizations[0, :], 0.5, atol=1e-2)
+
+    # Determinism test with identical seed
+    r2 = sequential_gaussian_grid_simulation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        sill=1.0,
+        range_param=50.0,
+        n_realizations=20,
+        seed=42,
+    )
+    assert np.array_equal(realizations, r2)
+
+    # Execution with sector search and drillhole caps
+    r_sec = sequential_gaussian_grid_simulation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        sill=1.0,
+        range_param=50.0,
+        n_realizations=5,
+        max_per_sector=2,
+        max_per_drillhole=2,
+        sample_hole_ids=["H1", "H2", "H3"],
+        seed=123,
+    )
+    assert r_sec.shape == (3, 5)
+    assert np.allclose(r_sec[0, :], 0.5, atol=1e-2)
+
+    # Execution with single-search grid node pre-assignment (assign_data_to_nodes=True)
+    r_snap = sequential_gaussian_grid_simulation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=grid_points,
+        sill=1.0,
+        range_param=50.0,
+        n_realizations=5,
+        assign_data_to_nodes=True,
+        seed=123,
+    )
+    assert r_snap.shape == (3, 5)
+    # Node 0 coincides with sample 0 (grade 0.5)
+    assert np.allclose(r_snap[0, :], 0.5, atol=1e-2)
+
+
+def test_multigrid_partitioning_and_sgs():
+    # 1. Test regular grid partitioning into dyadic levels
+    gx, gy = np.meshgrid(np.arange(0.0, 80.0, 10.0), np.arange(0.0, 80.0, 10.0), indexing="ij")
+    reg_grid = np.column_stack([gx.ravel(), gy.ravel()])
+    assert len(reg_grid) == 64
+
+    # Level 1 (fallback / single grid)
+    lvl1 = _build_multigrid_levels(reg_grid, n_multigrids=1)
+    assert len(lvl1) == 1
+    assert len(lvl1[0]) == 64
+
+    # 3 multigrids
+    lvl3 = _build_multigrid_levels(reg_grid, n_multigrids=3)
+    assert len(lvl3) == 3
+    # Check that all nodes are uniquely covered
+    all_indices = np.concatenate(lvl3)
+    assert len(all_indices) == 64
+    assert len(np.unique(all_indices)) == 64
+
+    # Coarsest level (stride 4: 0, 40) should have 2x2 = 4 nodes
+    assert len(lvl3[0]) == 4
+
+    # 2. Irregular grid warning and fallback to single level
+    irreg_grid = np.array([
+        [0.0, 0.0],
+        [1.2, 3.5],
+        [7.8, 12.1],
+        [20.0, 20.0],
+    ])
+    with pytest.warns(UserWarning, match="Cannot construct 3 multigrids"):
+        irreg_levels = _build_multigrid_levels(irreg_grid, n_multigrids=3)
+    assert len(irreg_levels) == 1
+    assert len(irreg_levels[0]) == len(irreg_grid)
+
+    # 3. Test sequential_gaussian_grid_simulation with n_multigrids=3
+    samples_xy = np.array([[10.0, 10.0], [50.0, 50.0], [70.0, 20.0]])
+    sample_grades = np.array([1.0, 2.5, 4.0])
+
+    r_multi = sequential_gaussian_grid_simulation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=reg_grid,
+        sill=1.0,
+        range_param=30.0,
+        n_realizations=3,
+        n_multigrids=3,
+        seed=42,
+    )
+    assert r_multi.shape == (64, 3)
+    assert np.all(np.isfinite(r_multi))
+
+    # Also test multigrid with assign_data_to_nodes=True
+    r_multi_snap = sequential_gaussian_grid_simulation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        grid_points=reg_grid,
+        sill=1.0,
+        range_param=30.0,
+        n_realizations=3,
+        assign_data_to_nodes=True,
+        n_multigrids=3,
+        seed=42,
+    )
+    assert r_multi_snap.shape == (64, 3)
+    assert np.all(np.isfinite(r_multi_snap))
+
+
+def test_block_simulations_execution_and_upscaling():
+    samples_xyz = np.array([
+        [10.0, 10.0, 5.0],
+        [30.0, 30.0, 5.0],
+        [70.0, 70.0, 5.0],
+    ])
+    sample_grades = np.array([0.5, 1.5, 3.0])
+
+    # Contiguous regular block model with 2 adjacent blocks in X
+    bm = pd.DataFrame({
+        "x": [10.0, 20.0],
+        "y": [10.0, 10.0],
+        "z": [5.0, 5.0],
+        "dx": [10.0, 10.0],
+        "dy": [10.0, 10.0],
+        "dz": [5.0, 5.0],
+    })
+
+    # Test LU block simulation
+    lu_blocks = lu_gaussian_block_simulation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        sill=1.0,
+        range_param=50.0,
+        n_realizations=10,
+        discretization=(2, 2, 1),
+        seed=42,
+    )
+    assert lu_blocks.shape == (2, 10)
+    assert np.all(np.isfinite(lu_blocks))
+
+    # Test SGS block simulation on regular discretization grid with n_multigrids=2
+    sgs_blocks = sequential_gaussian_block_simulation(
+        samples_xyz=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=bm,
+        sill=1.0,
+        range_param=50.0,
+        n_realizations=10,
+        discretization=(2, 2, 1),
+        n_multigrids=2,
+        seed=42,
+    )
+    assert sgs_blocks.shape == (2, 10)
+    assert np.all(np.isfinite(sgs_blocks))
+
+    # Non-contiguous block model falls back with UserWarning
+    bm_gap = pd.DataFrame({
+        "x": [10.0, 50.0],
+        "y": [10.0, 10.0],
+        "z": [5.0, 5.0],
+        "dx": [10.0, 10.0],
+        "dy": [10.0, 10.0],
+        "dz": [5.0, 5.0],
+    })
+    with pytest.warns(UserWarning, match="Cannot construct 2 multigrids"):
+        sgs_gap = sequential_gaussian_block_simulation(
+            samples_xyz=samples_xyz,
+            sample_grades=sample_grades,
+            block_model=bm_gap,
+            sill=1.0,
+            range_param=50.0,
+            n_realizations=5,
+            discretization=(2, 2, 1),
+            n_multigrids=2,
+            seed=42,
+        )
+    assert sgs_gap.shape == (2, 5)
+
+
+def test_plot_simulation_realizations_dashboard():
+    # Input validation
+    with pytest.raises(ValueError, match="realizations must be a 2D array"):
+        plot_simulation_realizations_dashboard(np.zeros((10,)), np.zeros((10, 2)))
+
+    with pytest.raises(ValueError, match="grid_xy must be a 2D array"):
+        plot_simulation_realizations_dashboard(np.zeros((10, 5)), np.zeros((10,)))
+
+    with pytest.raises(ValueError, match="Point count mismatch"):
+        plot_simulation_realizations_dashboard(np.zeros((10, 5)), np.zeros((12, 2)))
+
+    # Test with regular grid (4x4 = 16 points)
+    gx, gy = np.meshgrid(np.linspace(0, 30, 4), np.linspace(0, 30, 4))
+    grid_coords = np.column_stack([gx.flatten(), gy.flatten()])
+    realizations = np.random.default_rng(42).normal(1.5, 0.5, size=(16, 10))
+
+    fig, axes = plot_simulation_realizations_dashboard(
+        realizations=realizations,
+        grid_xy=grid_coords,
+        cutoff_grade=1.8,
+        grade_unit="% Cu",
+        title="Test Realizations Dashboard",
+        sample_coords=np.array([[5.0, 5.0], [25.0, 25.0]]),
+        sample_grades=np.array([1.2, 2.4]),
+    )
+    assert len(axes) == 4
+    assert fig is not None
+    plt.close(fig)
+
+    # Test without cutoff (std dev) and with irregular points
+    unstructured_coords = np.random.default_rng(42).uniform(0, 50, size=(15, 2))
+    unstructured_real = np.random.default_rng(42).normal(2.0, 0.4, size=(15, 8))
+    fig2, axes2 = plot_simulation_realizations_dashboard(
+        realizations=unstructured_real,
+        grid_xy=unstructured_coords,
+        cutoff_grade=None,
+    )
+    assert len(axes2) == 4
+    plt.close(fig2)
+
+
+
+def test_multigaussian_assumption_verification():
+    rng = np.random.default_rng(123)
+    coords = rng.uniform(0.0, 200.0, size=(30, 2))
+    grades = rng.lognormal(mean=0.5, sigma=0.8, size=30)
+    y_scores, sorted_z, sorted_y = normal_score_transform(grades)
+
+    # 1. Order ratio check
+    df_ratios = check_multigaussian_order_ratios(
+        coords=coords,
+        normal_scores=y_scores,
+        lag_distance=25.0,
+        n_lags=4,
+    )
+    assert len(df_ratios) == 4
+    assert set(df_ratios.columns) >= {"lag", "gamma_1", "gamma_2", "ratio", "theoretical_ratio"}
+    assert "mean_abs_error" in df_ratios.attrs
+    assert np.isclose(df_ratios["theoretical_ratio"].iloc[0], 1.0 / np.pi)
+
+    # 2. Indicator variogram check
+    df_ind = check_multigaussian_indicators(
+        coords=coords,
+        normal_scores=y_scores,
+        lag_distance=25.0,
+        n_lags=3,
+        variogram_model="spherical",
+        sill=0.9,
+        range_param=100.0,
+        nugget=0.1,
+        quantiles=(0.25, 0.5, 0.75),
+    )
+    assert len(df_ind) == 3 * 3  # 3 lags * 3 quantiles
+    assert set(df_ind.columns) >= {"lag", "quantile", "cutoff", "exp_indicator_var", "theor_indicator_var"}
+    assert "symmetry_error" in df_ind.attrs
+    assert df_ind.attrs["symmetry_error"] >= 0.0
+
+    # 3. h-scatter statistics
+    h_stat = compute_h_scatter_statistics(
+        coords=coords,
+        normal_scores=y_scores,
+        target_lags=[25.0, 50.0],
+        lag_tolerance=12.5,
+    )
+    assert 25.0 in h_stat and 50.0 in h_stat
+    assert "correlation" in h_stat[25.0]
+    assert "y_head" in h_stat[25.0]
+
+    # 4. Diagnostic plot
+    fig, axes = plot_multigaussian_diagnostics(
+        order_ratios_df=df_ratios,
+        indicators_df=df_ind,
+        h_scatter_data=h_stat,
+    )
+    assert len(axes) == 4
+    plt.close(fig)
 
 
 def test_create_block_model():
@@ -2474,29 +3242,52 @@ def test_create_block_model():
         default_domain="Porphyry",
     )
     assert len(bm) == 60
-    assert set(bm.columns) >= {"x", "y", "z", "dx", "dy", "dz", "volume_m3", "density", "tonnes", "domain"}
+    assert set(bm.columns) >= {
+        "x",
+        "y",
+        "z",
+        "dx",
+        "dy",
+        "dz",
+        "volume_m3",
+        "density",
+        "tonnes",
+        "domain",
+    }
     assert np.isclose(bm["volume_m3"].iloc[0], 10.0 * 10.0 * 5.0)
     assert np.isclose(bm["tonnes"].iloc[0], 500.0 * 2.70)
     assert (bm["domain"] == "Porphyry").all()
     assert bm["x"].min() == 105.0  # origin + 0.5 * dx
-    assert bm["z"].max() == 12.5   # 0 + 2.5 * 5.0
+    assert bm["z"].max() == 12.5  # 0 + 2.5 * 5.0
 
     # Validations for required density
     with pytest.raises(TypeError):
         create_block_model(origin=(0, 0, 0), block_size=(10, 10, 5), n_blocks=(2, 2, 2))
     with pytest.raises(ValueError, match="default_density must be positive"):
-        create_block_model(origin=(0, 0, 0), block_size=(10, 10, 5), n_blocks=(2, 2, 2), default_density=0.0)
+        create_block_model(
+            origin=(0, 0, 0),
+            block_size=(10, 10, 5),
+            n_blocks=(2, 2, 2),
+            default_density=0.0,
+        )
     with pytest.raises(ValueError, match="default_density must be positive"):
-        create_block_model(origin=(0, 0, 0), block_size=(10, 10, 5), n_blocks=(2, 2, 2), default_density=-1.0)
+        create_block_model(
+            origin=(0, 0, 0),
+            block_size=(10, 10, 5),
+            n_blocks=(2, 2, 2),
+            default_density=-1.0,
+        )
 
     # Test ordinary_kriging_block_estimation
-    samples_xyz = np.array([
-        [110.0, 210.0, 5.0],
-        [120.0, 220.0, 5.0],
-        [130.0, 210.0, 5.0],
-        [140.0, 230.0, 5.0],
-        [115.0, 225.0, 10.0],
-    ])
+    samples_xyz = np.array(
+        [
+            [110.0, 210.0, 5.0],
+            [120.0, 220.0, 5.0],
+            [130.0, 210.0, 5.0],
+            [140.0, 230.0, 5.0],
+            [115.0, 225.0, 10.0],
+        ]
+    )
     sample_grades = np.array([1.5, 2.0, 1.2, 0.8, 1.8])
 
     est, var, disp_var, lagrange = ordinary_kriging_block_estimation(
@@ -2536,20 +3327,24 @@ def test_domain_constrained_estimation_all_methods():
     # Setup two sharply contrasting domains separated at x = 50m
     # Domain A (x < 50): High grade ~10.0% Cu
     # Domain B (x >= 50): Low grade ~1.0% Cu
-    samples_xy = np.array([
-        [20.0, 30.0],
-        [40.0, 30.0],
-        [60.0, 30.0],
-        [80.0, 30.0],
-    ])
+    samples_xy = np.array(
+        [
+            [20.0, 30.0],
+            [40.0, 30.0],
+            [60.0, 30.0],
+            [80.0, 30.0],
+        ]
+    )
     sample_grades = np.array([10.0, 10.0, 1.0, 1.0])
     sample_domains = np.array(["DomainA", "DomainA", "DomainB", "DomainB"])
 
     # Target points right next to the boundary
-    grid_points = np.array([
-        [49.0, 30.0],  # Right on the Domain A side
-        [51.0, 30.0],  # Right on the Domain B side
-    ])
+    grid_points = np.array(
+        [
+            [49.0, 30.0],  # Right on the Domain A side
+            [51.0, 30.0],  # Right on the Domain B side
+        ]
+    )
     grid_domains = np.array(["DomainA", "DomainB"])
 
     # 1. Test IDW with domain segregation (no smearing across x=50!)
@@ -2602,14 +3397,16 @@ def test_domain_constrained_estimation_all_methods():
     assert np.isclose(sk_est[1], 1.0)
 
     # 5. Test Polygonal Estimation with domain_col
-    dh_df = pd.DataFrame({
-        "hole_id": ["DH01", "DH02", "DH03", "DH04"],
-        "x": [20.0, 40.0, 60.0, 80.0],
-        "y": [30.0, 30.0, 30.0, 30.0],
-        "grade": [10.0, 10.0, 1.0, 1.0],
-        "thickness": [5.0, 5.0, 5.0, 5.0],
-        "domain": ["DomainA", "DomainA", "DomainB", "DomainB"],
-    })
+    dh_df = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH02", "DH03", "DH04"],
+            "x": [20.0, 40.0, 60.0, 80.0],
+            "y": [30.0, 30.0, 30.0, 30.0],
+            "grade": [10.0, 10.0, 1.0, 1.0],
+            "thickness": [5.0, 5.0, 5.0, 5.0],
+            "domain": ["DomainA", "DomainA", "DomainB", "DomainB"],
+        }
+    )
     poly_df = polygonal_estimation(dh_df, bulk_density=2.7, domain_col="domain")
     assert len(poly_df) == 4
     assert "domain" in poly_df.columns
@@ -2618,15 +3415,17 @@ def test_domain_constrained_estimation_all_methods():
     assert (poly_df[poly_df["domain"] == "DomainB"]["grade"] == 1.0).all()
 
     # 6. Test Block Kriging with domain segregation
-    bm_domains = pd.DataFrame({
-        "x": [40.0, 60.0],
-        "y": [30.0, 30.0],
-        "z": [0.0, 0.0],
-        "dx": [10.0, 10.0],
-        "dy": [10.0, 10.0],
-        "dz": [5.0, 5.0],
-        "domain": ["DomainA", "DomainB"],
-    })
+    bm_domains = pd.DataFrame(
+        {
+            "x": [40.0, 60.0],
+            "y": [30.0, 30.0],
+            "z": [0.0, 0.0],
+            "dx": [10.0, 10.0],
+            "dy": [10.0, 10.0],
+            "dz": [5.0, 5.0],
+            "domain": ["DomainA", "DomainB"],
+        }
+    )
     samples_xyz = np.column_stack([samples_xy, np.zeros(len(samples_xy))])
     blk_est, blk_var, blk_disp, blk_lag = ordinary_kriging_block_estimation(
         samples_xyz=samples_xyz,
@@ -2650,11 +3449,13 @@ def test_simple_kriging_block_estimation():
         n_blocks=(3, 3, 1),
         default_density=2.70,
     )
-    samples_xyz = np.array([
-        [5.0, 5.0, 2.5],
-        [15.0, 5.0, 2.5],
-        [25.0, 5.0, 2.5],
-    ])
+    samples_xyz = np.array(
+        [
+            [5.0, 5.0, 2.5],
+            [15.0, 5.0, 2.5],
+            [25.0, 5.0, 2.5],
+        ]
+    )
     sample_grades = np.array([3.0, 2.0, 1.0])
 
     est, var, disp_var = simple_kriging_block_estimation(
@@ -2689,19 +3490,23 @@ def test_simple_kriging_block_estimation():
     assert np.allclose(est_far, 5.5)
 
     # Multi-domain Simple Block Kriging
-    bm_dom = pd.DataFrame({
-        "x": [5.0, 100.0],
-        "y": [5.0, 100.0],
-        "z": [2.5, 2.5],
-        "dx": [10.0, 10.0],
-        "dy": [10.0, 10.0],
-        "dz": [5.0, 5.0],
-        "domain": ["DomainA", "DomainB"],
-    })
-    samples_dom = np.array([
-        [5.0, 5.0, 2.5],
-        [100.0, 100.0, 2.5],
-    ])
+    bm_dom = pd.DataFrame(
+        {
+            "x": [5.0, 100.0],
+            "y": [5.0, 100.0],
+            "z": [2.5, 2.5],
+            "dx": [10.0, 10.0],
+            "dy": [10.0, 10.0],
+            "dz": [5.0, 5.0],
+            "domain": ["DomainA", "DomainB"],
+        }
+    )
+    samples_dom = np.array(
+        [
+            [5.0, 5.0, 2.5],
+            [100.0, 100.0, 2.5],
+        ]
+    )
     grades_dom = np.array([10.0, 1.0])
     s_domains = ["DomainA", "DomainB"]
 
@@ -2730,10 +3535,12 @@ def test_block_model_visualization_suite():
     bm["estimated_grade"] = np.linspace(0.2, 2.5, len(bm))
     bm["kriging_variance"] = np.linspace(0.1, 0.9, len(bm))
 
-    samples_xyz = np.array([
-        [15.0, 15.0, 7.5],
-        [25.0, 25.0, 7.5],
-    ])
+    samples_xyz = np.array(
+        [
+            [15.0, 15.0, 7.5],
+            [25.0, 25.0, 7.5],
+        ]
+    )
     sample_grades = np.array([1.5, 2.0])
     grade_bins = [0.0, 0.5, 1.0, 2.0, 3.0]
 
@@ -2770,7 +3577,6 @@ def test_block_model_visualization_suite():
         plot_block_model_orthogonal_slices(bm, cross_section_view="invalid")
     with pytest.raises(ValueError, match="long_section_view"):
         plot_block_model_orthogonal_slices(bm, long_section_view="invalid")
-
 
     # 2. Test Bench Gallery
     fig2, axes2 = plot_block_model_bench_gallery(
@@ -2852,11 +3658,13 @@ def test_consistent_contained_metal_scaling():
     (g/t Au with metal_factor=1e-6 for tonnes of metal, or metal_unit="koz").
     """
     # 1. Base metal scenario: 1 Mt @ 2.0% Cu
-    res_base = pd.DataFrame({
-        "category": ["Measured"],
-        "grade": [2.0],
-        "tonnes": [1_000_000.0],
-    })
+    res_base = pd.DataFrame(
+        {
+            "category": ["Measured"],
+            "grade": [2.0],
+            "tonnes": [1_000_000.0],
+        }
+    )
     # In-situ contained metal = 1_000_000 * 2.0 * 0.01 = 20,000 t = 20 kt
     res_stmt_base = format_resource_statement(
         res_base,
@@ -2866,7 +3674,11 @@ def test_consistent_contained_metal_scaling():
         metal_factor=0.01,
     )
     # Row 0 (Measured): Contained Metal should be 20 kt
-    assert float(res_stmt_base.loc[res_stmt_base["Classification"] == "Measured", "Contained Metal (kt)"].iloc[0]) == pytest.approx(20.0)
+    assert float(
+        res_stmt_base.loc[
+            res_stmt_base["Classification"] == "Measured", "Contained Metal (kt)"
+        ].iloc[0]
+    ) == pytest.approx(20.0)
 
     # Convert to reserve with 0 dilution and 100% recovery
     resv_base = convert_resource_to_reserve(
@@ -2890,16 +3702,22 @@ def test_consistent_contained_metal_scaling():
         metal_factor=0.01,
     )
     # Contained metal in reserve statement should match resource exactly: 20 kt
-    assert float(resv_stmt_base.loc[resv_stmt_base["Classification"] == "Proven Reserve", "Contained Metal (kt)"].iloc[0]) == pytest.approx(20.0)
+    assert float(
+        resv_stmt_base.loc[
+            resv_stmt_base["Classification"] == "Proven Reserve", "Contained Metal (kt)"
+        ].iloc[0]
+    ) == pytest.approx(20.0)
 
     # 2. Precious metal scenario: 5 Mt @ 2.5 g/t Au
     # 5,000,000 t * 2.5 g/t * 1e-6 = 12.5 tonnes of Au
     # In koz: 12.5 tonnes / 0.0311035 tonnes/koz = 401.88 koz Au
-    res_gold = pd.DataFrame({
-        "category": ["Indicated"],
-        "grade": [2.5],
-        "tonnes": [5_000_000.0],
-    })
+    res_gold = pd.DataFrame(
+        {
+            "category": ["Indicated"],
+            "grade": [2.5],
+            "tonnes": [5_000_000.0],
+        }
+    )
     res_stmt_gold = format_resource_statement(
         res_gold,
         cutoff_grade=0.5,
@@ -2909,7 +3727,11 @@ def test_consistent_contained_metal_scaling():
         metal_factor=1e-6,
     )
     # Contained metal in koz should be ~402 koz
-    gold_metal_res = float(res_stmt_gold.loc[res_stmt_gold["Classification"] == "Indicated", "Contained Metal (koz)"].iloc[0])
+    gold_metal_res = float(
+        res_stmt_gold.loc[
+            res_stmt_gold["Classification"] == "Indicated", "Contained Metal (koz)"
+        ].iloc[0]
+    )
     assert gold_metal_res == pytest.approx(12.5 / 0.0311035, rel=1e-2)
 
     resv_gold = convert_resource_to_reserve(
@@ -2933,7 +3755,12 @@ def test_consistent_contained_metal_scaling():
         metal_unit="koz",
         metal_factor=1e-6,
     )
-    gold_metal_resv = float(resv_stmt_gold.loc[resv_stmt_gold["Classification"] == "Probable Reserve", "Contained Metal (koz)"].iloc[0])
+    gold_metal_resv = float(
+        resv_stmt_gold.loc[
+            resv_stmt_gold["Classification"] == "Probable Reserve",
+            "Contained Metal (koz)",
+        ].iloc[0]
+    )
     assert gold_metal_resv == pytest.approx(gold_metal_res, rel=1e-2)
 
 
@@ -2973,9 +3800,7 @@ def test_anisotropy_rotation_matrix():
     assert np.allclose(R3_0 @ R3_0.T, np.eye(3))
 
     # Dipping and plunging structure: azimuth=45, dip=30, plunge=15
-    R3_arb = compute_anisotropy_rotation_matrix(
-        dim=3, angles=(45.0, 30.0, 15.0)
-    )
+    R3_arb = compute_anisotropy_rotation_matrix(dim=3, angles=(45.0, 30.0, 15.0))
     assert np.allclose(R3_arb @ R3_arb.T, np.eye(3))
 
     # Dict input in 3D
@@ -3007,11 +3832,13 @@ def test_transform_anisotropic_coordinates():
 
     # 2. 2D Anisotropic scaling along strike (Azimuth = 0, North)
     # Range major = 100m (along Y), Range minor = 20m (along X)
-    pts = np.array([
-        [0.0, 0.0],
-        [0.0, 50.0],   # 50m North (along strike)
-        [10.0, 0.0],   # 10m East (across strike)
-    ])
+    pts = np.array(
+        [
+            [0.0, 0.0],
+            [0.0, 50.0],  # 50m North (along strike)
+            [10.0, 0.0],  # 10m East (across strike)
+        ]
+    )
     t_pts, a_maj = transform_anisotropic_coordinates(
         pts, ranges=(100.0, 20.0), angles=0.0
     )
@@ -3024,14 +3851,18 @@ def test_transform_anisotropic_coordinates():
     assert d_across == pytest.approx(50.0)
 
     # 3. 3D Anisotropic scaling
-    pts3 = np.array([
-        [0.0, 0.0, 0.0],
-        [0.0, 50.0, 0.0],  # Major (along North Y)
-        [25.0, 0.0, 0.0],  # Semi-major (along East X)
-        [0.0, 0.0, 10.0],  # Minor (along Elevation Z)
-    ])
+    pts3 = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 50.0, 0.0],  # Major (along North Y)
+            [25.0, 0.0, 0.0],  # Semi-major (along East X)
+            [0.0, 0.0, 10.0],  # Minor (along Elevation Z)
+        ]
+    )
     t_pts3, a_maj3 = transform_anisotropic_coordinates(
-        pts3, ranges={"major": 100.0, "semi_major": 50.0, "minor": 20.0}, angles=(0, 0, 0)
+        pts3,
+        ranges={"major": 100.0, "semi_major": 50.0, "minor": 20.0},
+        angles=(0, 0, 0),
     )
     assert a_maj3 == 100.0
     # Major: 50m -> 50m
@@ -3062,7 +3893,9 @@ def test_compute_anisotropic_distance():
     assert dists[0, 1] == pytest.approx(50.0)  # 10m across strike * 5 = 50m
 
     # Single point c2
-    dists_single = compute_anisotropic_distance(c1, np.array([0.0, 0.0]), ranges=(100.0, 20.0), angles=0.0)
+    dists_single = compute_anisotropic_distance(
+        c1, np.array([0.0, 0.0]), ranges=(100.0, 20.0), angles=0.0
+    )
     assert np.allclose(dists_single, [0.0, 50.0])
 
     # Difference vectors
@@ -3075,7 +3908,7 @@ def test_theoretical_covariance_anisotropy():
     """Verifies directional spatial covariance honoring structural anisotropy."""
     # Coordinate differences of 30m along North (Y) and 30m along East (X)
     diff_along = np.array([[0.0, 30.0]])  # along strike
-    diff_across = np.array([[30.0, 0.0]]) # across strike
+    diff_across = np.array([[30.0, 0.0]])  # across strike
 
     # Strike = 0 (North), Major = 100m, Minor = 25m
     cov_along = _theoretical_covariance(
@@ -3118,7 +3951,12 @@ def test_idw_and_nn_anisotropy():
     # Sample B equivalent distance: 25m * (100/20) = 125m
     # Sample A is now much closer in anisotropic metric space!
     est_aniso, dist_aniso = inverse_distance_weighting(
-        samples, grades, target, power=2.0, anisotropy_ranges=(100.0, 20.0), anisotropy_angles=0.0
+        samples,
+        grades,
+        target,
+        power=2.0,
+        anisotropy_ranges=(100.0, 20.0),
+        anisotropy_angles=0.0,
     )
     # Heavily weighted toward Sample A (10.0)
     assert est_aniso[0] > 8.5
@@ -3169,15 +4007,25 @@ def test_kriging_grid_estimation_anisotropy():
 
     # Invariance: passing equal anisotropy ranges reproduces isotropic result exactly
     est_ok_eq, var_ok_eq = ordinary_kriging_grid_estimation(
-        samples, grades, target, sill=1.0, range_param=100.0, anisotropy_ranges=(100.0, 100.0)
+        samples,
+        grades,
+        target,
+        sill=1.0,
+        range_param=100.0,
+        anisotropy_ranges=(100.0, 100.0),
     )
     assert est_ok_eq[0] == pytest.approx(est_ok_iso[0], rel=1e-5)
     assert var_ok_eq[0] == pytest.approx(var_ok_iso[0], rel=1e-5)
 
     # 2. Anisotropic Ordinary Kriging: strike=0 (North), major=100m, minor=25m
     est_ok_aniso, var_ok_aniso = ordinary_kriging_grid_estimation(
-        samples, grades, target, sill=1.0, range_param=100.0,
-        anisotropy_ranges=(100.0, 25.0), anisotropy_angles=0.0
+        samples,
+        grades,
+        target,
+        sill=1.0,
+        range_param=100.0,
+        anisotropy_ranges=(100.0, 25.0),
+        anisotropy_angles=0.0,
     )
     # Sample 1 (North) is within major range (40m < 100m), Sample 2 (East) is beyond minor range (40m > 25m)
     # Sample 1 receives majority of weight (w1=0.716 vs w2=0.284 in OK due to sum-to-1 constraint)
@@ -3186,8 +4034,14 @@ def test_kriging_grid_estimation_anisotropy():
 
     # 3. Anisotropic Simple Kriging
     est_sk_aniso, var_sk_aniso = simple_kriging_grid_estimation(
-        samples, grades, target, mean=5.0, sill=1.0, range_param=100.0,
-        anisotropy_ranges=(100.0, 25.0), anisotropy_angles=0.0
+        samples,
+        grades,
+        target,
+        mean=5.0,
+        sill=1.0,
+        range_param=100.0,
+        anisotropy_ranges=(100.0, 25.0),
+        anisotropy_angles=0.0,
     )
     assert est_sk_aniso[0] > 7.0
 
@@ -3195,8 +4049,13 @@ def test_kriging_grid_estimation_anisotropy():
     samples_d = np.array([[0.0, 40.0], [40.0, 0.0], [0.0, 30.0]])
     grades_d = np.array([10.0, 2.0, 8.0])
     est_d, _ = ordinary_kriging_grid_estimation(
-        samples_d, grades_d, target, sill=1.0, range_param=100.0,
-        sample_domains=["A", "A", "B"], grid_domains=["A"],
+        samples_d,
+        grades_d,
+        target,
+        sill=1.0,
+        range_param=100.0,
+        sample_domains=["A", "A", "B"],
+        grid_domains=["A"],
         anisotropy_ranges={"A": (100.0, 25.0), "B": (80.0, 30.0)},
         anisotropy_angles={"A": 0.0, "B": 90.0},
     )
@@ -3211,12 +4070,14 @@ def test_block_kriging_3d_anisotropy():
         n_blocks=(2, 2, 2),
         default_density=2.70,
     )
-    samples = np.array([
-        [10.0, 10.0, 5.0],
-        [10.0, 30.0, 5.0],
-        [30.0, 10.0, 5.0],
-        [30.0, 30.0, 5.0],
-    ])
+    samples = np.array(
+        [
+            [10.0, 10.0, 5.0],
+            [10.0, 30.0, 5.0],
+            [30.0, 10.0, 5.0],
+            [30.0, 30.0, 5.0],
+        ]
+    )
     grades = np.array([1.5, 2.0, 1.2, 2.5])
 
     # 1. Isotropic baseline
@@ -3264,11 +4125,13 @@ def test_classification_by_drill_spacing_anisotropy():
     """Verifies drillhole spacing classification using anisotropic search ellipsoids."""
     grid_pts = np.array([[0.0, 0.0]])
     # 3 drillholes located 45m along strike (North Y) and spaced 10m in X
-    samples = np.array([
-        [-10.0, 45.0],
-        [0.0, 45.0],
-        [10.0, 45.0],
-    ])
+    samples = np.array(
+        [
+            [-10.0, 45.0],
+            [0.0, 45.0],
+            [10.0, 45.0],
+        ]
+    )
 
     # 1. Under isotropic radius max_radius_measured=30m:
     # Physical distance is ~45m > 30m, so it cannot qualify for Measured
@@ -3317,14 +4180,16 @@ def test_compositing_unassayed_gap_zero_treatment():
     # 1.0 - 2.5m: UNASSAYED GAP of 1.5m (e.g. unsampled waste or core loss)
     # 2.5 - 3.0m: 4.0% grade (contained metal = 0.5 * 4 = 2 units)
     # Total raw contained metal = 12 units
-    df = pd.DataFrame({
-        "hole_id": ["DH01", "DH01"],
-        "from_m": [0.0, 2.5],
-        "to_m": [1.0, 3.0],
-        "grade": [10.0, 4.0],
-        "x": [100.0, 100.0],
-        "y": [200.0, 200.0],
-    })
+    df = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH01"],
+            "from_m": [0.0, 2.5],
+            "to_m": [1.0, 3.0],
+            "grade": [10.0, 4.0],
+            "x": [100.0, 100.0],
+            "y": [200.0, 200.0],
+        }
+    )
 
     # 1. Default unassayed_treatment="zero" with 2.0m composites:
     # Comp 1: [0.0, 2.0]: 1.0m @ 10.0% + 1.0m @ 0.0% -> grade = 5.0%
@@ -3368,12 +4233,14 @@ def test_compositing_unassayed_gap_zero_treatment():
 
 def test_compositing_unassayed_gap_split_treatment():
     """Verifies that unassayed gaps trigger run splits when unassayed_treatment='split'."""
-    df = pd.DataFrame({
-        "hole_id": ["DH01", "DH01"],
-        "from_m": [0.0, 2.5],
-        "to_m": [1.0, 3.5],
-        "grade": [10.0, 4.0],
-    })
+    df = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH01"],
+            "from_m": [0.0, 2.5],
+            "to_m": [1.0, 3.5],
+            "grade": [10.0, 4.0],
+        }
+    )
 
     # Under 'split', the 1.5m gap resets the run.
     # Run 1: [0.0, 1.0] (1.0m length). With target 2.0m and min_length_ratio 0.50, kept as [0, 1] @ 10.0%
@@ -3400,12 +4267,14 @@ def test_compositing_unassayed_gap_split_treatment():
 
 def test_compositing_missing_grade_codes_and_nan():
     """Verifies handling of explicit NaN and negative missing assay codes."""
-    df = pd.DataFrame({
-        "hole_id": ["DH01", "DH01", "DH01", "DH01"],
-        "from_m": [0.0, 2.0, 4.0, 6.0],
-        "to_m": [2.0, 4.0, 6.0, 8.0],
-        "grade": [5.0, np.nan, -999.0, 3.0],
-    })
+    df = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH01", "DH01", "DH01"],
+            "from_m": [0.0, 2.0, 4.0, 6.0],
+            "to_m": [2.0, 4.0, 6.0, 8.0],
+            "grade": [5.0, np.nan, -999.0, 3.0],
+        }
+    )
 
     # 1. Under "zero": missing intervals are treated as 0.0%
     comp_zero = composite_drillhole_intervals(
@@ -3436,12 +4305,14 @@ def test_compositing_missing_grade_codes_and_nan():
 def test_compositing_min_coverage_ratio():
     """Verifies that composites with low assay coverage are discarded when min_coverage_ratio is set."""
     # 0.5m sampled @ 8.0%, 1.5m gap -> 2m composite has coverage_ratio = 0.5 / 2.0 = 0.25
-    df = pd.DataFrame({
-        "hole_id": ["DH01", "DH01"],
-        "from_m": [0.0, 2.0],
-        "to_m": [0.5, 4.0],
-        "grade": [8.0, 2.0],
-    })
+    df = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH01"],
+            "from_m": [0.0, 2.0],
+            "to_m": [0.5, 4.0],
+            "grade": [8.0, 2.0],
+        }
+    )
 
     # min_coverage_ratio = 0.50 -> Comp 1 ([0, 2], coverage 0.25) must be discarded!
     # Comp 2 ([2, 4], coverage 1.0) is retained.
@@ -3458,13 +4329,15 @@ def test_compositing_min_coverage_ratio():
 
 def test_compositing_non_contiguous_domain_repetition():
     """Verifies that repeating domains (A -> B -> A) are treated as distinct runs without crossing contacts."""
-    df = pd.DataFrame({
-        "hole_id": ["DH01", "DH01", "DH01"],
-        "from_m": [0.0, 6.0, 10.0],
-        "to_m": [6.0, 10.0, 16.0],
-        "grade": [3.0, 0.2, 5.0],
-        "domain": ["Ore", "Waste", "Ore"],
-    })
+    df = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH01", "DH01"],
+            "from_m": [0.0, 6.0, 10.0],
+            "to_m": [6.0, 10.0, 16.0],
+            "grade": [3.0, 0.2, 5.0],
+            "domain": ["Ore", "Waste", "Ore"],
+        }
+    )
 
     comp_dom = composite_drillhole_intervals(
         df,
@@ -3476,7 +4349,14 @@ def test_compositing_non_contiguous_domain_repetition():
     # Ore run 2: [10, 12], [12, 14], [14, 16] (3 composites)
     assert len(comp_dom) == 8
     assert list(comp_dom["domain"]) == [
-        "Ore", "Ore", "Ore", "Waste", "Waste", "Ore", "Ore", "Ore"
+        "Ore",
+        "Ore",
+        "Ore",
+        "Waste",
+        "Waste",
+        "Ore",
+        "Ore",
+        "Ore",
     ]
     # Check that Ore run 1 ends at 6.0 and Ore run 2 starts at 10.0
     assert comp_dom.iloc[2]["to_m"] == pytest.approx(6.0)
@@ -3487,32 +4367,38 @@ def test_compositing_non_contiguous_domain_repetition():
 def test_compositing_error_and_validation():
     """Verifies strict validation of invalid intervals and unassayed_treatment='error'."""
     # 1. from >= to
-    df_inv = pd.DataFrame({
-        "hole_id": ["DH01"],
-        "from_m": [5.0],
-        "to_m": [3.0],
-        "grade": [1.0],
-    })
+    df_inv = pd.DataFrame(
+        {
+            "hole_id": ["DH01"],
+            "from_m": [5.0],
+            "to_m": [3.0],
+            "grade": [1.0],
+        }
+    )
     with pytest.raises(ValueError, match="from_m .* >= to_m"):
         composite_drillhole_intervals(df_inv, composite_length=2.0)
 
     # 2. Overlapping intervals
-    df_overlap = pd.DataFrame({
-        "hole_id": ["DH01", "DH01"],
-        "from_m": [0.0, 2.0],
-        "to_m": [3.0, 5.0],  # row 1 ends at 3.0, but row 2 starts at 2.0
-        "grade": [1.0, 2.0],
-    })
+    df_overlap = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH01"],
+            "from_m": [0.0, 2.0],
+            "to_m": [3.0, 5.0],  # row 1 ends at 3.0, but row 2 starts at 2.0
+            "grade": [1.0, 2.0],
+        }
+    )
     with pytest.raises(ValueError, match="Overlapping intervals detected"):
         composite_drillhole_intervals(df_overlap, composite_length=2.0)
 
     # 3. unassayed_treatment="error" raises on unassayed gap
-    df_gap = pd.DataFrame({
-        "hole_id": ["DH01", "DH01"],
-        "from_m": [0.0, 5.0],
-        "to_m": [2.0, 7.0],
-        "grade": [1.0, 2.0],
-    })
+    df_gap = pd.DataFrame(
+        {
+            "hole_id": ["DH01", "DH01"],
+            "from_m": [0.0, 5.0],
+            "to_m": [2.0, 7.0],
+            "grade": [1.0, 2.0],
+        }
+    )
     with pytest.raises(ValueError, match="Unassayed depth gap"):
         composite_drillhole_intervals(
             df_gap, composite_length=2.0, unassayed_treatment="error"
@@ -3537,11 +4423,13 @@ def test_inverse_distance_weighting_block_estimation_basic():
         n_blocks=(3, 3, 2),  # 18 blocks
         default_density=2.70,
     )
-    samples_xyz = np.array([
-        [5.0, 5.0, 2.5],     # Centroid of block (0, 0, 0)
-        [25.0, 5.0, 2.5],    # Centroid of block (2, 0, 0)
-        [15.0, 25.0, 7.5],   # Centroid of block (1, 2, 1)
-    ])
+    samples_xyz = np.array(
+        [
+            [5.0, 5.0, 2.5],  # Centroid of block (0, 0, 0)
+            [25.0, 5.0, 2.5],  # Centroid of block (2, 0, 0)
+            [15.0, 25.0, 7.5],  # Centroid of block (1, 2, 1)
+        ]
+    )
     sample_grades = np.array([10.0, 2.0, 5.0])
 
     # Centroid estimation (1, 1, 1)
@@ -3557,7 +4445,10 @@ def test_inverse_distance_weighting_block_estimation_basic():
     assert len(dist_cent) == 18
     # Exact collocation at block (0, 0, 0) centroid
     assert np.isclose(est_cent[0], 10.0)
-    assert np.isclose(dist_cent[0], (0.0 + 20.0 + np.linalg.norm(samples_xyz[2] - np.array([5.0, 5.0, 2.5]))) / 3.0)
+    assert np.isclose(
+        dist_cent[0],
+        (0.0 + 20.0 + np.linalg.norm(samples_xyz[2] - np.array([5.0, 5.0, 2.5]))) / 3.0,
+    )
 
     # Discretized block support estimation (4, 4, 2)
     est_disc, dist_disc = inverse_distance_weighting_block_estimation(
@@ -3595,11 +4486,13 @@ def test_inverse_distance_weighting_block_estimation_anisotropy_and_masking():
         n_blocks=(5, 5, 2),  # 50 blocks
         default_density=2.70,
     )
-    samples_xyz = np.array([
-        [25.0, 25.0, 2.5],  # Center
-        [45.0, 25.0, 2.5],  # 20m East (+X)
-        [25.0, 45.0, 2.5],  # 20m North (+Y)
-    ])
+    samples_xyz = np.array(
+        [
+            [25.0, 25.0, 2.5],  # Center
+            [45.0, 25.0, 2.5],  # 20m East (+X)
+            [25.0, 45.0, 2.5],  # 20m North (+Y)
+        ]
+    )
     sample_grades = np.array([5.0, 10.0, 1.0])
 
     # Anisotropy strongly elongated along strike (azimuth=90, along East)
@@ -3629,12 +4522,14 @@ def test_inverse_distance_weighting_block_estimation_anisotropy_and_masking():
 
     # Extrapolation masking
     # Define samples forming a 3D tetrahedron
-    tet_samples = np.array([
-        [10.0, 10.0, 2.5],
-        [40.0, 10.0, 2.5],
-        [25.0, 40.0, 2.5],
-        [25.0, 25.0, 7.5],
-    ])
+    tet_samples = np.array(
+        [
+            [10.0, 10.0, 2.5],
+            [40.0, 10.0, 2.5],
+            [25.0, 40.0, 2.5],
+            [25.0, 25.0, 7.5],
+        ]
+    )
     tet_grades = np.array([2.0, 3.0, 4.0, 5.0])
     est_masked, _ = inverse_distance_weighting_block_estimation(
         samples_xyz=tet_samples,
@@ -3651,19 +4546,23 @@ def test_inverse_distance_weighting_block_estimation_anisotropy_and_masking():
 
 def test_inverse_distance_weighting_block_estimation_domains_and_validations():
     # Multi-domain block model
-    bm_dom = pd.DataFrame({
-        "x": [5.0, 50.0],
-        "y": [5.0, 50.0],
-        "z": [2.5, 2.5],
-        "dx": [10.0, 10.0],
-        "dy": [10.0, 10.0],
-        "dz": [5.0, 5.0],
-        "domain": ["DomainA", "DomainB"],
-    })
-    samples_xyz = np.array([
-        [5.0, 5.0, 2.5],
-        [50.0, 50.0, 2.5],
-    ])
+    bm_dom = pd.DataFrame(
+        {
+            "x": [5.0, 50.0],
+            "y": [5.0, 50.0],
+            "z": [2.5, 2.5],
+            "dx": [10.0, 10.0],
+            "dy": [10.0, 10.0],
+            "dz": [5.0, 5.0],
+            "domain": ["DomainA", "DomainB"],
+        }
+    )
+    samples_xyz = np.array(
+        [
+            [5.0, 5.0, 2.5],
+            [50.0, 50.0, 2.5],
+        ]
+    )
     sample_grades = np.array([10.0, 1.0])
     sample_domains = ["DomainA", "DomainB"]
 
@@ -3719,7 +4618,9 @@ def test_inverse_distance_weighting_block_estimation_domains_and_validations():
             samples_xyz, sample_grades, bm_dom, max_radius=0.0
         )
 
-    with pytest.raises(ValueError, match="discretization must be a tuple of 3 positive integers"):
+    with pytest.raises(
+        ValueError, match="discretization must be a tuple of 3 positive integers"
+    ):
         inverse_distance_weighting_block_estimation(
             samples_xyz, sample_grades, bm_dom, discretization=(4, 0, 2)
         )
@@ -3734,19 +4635,33 @@ def test_inverse_distance_weighting_block_estimation_domains_and_validations():
             np.array([[1.0, 2.0]]), np.array([1.0]), bm_dom
         )
 
-    with pytest.raises(ValueError, match="Both domain_col and sample_domains must be provided together"):
+    with pytest.raises(
+        ValueError, match="Both domain_col and sample_domains must be provided together"
+    ):
         inverse_distance_weighting_block_estimation(
             samples_xyz, sample_grades, bm_dom, domain_col="domain"
         )
 
-    with pytest.raises(ValueError, match="domain_col 'nonexistent' not found in block_model"):
+    with pytest.raises(
+        ValueError, match="domain_col 'nonexistent' not found in block_model"
+    ):
         inverse_distance_weighting_block_estimation(
-            samples_xyz, sample_grades, bm_dom, domain_col="nonexistent", sample_domains=sample_domains
+            samples_xyz,
+            sample_grades,
+            bm_dom,
+            domain_col="nonexistent",
+            sample_domains=sample_domains,
         )
 
-    with pytest.raises(ValueError, match="sample_domains length .* must match samples_xyz"):
+    with pytest.raises(
+        ValueError, match="sample_domains length .* must match samples_xyz"
+    ):
         inverse_distance_weighting_block_estimation(
-            samples_xyz, sample_grades, bm_dom, domain_col="domain", sample_domains=["DomainA"]
+            samples_xyz,
+            sample_grades,
+            bm_dom,
+            domain_col="domain",
+            sample_domains=["DomainA"],
         )
 
     # mask_extrapolation validations
@@ -3756,15 +4671,20 @@ def test_inverse_distance_weighting_block_estimation_domains_and_validations():
         )
 
     # Coplanar samples in 3D (all z=0)
-    coplanar_samples = np.array([
-        [0.0, 0.0, 0.0],
-        [10.0, 0.0, 0.0],
-        [0.0, 10.0, 0.0],
-        [10.0, 10.0, 0.0],
-    ])
+    coplanar_samples = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [10.0, 10.0, 0.0],
+        ]
+    )
     with pytest.raises(ValueError, match="samples may be coplanar"):
         inverse_distance_weighting_block_estimation(
-            coplanar_samples, np.array([1.0, 2.0, 3.0, 4.0]), bm_dom, mask_extrapolation=True
+            coplanar_samples,
+            np.array([1.0, 2.0, 3.0, 4.0]),
+            bm_dom,
+            mask_extrapolation=True,
         )
 
 
@@ -3775,10 +4695,12 @@ def test_nearest_neighbor_block_estimation():
         n_blocks=(3, 1, 1),  # 3 blocks along X: centroids at x=5, 15, 25
         default_density=2.70,
     )
-    samples_xyz = np.array([
-        [4.0, 5.0, 2.5],   # Nearest to block 0 (x=5)
-        [24.0, 5.0, 2.5],  # Nearest to block 2 (x=25)
-    ])
+    samples_xyz = np.array(
+        [
+            [4.0, 5.0, 2.5],  # Nearest to block 0 (x=5)
+            [24.0, 5.0, 2.5],  # Nearest to block 2 (x=25)
+        ]
+    )
     sample_grades = np.array([8.0, 2.0])
 
     # Assigns nearest sample
@@ -3810,11 +4732,13 @@ def test_classify_resources_multi_hole_independence():
     grid_pts = np.array([[10.0, 10.0, 5.0]])
 
     # 3 downhole composites along the SAME drillhole DH01
-    dh_single_hole = np.array([
-        [10.0, 10.0, 2.0],
-        [10.0, 10.0, 5.0],
-        [10.0, 10.0, 8.0],
-    ])
+    dh_single_hole = np.array(
+        [
+            [10.0, 10.0, 2.0],
+            [10.0, 10.0, 5.0],
+            [10.0, 10.0, 8.0],
+        ]
+    )
     hole_ids_single = ["DH01", "DH01", "DH01"]
 
     # Without sample_hole_ids: 3 samples are counted -> satisfies min_holes_measured=3 -> "Measured"
@@ -3842,11 +4766,13 @@ def test_classify_resources_multi_hole_independence():
     assert cats_independent[0] == "Inferred"
 
     # Now add 2 independent drillholes within max_radius_measured
-    dh_three_holes = np.array([
-        [10.0, 10.0, 5.0],  # DH01
-        [15.0, 10.0, 5.0],  # DH02
-        [10.0, 15.0, 5.0],  # DH03
-    ])
+    dh_three_holes = np.array(
+        [
+            [10.0, 10.0, 5.0],  # DH01
+            [15.0, 10.0, 5.0],  # DH02
+            [10.0, 15.0, 5.0],  # DH03
+        ]
+    )
     hole_ids_three = ["DH01", "DH02", "DH03"]
     cats_three = classify_resources_by_drill_spacing(
         grid_points=grid_pts,
@@ -3874,20 +4800,24 @@ def test_classify_resources_multi_hole_independence():
 
 def test_classify_resources_domain_segregation():
     # 2 target blocks: Block 0 in DomainA (x=10), Block 1 in DomainB (x=50)
-    bm = pd.DataFrame({
-        "x": [10.0, 50.0],
-        "y": [10.0, 10.0],
-        "z": [5.0, 5.0],
-        "domain": ["DomainA", "DomainB"],
-    })
+    bm = pd.DataFrame(
+        {
+            "x": [10.0, 50.0],
+            "y": [10.0, 10.0],
+            "z": [5.0, 5.0],
+            "domain": ["DomainA", "DomainB"],
+        }
+    )
 
     # Samples: 3 in DomainA near x=10, but only 1 in DomainB near x=50
-    samples_xyz = np.array([
-        [10.0, 10.0, 5.0],
-        [12.0, 10.0, 5.0],
-        [8.0, 10.0, 5.0],
-        [50.0, 10.0, 5.0],
-    ])
+    samples_xyz = np.array(
+        [
+            [10.0, 10.0, 5.0],
+            [12.0, 10.0, 5.0],
+            [8.0, 10.0, 5.0],
+            [50.0, 10.0, 5.0],
+        ]
+    )
     sample_domains = ["DomainA", "DomainA", "DomainA", "DomainB"]
 
     # In DomainA: 3 samples -> Measured
@@ -3906,12 +4836,14 @@ def test_classify_resources_domain_segregation():
     assert cats[1] == "Inferred"
 
     # Multi-criteria classification with domain segregation and domain-isolated smoothing
-    bm_extended = pd.DataFrame({
-        "x": [10.0, 15.0, 45.0, 50.0],
-        "y": [10.0, 10.0, 10.0, 10.0],
-        "z": [5.0, 5.0, 5.0, 5.0],
-        "domain": ["DomainA", "DomainA", "DomainB", "DomainB"],
-    })
+    bm_extended = pd.DataFrame(
+        {
+            "x": [10.0, 15.0, 45.0, 50.0],
+            "y": [10.0, 10.0, 10.0, 10.0],
+            "z": [5.0, 5.0, 5.0, 5.0],
+            "domain": ["DomainA", "DomainA", "DomainB", "DomainB"],
+        }
+    )
     cats_multi = classify_mineral_resources(
         grid_points=bm_extended,
         samples_xy=samples_xyz,
@@ -3971,21 +4903,30 @@ def test_plot_swath_analysis_3axis_happy_path():
     zs = np.linspace(5, 95, 10)
     grid = np.array(np.meshgrid(xs, ys, zs)).T.reshape(-1, 3)
 
-    block_model = pd.DataFrame({
-        "x": grid[:, 0],
-        "y": grid[:, 1],
-        "z": grid[:, 2],
-        "estimated_grade": 1.2 + 0.3 * np.sin(grid[:, 0] / 50.0) + 0.2 * np.cos(grid[:, 2] / 20.0),
-        "nn_grade": 1.2 + 0.35 * np.sin(grid[:, 0] / 50.0) + 0.2 * np.cos(grid[:, 2] / 20.0) + np.random.normal(0, 0.05, len(grid)),
-        "tonnes": 25000.0,
-    })
+    block_model = pd.DataFrame(
+        {
+            "x": grid[:, 0],
+            "y": grid[:, 1],
+            "z": grid[:, 2],
+            "estimated_grade": 1.2
+            + 0.3 * np.sin(grid[:, 0] / 50.0)
+            + 0.2 * np.cos(grid[:, 2] / 20.0),
+            "nn_grade": 1.2
+            + 0.35 * np.sin(grid[:, 0] / 50.0)
+            + 0.2 * np.cos(grid[:, 2] / 20.0)
+            + np.random.normal(0, 0.05, len(grid)),
+            "tonnes": 25000.0,
+        }
+    )
 
-    drillholes = pd.DataFrame({
-        "x": [50.0, 100.0, 150.0, 200.0, 250.0],
-        "y": [50.0, 100.0, 150.0, 200.0, 250.0],
-        "z": [10.0, 30.0, 50.0, 70.0, 90.0],
-        "grade": [1.1, 1.4, 1.5, 0.9, 0.8],
-    })
+    drillholes = pd.DataFrame(
+        {
+            "x": [50.0, 100.0, 150.0, 200.0, 250.0],
+            "y": [50.0, 100.0, 150.0, 200.0, 250.0],
+            "z": [10.0, 30.0, 50.0, 70.0, 90.0],
+            "grade": [1.1, 1.4, 1.5, 0.9, 0.8],
+        }
+    )
 
     fig, axes = plot_swath_analysis_3axis(
         block_model=block_model,
@@ -4016,13 +4957,15 @@ def test_plot_swath_analysis_3axis_fallback_and_options():
     y = np.linspace(10, 100, 30)
     z = np.linspace(5, 50, 30)
     # Using 'grade' instead of default 'estimated_grade' to test fallback
-    block_model = pd.DataFrame({
-        "x": x,
-        "y": y,
-        "z": z,
-        "grade": 0.75 + 0.1 * np.random.randn(30),
-        "tonnes": 10000.0,
-    })
+    block_model = pd.DataFrame(
+        {
+            "x": x,
+            "y": y,
+            "z": z,
+            "grade": 0.75 + 0.1 * np.random.randn(30),
+            "tonnes": 10000.0,
+        }
+    )
 
     # Scalar bin_widths
     fig, axes = plot_swath_analysis_3axis(
@@ -4053,7 +4996,9 @@ def test_plot_swath_analysis_3axis_validations():
 
     # Invalid bin_widths (wrong length)
     bm_valid = pd.DataFrame({"x": [1.0], "y": [2.0], "z": [3.0], "grade": [1.0]})
-    with pytest.raises(ValueError, match="bin_widths must be a float or a sequence of 3 floats"):
+    with pytest.raises(
+        ValueError, match="bin_widths must be a float or a sequence of 3 floats"
+    ):
         plot_swath_analysis_3axis(bm_valid, bin_widths=(10.0, 20.0))
 
     # Non-positive bin width
@@ -4083,18 +5028,22 @@ def test_contact_profile_analysis_3d_planar():
     all_pts = np.vstack([host_pts, ore_pts])
     domains = ["HostRock"] * len(s_host) + ["OreZone"] * len(s_ore)
     # Step change: Host rock ~0.35%, Ore zone ~2.25%
-    grades = np.concatenate([
-        0.35 + 0.05 * np.random.randn(len(s_host)),
-        2.25 + 0.10 * np.random.randn(len(s_ore)),
-    ])
+    grades = np.concatenate(
+        [
+            0.35 + 0.05 * np.random.randn(len(s_host)),
+            2.25 + 0.10 * np.random.randn(len(s_ore)),
+        ]
+    )
 
-    df = pd.DataFrame({
-        "x": all_pts[:, 0],
-        "y": all_pts[:, 1],
-        "z": all_pts[:, 2],
-        "lithology": domains,
-        "grade": grades,
-    })
+    df = pd.DataFrame(
+        {
+            "x": all_pts[:, 0],
+            "y": all_pts[:, 1],
+            "z": all_pts[:, 2],
+            "lithology": domains,
+            "grade": grades,
+        }
+    )
 
     profile = contact_profile_analysis(
         df=df,
@@ -4138,13 +5087,15 @@ def test_contact_profile_analysis_3d_normal_vector():
     grades = 1.10 + 0.005 * s_vals
     domains = ["LowerUnit" if s < 0 else "UpperUnit" for s in s_vals]
 
-    df = pd.DataFrame({
-        "x": pts[:, 0],
-        "y": pts[:, 1],
-        "z": pts[:, 2],
-        "strat": domains,
-        "grade": grades,
-    })
+    df = pd.DataFrame(
+        {
+            "x": pts[:, 0],
+            "y": pts[:, 1],
+            "z": pts[:, 2],
+            "strat": domains,
+            "grade": grades,
+        }
+    )
 
     profile = contact_profile_analysis(
         df=df,
@@ -4172,20 +5123,24 @@ def test_contact_profile_analysis_3d_point_cloud():
     x_a = np.linspace(30.0, 48.0, 20)
     x_b = np.linspace(52.0, 70.0, 20)
 
-    df_a = pd.DataFrame({
-        "x": x_a,
-        "y": [50.0] * 20,
-        "z": np.linspace(5, 45, 20),
-        "domain": ["CountryRock"] * 20,
-        "cu": 0.20 + 0.02 * np.random.randn(20),
-    })
-    df_b = pd.DataFrame({
-        "x": x_b,
-        "y": [50.0] * 20,
-        "z": np.linspace(5, 45, 20),
-        "domain": ["OreBody"] * 20,
-        "cu": 1.90 + 0.05 * np.random.randn(20),
-    })
+    df_a = pd.DataFrame(
+        {
+            "x": x_a,
+            "y": [50.0] * 20,
+            "z": np.linspace(5, 45, 20),
+            "domain": ["CountryRock"] * 20,
+            "cu": 0.20 + 0.02 * np.random.randn(20),
+        }
+    )
+    df_b = pd.DataFrame(
+        {
+            "x": x_b,
+            "y": [50.0] * 20,
+            "z": np.linspace(5, 45, 20),
+            "domain": ["OreBody"] * 20,
+            "cu": 1.90 + 0.05 * np.random.randn(20),
+        }
+    )
     df = pd.concat([df_a, df_b], ignore_index=True)
 
     profile = contact_profile_analysis(
@@ -4205,67 +5160,91 @@ def test_contact_profile_analysis_3d_point_cloud():
 
 
 def test_contact_profile_analysis_3d_validations():
-    df_3d = pd.DataFrame({
-        "x": [10.0, 20.0],
-        "y": [10.0, 20.0],
-        "z": [5.0, 5.0],
-        "zone": ["A", "B"],
-        "grade": [0.5, 1.5],
-    })
+    df_3d = pd.DataFrame(
+        {
+            "x": [10.0, 20.0],
+            "y": [10.0, 20.0],
+            "z": [5.0, 5.0],
+            "zone": ["A", "B"],
+            "grade": [0.5, 1.5],
+        }
+    )
 
     # Dip out of range
     with pytest.raises(ValueError, match="contact_dip must be between 0 and 90"):
         contact_profile_analysis(
-            df_3d, domain_col="zone", grade_col="grade",
-            contact_plane_point=(0, 0, 0), contact_dip=95.0, contact_dip_direction=90.0
+            df_3d,
+            domain_col="zone",
+            grade_col="grade",
+            contact_plane_point=(0, 0, 0),
+            contact_dip=95.0,
+            contact_dip_direction=90.0,
         )
 
     # Dip direction out of range
     with pytest.raises(ValueError, match="contact_dip_direction must be in"):
         contact_profile_analysis(
-            df_3d, domain_col="zone", grade_col="grade",
-            contact_plane_point=(0, 0, 0), contact_dip=45.0, contact_dip_direction=365.0
+            df_3d,
+            domain_col="zone",
+            grade_col="grade",
+            contact_plane_point=(0, 0, 0),
+            contact_dip=45.0,
+            contact_dip_direction=365.0,
         )
 
     # Dip without dip direction
     with pytest.raises(ValueError, match="contact_dip_direction must be provided"):
         contact_profile_analysis(
-            df_3d, domain_col="zone", grade_col="grade",
-            contact_plane_point=(0, 0, 0), contact_dip=45.0
+            df_3d,
+            domain_col="zone",
+            grade_col="grade",
+            contact_plane_point=(0, 0, 0),
+            contact_dip=45.0,
         )
 
     # Dip without contact_plane_point
     with pytest.raises(ValueError, match="Must provide 'contact_plane_point'"):
         contact_profile_analysis(
-            df_3d, domain_col="zone", grade_col="grade",
-            contact_dip=45.0, contact_dip_direction=90.0
+            df_3d,
+            domain_col="zone",
+            grade_col="grade",
+            contact_dip=45.0,
+            contact_dip_direction=90.0,
         )
 
     # Zero length normal
     with pytest.raises(ValueError, match="contact_normal must have non-zero length"):
         contact_profile_analysis(
-            df_3d, domain_col="zone", grade_col="grade",
-            contact_plane_point=(0, 0, 0), contact_normal=(0, 0, 0)
+            df_3d,
+            domain_col="zone",
+            grade_col="grade",
+            contact_plane_point=(0, 0, 0),
+            contact_normal=(0, 0, 0),
         )
 
     # Missing z column for 3D contact plane
-    df_no_z = pd.DataFrame({
-        "x": [10.0, 20.0],
-        "y": [10.0, 20.0],
-        "zone": ["A", "B"],
-        "grade": [0.5, 1.5],
-    })
+    df_no_z = pd.DataFrame(
+        {
+            "x": [10.0, 20.0],
+            "y": [10.0, 20.0],
+            "zone": ["A", "B"],
+            "grade": [0.5, 1.5],
+        }
+    )
     with pytest.raises(ValueError, match="Required 3D coordinate column 'z'"):
         contact_profile_analysis(
-            df_no_z, domain_col="zone", grade_col="grade",
-            contact_plane_point=(0, 0, 0), contact_dip=45.0, contact_dip_direction=90.0
+            df_no_z,
+            domain_col="zone",
+            grade_col="grade",
+            contact_plane_point=(0, 0, 0),
+            contact_dip=45.0,
+            contact_dip_direction=90.0,
         )
 
     # Invalid contact_points shape
     with pytest.raises(ValueError, match="contact_points must be a 2D array"):
         contact_profile_analysis(
-            df_3d, domain_col="zone", grade_col="grade",
-            contact_points=np.ones((5, 4))
+            df_3d, domain_col="zone", grade_col="grade", contact_points=np.ones((5, 4))
         )
 
 
@@ -4274,16 +5253,32 @@ def test_plot_resource_and_reserve_classification_bench_filtering():
     xs = [10.0, 20.0, 10.0, 20.0, 10.0, 20.0]
     ys = [10.0, 10.0, 20.0, 20.0, 10.0, 10.0]
     zs = [10.0, 10.0, 20.0, 20.0, 30.0, 30.0]
-    cats = ["Measured", "Indicated", "Indicated", "Inferred", "Inferred", "Unclassified"]
-    statuses = ["Proven Reserve", "Probable Reserve", "Probable Reserve", "Sub-Economic / Waste", "Sub-Economic / Waste", "Inferred Resource (Excluded)"]
+    cats = [
+        "Measured",
+        "Indicated",
+        "Indicated",
+        "Inferred",
+        "Inferred",
+        "Unclassified",
+    ]
+    statuses = [
+        "Proven Reserve",
+        "Probable Reserve",
+        "Probable Reserve",
+        "Sub-Economic / Waste",
+        "Sub-Economic / Waste",
+        "Inferred Resource (Excluded)",
+    ]
 
-    bm = pd.DataFrame({
-        "x": xs,
-        "y": ys,
-        "z": zs,
-        "category": cats,
-        "status": statuses,
-    })
+    bm = pd.DataFrame(
+        {
+            "x": xs,
+            "y": ys,
+            "z": zs,
+            "category": cats,
+            "status": statuses,
+        }
+    )
 
     # Test Resource Map Bench Filtering
     fig_res, ax_res = plot_resource_classification_map(
@@ -4322,20 +5317,26 @@ def test_plot_resource_classification_orthogonal_slices():
     zs = np.linspace(10, 30, 3)
     grid = np.array(np.meshgrid(xs, ys, zs)).T.reshape(-1, 3)
 
-    categories = np.random.choice(["Measured", "Indicated", "Inferred", "Unclassified"], size=len(grid))
+    categories = np.random.choice(
+        ["Measured", "Indicated", "Inferred", "Unclassified"], size=len(grid)
+    )
 
-    bm = pd.DataFrame({
-        "x": grid[:, 0],
-        "y": grid[:, 1],
-        "z": grid[:, 2],
-        "category": categories,
-    })
+    bm = pd.DataFrame(
+        {
+            "x": grid[:, 0],
+            "y": grid[:, 1],
+            "z": grid[:, 2],
+            "category": categories,
+        }
+    )
 
-    samples_xyz = np.array([
-        [20.0, 20.0, 20.0],
-        [30.0, 30.0, 20.0],
-        [40.0, 40.0, 20.0],
-    ])
+    samples_xyz = np.array(
+        [
+            [20.0, 20.0, 20.0],
+            [30.0, 30.0, 20.0],
+            [40.0, 40.0, 20.0],
+        ]
+    )
 
     # Default views (north, west)
     fig, axes = plot_resource_classification_orthogonal_slices(
@@ -4384,12 +5385,20 @@ def test_plot_resource_classification_orthogonal_slices_validations():
         )
 
     # Invalid views
-    valid_bm = pd.DataFrame({"x": [1.0], "y": [2.0], "z": [3.0], "category": ["Measured"]})
-    with pytest.raises(ValueError, match="cross_section_view must be 'north' or 'south'"):
-        plot_resource_classification_orthogonal_slices(valid_bm, cross_section_view="up")
+    valid_bm = pd.DataFrame(
+        {"x": [1.0], "y": [2.0], "z": [3.0], "category": ["Measured"]}
+    )
+    with pytest.raises(
+        ValueError, match="cross_section_view must be 'north' or 'south'"
+    ):
+        plot_resource_classification_orthogonal_slices(
+            valid_bm, cross_section_view="up"
+        )
 
     with pytest.raises(ValueError, match="long_section_view must be 'west' or 'east'"):
-        plot_resource_classification_orthogonal_slices(valid_bm, long_section_view="down")
+        plot_resource_classification_orthogonal_slices(
+            valid_bm, long_section_view="down"
+        )
 
 
 def test_compute_block_dispersion_variance():
@@ -4436,11 +5445,13 @@ def test_visualization_slice_helpers():
         _find_nearest_slice_coords,
     )
 
-    df = pd.DataFrame({
-        "x": [10.0, 20.0, 30.0],
-        "y": [100.0, 110.0, 120.0],
-        "z": [50.0, 60.0, 70.0],
-    })
+    df = pd.DataFrame(
+        {
+            "x": [10.0, 20.0, 30.0],
+            "y": [100.0, 110.0, 120.0],
+            "z": [50.0, 60.0, 70.0],
+        }
+    )
 
     # _filter_bench_slice
     assert len(_filter_bench_slice(df, bench_z=None)) == 3
@@ -4459,14 +5470,18 @@ def test_visualization_slice_helpers():
     assert csv == "north"
     assert lsv == "west"
 
-    with pytest.raises(ValueError, match="cross_section_view must be 'north' or 'south'"):
+    with pytest.raises(
+        ValueError, match="cross_section_view must be 'north' or 'south'"
+    ):
         _validate_orthogonal_views("diagonal", "west")
 
     with pytest.raises(ValueError, match="long_section_view must be 'west' or 'east'"):
         _validate_orthogonal_views("north", "diagonal")
 
     # _find_nearest_slice_coords
-    tz, ty, tx = _find_nearest_slice_coords(df, bench_z=58.0, section_y=118.0, section_x=22.0)
+    tz, ty, tx = _find_nearest_slice_coords(
+        df, bench_z=58.0, section_y=118.0, section_x=22.0
+    )
     assert tz == 60.0
     assert ty == 120.0
     assert tx == 20.0
@@ -4483,13 +5498,15 @@ def test_resource_classification_gallery_and_3d():
     cats = ["Measured", "Indicated", "Inferred", "Unclassified"]
     categories = np.random.choice(cats, size=len(grid))
 
-    bm = pd.DataFrame({
-        "x": grid[:, 0],
-        "y": grid[:, 1],
-        "z": grid[:, 2],
-        "category": categories,
-        "tonnes": 1000.0,
-    })
+    bm = pd.DataFrame(
+        {
+            "x": grid[:, 0],
+            "y": grid[:, 1],
+            "z": grid[:, 2],
+            "category": categories,
+            "tonnes": 1000.0,
+        }
+    )
     samples_xyz = np.array([[15.0, 15.0, 110.0], [35.0, 35.0, 120.0]])
 
     # 1. Bench Gallery (auto-elevations and custom elevations)
@@ -4565,13 +5582,15 @@ def test_reserve_classification_suite():
     ]
     statuses = np.random.choice(reserve_statuses, size=len(grid))
 
-    bm = pd.DataFrame({
-        "x": grid[:, 0],
-        "y": grid[:, 1],
-        "z": grid[:, 2],
-        "status": statuses,
-        "tonnes": 2500.0,
-    })
+    bm = pd.DataFrame(
+        {
+            "x": grid[:, 0],
+            "y": grid[:, 1],
+            "z": grid[:, 2],
+            "status": statuses,
+            "tonnes": 2500.0,
+        }
+    )
     samples_xyz = np.array([[20.0, 20.0, 210.0], [40.0, 40.0, 220.0]])
 
     # 1. Orthogonal Slices
@@ -4649,7 +5668,9 @@ def test_reserve_classification_suite():
             pd.DataFrame({"x": [1.0], "y": [2.0], "z": [3.0]})
         )
 
-    with pytest.raises(ValueError, match="cross_section_view must be 'north' or 'south'"):
+    with pytest.raises(
+        ValueError, match="cross_section_view must be 'north' or 'south'"
+    ):
         plot_reserve_classification_orthogonal_slices(bm, cross_section_view="up")
 
     with pytest.raises(ValueError, match="long_section_view must be 'west' or 'east'"):
@@ -4662,7 +5683,9 @@ def test_classify_resources_by_sor_instability_warnings():
     ke = np.array([0.75, 0.80])
 
     # 1. SoR > 1.05 warning: emitted, but Measured is NOT disqualified by default
-    with pytest.warns(UserWarning, match=r"Kriging Neighborhood Instability.*Slope of Regression"):
+    with pytest.warns(
+        UserWarning, match=r"Kriging Neighborhood Instability.*Slope of Regression"
+    ):
         cats = classify_resources_by_sor(
             slopes_of_regression=sor_high,
             threshold_measured=0.80,
@@ -4688,10 +5711,14 @@ def test_solve_ordinary_kriging_system_ill_conditioned_warning():
     # Two near-collocated samples separated by 0.0001m with tiny nugget
     coords = np.array([[10.0, 10.0, 10.0], [10.0001, 10.0, 10.0]])
     diffs = coords[:, None, :] - coords[None, :, :]
-    K = _theoretical_covariance(np.linalg.norm(diffs, axis=2), "spherical", 0.0001, 1.0, 100.0)
+    K = _theoretical_covariance(
+        np.linalg.norm(diffs, axis=2), "spherical", 0.0001, 1.0, 100.0
+    )
     k0 = np.array([0.9, 0.9])
 
-    with pytest.warns(UserWarning, match=r"Ill-Conditioned Kriging System.*condition number is.*> 1e4"):
+    with pytest.warns(
+        UserWarning, match=r"Ill-Conditioned Kriging System.*condition number is.*> 1e4"
+    ):
         w, mu = _solve_ordinary_kriging_system(K, k0)
     assert len(w) == 2
     assert np.isclose(np.sum(w), 1.0)
@@ -4700,13 +5727,17 @@ def test_solve_ordinary_kriging_system_ill_conditioned_warning():
 def test_ordinary_kriging_block_estimation_instability_warnings():
     """Verifies that ordinary_kriging_block_estimation warns when ill-conditioned or anomalous Lagrange multipliers occur."""
     # Near-collocated samples triggering ill-conditioned matrix warning
-    samples_xyz = np.array([
-        [10.0, 10.0, 10.0],
-        [10.0001, 10.0, 10.0],
-        [20.0, 20.0, 10.0],
-    ])
+    samples_xyz = np.array(
+        [
+            [10.0, 10.0, 10.0],
+            [10.0001, 10.0, 10.0],
+            [20.0, 20.0, 10.0],
+        ]
+    )
     sample_grades = np.array([1.0, 1.2, 0.5])
-    bm = pd.DataFrame({"x": [15.0], "y": [15.0], "z": [10.0], "dx": [5.0], "dy": [5.0], "dz": [5.0]})
+    bm = pd.DataFrame(
+        {"x": [15.0], "y": [15.0], "z": [10.0], "dx": [5.0], "dy": [5.0], "dz": [5.0]}
+    )
 
     with pytest.warns(UserWarning, match=r"Ill-Conditioned Kriging System"):
         _, _, _, lags = ordinary_kriging_block_estimation(
@@ -4728,7 +5759,10 @@ def test_kriging_neighborhood_analysis_instability_warnings():
     # bv=0.5, var=0.1, mu=0.02 -> num=0.38, den=0.36 -> SoR=1.0556
     variances = np.array([0.1])
     mus = np.array([0.02])
-    with pytest.warns(UserWarning, match=r"Kriging Neighborhood Instability.*positive Lagrange multipliers"):
+    with pytest.warns(
+        UserWarning,
+        match=r"Kriging Neighborhood Instability.*positive Lagrange multipliers",
+    ):
         ke, sor = kriging_neighborhood_analysis(
             variances, block_dispersion_variance=bv, lagrange_multipliers=mus
         )
@@ -4738,6 +5772,7 @@ def test_kriging_neighborhood_analysis_instability_warnings():
     variances_ok = np.array([0.25])
     mus_neg = np.array([-0.05])
     import warnings
+
     with warnings.catch_warnings(record=True) as recorded:
         warnings.simplefilter("always")
         ke2, sor2 = kriging_neighborhood_analysis(
@@ -4751,15 +5786,17 @@ def test_filter_neighborhood_sectors_2d_quadrants():
     """Verifies that 2D quadrant partitioning correctly caps samples per quadrant (SW, SE, NW, NE)."""
     target = np.array([50.0, 50.0])
     # 4 samples in NE (quadrant 3), 1 in SW (quadrant 0), 1 in NW (quadrant 2), 1 in SE (quadrant 1)
-    coords = np.array([
-        [55.0, 55.0],  # NE (sec 3), dist = 7.07
-        [60.0, 60.0],  # NE (sec 3), dist = 14.14
-        [65.0, 65.0],  # NE (sec 3), dist = 21.21
-        [70.0, 70.0],  # NE (sec 3), dist = 28.28
-        [40.0, 40.0],  # SW (sec 0), dist = 14.14
-        [40.0, 60.0],  # NW (sec 2), dist = 14.14
-        [60.0, 40.0],  # SE (sec 1), dist = 14.14
-    ])
+    coords = np.array(
+        [
+            [55.0, 55.0],  # NE (sec 3), dist = 7.07
+            [60.0, 60.0],  # NE (sec 3), dist = 14.14
+            [65.0, 65.0],  # NE (sec 3), dist = 21.21
+            [70.0, 70.0],  # NE (sec 3), dist = 28.28
+            [40.0, 40.0],  # SW (sec 0), dist = 14.14
+            [40.0, 60.0],  # NW (sec 2), dist = 14.14
+            [60.0, 40.0],  # SE (sec 1), dist = 14.14
+        ]
+    )
     dists = np.linalg.norm(coords - target, axis=1)
     indices = np.arange(len(coords))
 
@@ -4869,13 +5906,15 @@ def test_filter_neighborhood_sectors_min_sectors_rejection():
     """Verifies that min_sectors > 1 rejects blocks when informing samples only span 1 sector."""
     target = np.array([50.0, 50.0])
     # All 5 samples located strictly in North-East (quadrant 3)
-    coords = np.array([
-        [55.0, 55.0],
-        [56.0, 56.0],
-        [57.0, 57.0],
-        [58.0, 58.0],
-        [59.0, 59.0],
-    ])
+    coords = np.array(
+        [
+            [55.0, 55.0],
+            [56.0, 56.0],
+            [57.0, 57.0],
+            [58.0, 58.0],
+            [59.0, 59.0],
+        ]
+    )
     dists = np.linalg.norm(coords - target, axis=1)
     indices = np.arange(len(coords))
 
@@ -4907,7 +5946,9 @@ def test_estimation_sector_search_validation_errors():
     """Verifies strict input validation for sector and drillhole search parameters."""
     samples_xyz = np.array([[10.0, 10.0, 10.0], [20.0, 20.0, 10.0]])
     sample_grades = np.array([1.0, 2.0])
-    bm = pd.DataFrame({"x": [15.0], "y": [15.0], "z": [10.0], "dx": [5.0], "dy": [5.0], "dz": [5.0]})
+    bm = pd.DataFrame(
+        {"x": [15.0], "y": [15.0], "z": [10.0], "dx": [5.0], "dy": [5.0], "dz": [5.0]}
+    )
 
     # min_sectors < 1
     with pytest.raises(ValueError, match="min_sectors must be >= 1"):
@@ -4944,14 +5985,16 @@ def test_ordinary_kriging_block_estimation_octant_and_drillhole_cap():
     grades = np.ones(len(samples)) * 1.5
     hole_ids = ["DH_A"] * len(dh_a) + ["DH_B"] * len(dh_b)
 
-    bm = pd.DataFrame({
-        "x": [15.0, 15.0],
-        "y": [15.0, 15.0],
-        "z": [10.0, 20.0],
-        "dx": [5.0, 5.0],
-        "dy": [5.0, 5.0],
-        "dz": [5.0, 5.0],
-    })
+    bm = pd.DataFrame(
+        {
+            "x": [15.0, 15.0],
+            "y": [15.0, 15.0],
+            "z": [10.0, 20.0],
+            "dx": [5.0, 5.0],
+            "dy": [5.0, 5.0],
+            "dz": [5.0, 5.0],
+        }
+    )
 
     est, var, disp, lag = ordinary_kriging_block_estimation(
         samples_xyz=samples,
@@ -4974,13 +6017,15 @@ def test_ordinary_kriging_block_estimation_octant_and_drillhole_cap():
 
 def test_ordinary_kriging_grid_estimation_quadrant_search():
     """Tests 2D Ordinary Kriging grid estimation with quadrant search."""
-    samples = np.array([
-        [10.0, 10.0],
-        [12.0, 10.0],
-        [50.0, 10.0],
-        [10.0, 50.0],
-        [50.0, 50.0],
-    ])
+    samples = np.array(
+        [
+            [10.0, 10.0],
+            [12.0, 10.0],
+            [50.0, 10.0],
+            [10.0, 50.0],
+            [50.0, 50.0],
+        ]
+    )
     grades = np.array([1.0, 1.2, 2.0, 3.0, 4.0])
     grid = np.array([[30.0, 30.0]])
 
@@ -5041,12 +6086,16 @@ def test_solve_ordinary_kriging_system_clipping_flag():
     k0 = _theoretical_covariance(d_target, "spherical", 0.0, 1.0, 5.0)
 
     # Standard solve without clipping (sample 2 gets negative weight)
-    weights_raw, mu_raw = _solve_ordinary_kriging_system(K, k0, clip_negative_weights=False)
+    weights_raw, mu_raw = _solve_ordinary_kriging_system(
+        K, k0, clip_negative_weights=False
+    )
     assert weights_raw[1] < 0.0, "Screened sample at 1.2 must yield a negative weight"
     assert np.isclose(np.sum(weights_raw), 1.0)
 
     # Solve with clipping enabled
-    weights_clipped, mu_clipped = _solve_ordinary_kriging_system(K, k0, clip_negative_weights=True)
+    weights_clipped, mu_clipped = _solve_ordinary_kriging_system(
+        K, k0, clip_negative_weights=True
+    )
     assert np.all(weights_clipped >= 0.0)
     assert weights_clipped[1] == 0.0
     assert weights_clipped[0] > 0.0 and weights_clipped[2] > 0.0
@@ -5056,11 +6105,13 @@ def test_solve_ordinary_kriging_system_clipping_flag():
 def test_ordinary_kriging_grid_estimation_clip_negative_weights():
     """Tests 2D Ordinary Kriging grid estimation with clip_negative_weights=True."""
     # Collinear samples causing screen effect
-    samples = np.array([
-        [1.0, 0.0],
-        [2.0, 0.0],
-        [0.0, 1.0],
-    ])
+    samples = np.array(
+        [
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 1.0],
+        ]
+    )
     grades = np.array([2.0, 1.0, 3.0])
     grid = np.array([[0.0, 0.0]])
 
@@ -5091,21 +6142,25 @@ def test_ordinary_kriging_grid_estimation_clip_negative_weights():
 
 def test_ordinary_kriging_block_estimation_clip_negative_weights():
     """Tests 3D Ordinary Kriging block estimation with clip_negative_weights=True."""
-    samples = np.array([
-        [10.0, 10.0, 0.0],
-        [20.0, 10.0, 0.0],
-        [10.0, 20.0, 0.0],
-        [30.0, 10.0, 0.0],
-    ])
+    samples = np.array(
+        [
+            [10.0, 10.0, 0.0],
+            [20.0, 10.0, 0.0],
+            [10.0, 20.0, 0.0],
+            [30.0, 10.0, 0.0],
+        ]
+    )
     grades = np.array([1.5, 2.5, 1.0, 3.0])
-    bm = pd.DataFrame({
-        "x": [12.0],
-        "y": [12.0],
-        "z": [0.0],
-        "dx": [5.0],
-        "dy": [5.0],
-        "dz": [5.0],
-    })
+    bm = pd.DataFrame(
+        {
+            "x": [12.0],
+            "y": [12.0],
+            "z": [0.0],
+            "dx": [5.0],
+            "dy": [5.0],
+            "dz": [5.0],
+        }
+    )
 
     est_clip, var_clip, disp_clip, lag_clip = ordinary_kriging_block_estimation(
         samples_xyz=samples,
@@ -5127,7 +6182,9 @@ def test_compute_quadratic_estimation_variance():
     w_single = np.array([1.0])
     K_single = np.array([[1.0]])
     k0_single = np.array([1.0])
-    var_zero = _compute_quadratic_estimation_variance(1.0, w_single, K_single, k0_single)
+    var_zero = _compute_quadratic_estimation_variance(
+        1.0, w_single, K_single, k0_single
+    )
     assert np.isclose(var_zero, 0.0)
 
     # 2. Known 2-sample case with analytic calculation
@@ -5143,7 +6200,9 @@ def test_compute_quadratic_estimation_variance():
 
     # 3. Guard against small negative numerical roundoff
     # If c_vv + w^T K w - 2 w^T k0 evaluates to -1e-15, max(0.0, ...) must return 0.0
-    var_clamped = _compute_quadratic_estimation_variance(1.0 - 1e-14, w_single, K_single, k0_single)
+    var_clamped = _compute_quadratic_estimation_variance(
+        1.0 - 1e-14, w_single, K_single, k0_single
+    )
     assert var_clamped == 0.0
 
 
@@ -5162,7 +6221,9 @@ def test_clip_and_renormalize_weights_preserve_sum():
 
     # 2. Original weights summing to S = 0.6 (where mean weight is 1 - S = 0.4 in SK)
     w_sk = np.array([0.5, -0.1, 0.2])
-    w_sk_clipped, was_clipped_sk = _clip_and_renormalize_weights(w_sk, preserve_sum=True)
+    w_sk_clipped, was_clipped_sk = _clip_and_renormalize_weights(
+        w_sk, preserve_sum=True
+    )
     assert was_clipped_sk is True
     assert np.all(w_sk_clipped >= 0.0)
     assert np.isclose(np.sum(w_sk_clipped), 0.6)
@@ -5178,13 +6239,17 @@ def test_clip_and_renormalize_weights_preserve_sum():
     np.testing.assert_allclose(w_pos_res, w_pos)
 
     # 4. Pure clipping mode without renormalization: target_sum=None, preserve_sum=False
-    w_pure, was_pure_clipped = _clip_and_renormalize_weights(w, target_sum=None, preserve_sum=False)
+    w_pure, was_pure_clipped = _clip_and_renormalize_weights(
+        w, target_sum=None, preserve_sum=False
+    )
     assert was_pure_clipped is True
     np.testing.assert_allclose(w_pure, np.array([0.8, 0.0, 0.4]))
 
     # 5. All negative weights fallback
     w_all_neg = np.array([-0.2, -0.5])
-    w_fallback_ok, was_all_clipped = _clip_and_renormalize_weights(w_all_neg, target_sum=1.0)
+    w_fallback_ok, was_all_clipped = _clip_and_renormalize_weights(
+        w_all_neg, target_sum=1.0
+    )
     assert was_all_clipped is True
     np.testing.assert_allclose(w_fallback_ok, np.array([0.5, 0.5]))
 
@@ -5245,21 +6310,25 @@ def test_simple_kriging_grid_estimation_clip_negative_weights():
 
 def test_simple_kriging_block_estimation_clip_negative_weights():
     """Verifies that simple_kriging_block_estimation handles clip_negative_weights=True properly."""
-    samples = np.array([
-        [10.0, 10.0, 0.0],
-        [20.0, 10.0, 0.0],
-        [10.0, 20.0, 0.0],
-        [30.0, 10.0, 0.0],
-    ])
+    samples = np.array(
+        [
+            [10.0, 10.0, 0.0],
+            [20.0, 10.0, 0.0],
+            [10.0, 20.0, 0.0],
+            [30.0, 10.0, 0.0],
+        ]
+    )
     grades = np.array([1.5, 2.5, 1.0, 3.0])
-    bm = pd.DataFrame({
-        "x": [12.0],
-        "y": [12.0],
-        "z": [0.0],
-        "dx": [5.0],
-        "dy": [5.0],
-        "dz": [5.0],
-    })
+    bm = pd.DataFrame(
+        {
+            "x": [12.0],
+            "y": [12.0],
+            "z": [0.0],
+            "dx": [5.0],
+            "dy": [5.0],
+            "dz": [5.0],
+        }
+    )
 
     # Test single block estimation with clipping
     est_clip, var_clip, disp_clip = simple_kriging_block_estimation(
@@ -5295,10 +6364,1337 @@ def test_simple_kriging_block_estimation_clip_negative_weights():
     assert var_dom[0] >= 0.0
 
 
+def test_variography_stubs_raise_not_implemented():
+    """Verifies that experimental variography and model fitting function stubs raise NotImplementedError."""
+    coords = np.array([[0.0, 0.0, 0.0], [10.0, 10.0, 0.0], [20.0, 20.0, 0.0]])
+    grades = np.array([1.0, 2.0, 3.0])
+
+    # 1. calculate_experimental_semivariogram stub
+    with pytest.raises(NotImplementedError, match="Experimental semivariogram calculation engine is planned"):
+        calculate_experimental_semivariogram(coords=coords, grades=grades, lag_distance=10.0, n_lags=5)
+
+    # 2. calculate_directional_semivariograms stub
+    with pytest.raises(NotImplementedError, match="Directional semivariogram suite calculation is planned"):
+        calculate_directional_semivariograms(
+            coords=coords, grades=grades, directions=[0.0, 90.0], lag_distance=10.0, n_lags=5
+        )
+
+    # 3. calculate_downhole_variogram stub
+    df_dh = pd.DataFrame({
+        "hole_id": ["DH01", "DH01"],
+        "from_m": [0.0, 2.0],
+        "to_m": [2.0, 4.0],
+        "grade": [1.5, 2.5],
+    })
+    with pytest.raises(NotImplementedError, match="Down-hole experimental variogram calculation is planned"):
+        calculate_downhole_variogram(df_dh, lag_distance=2.0, n_lags=3)
+
+    # 4. fit_variogram_model stub
+    exp_df = pd.DataFrame({
+        "nominal_lag": [10.0, 20.0, 30.0],
+        "average_distance": [9.8, 19.9, 30.1],
+        "semivariance": [0.3, 0.6, 0.9],
+        "pair_count": [15, 22, 18],
+    })
+    with pytest.raises(NotImplementedError, match="Variogram model parameterization and curve fitting is planned"):
+        fit_variogram_model(exp_df, model="spherical")
+
+    # 5. plot_variogram_model stub
+    with pytest.raises(NotImplementedError, match="Variogram model visualization is planned"):
+        plot_variogram_model(exp_df)
 
 
+def test_skeleton_functions_raise_not_implemented():
+    """All regulatory, simulation, and polymetallic skeleton functions have been implemented."""
+    pass
 
 
+# =============================================================================
+# PART 1 TESTS: KRIGING MODEL VALIDATION & CROSS-VALIDATION
+# =============================================================================
+
+
+def test_kriging_cross_validation_ordinary_and_simple():
+    """Tests leave-one-out cross-validation under Ordinary and Simple Kriging."""
+    np.random.seed(42)
+    # Generate 12 sample points with a smooth spatial gradient
+    xy = np.array([
+        [10.0, 10.0],
+        [20.0, 10.0],
+        [30.0, 15.0],
+        [15.0, 25.0],
+        [25.0, 30.0],
+        [35.0, 30.0],
+        [10.0, 40.0],
+        [20.0, 45.0],
+        [30.0, 50.0],
+        [40.0, 20.0],
+        [45.0, 35.0],
+        [40.0, 45.0],
+    ])
+    # Grades with a spatial trend: grade roughly increases with x + y
+    grades = 0.5 + 0.01 * xy[:, 0] + 0.015 * xy[:, 1] + np.random.normal(0, 0.05, len(xy))
+
+    # 1. Ordinary Kriging Cross-Validation
+    df_ok = kriging_cross_validation(
+        samples_xy=xy,
+        sample_grades=grades,
+        variogram_model="spherical",
+        sill=0.05,
+        range_param=35.0,
+        nugget=0.01,
+        method="ordinary",
+        min_neighbors=2,
+        max_neighbors=8,
+    )
+
+    assert isinstance(df_ok, pd.DataFrame)
+    assert len(df_ok) == len(xy)
+    assert set(df_ok.columns) == {
+        "x",
+        "y",
+        "actual",
+        "estimated",
+        "error",
+        "kriging_variance",
+        "kriging_std",
+        "standardized_error",
+        "num_neighbors",
+    }
+    assert np.all(df_ok["actual"] == grades)
+    assert np.all(df_ok["estimated"].notna())
+    assert np.all(df_ok["num_neighbors"] >= 2)
+    # Verify error calculation: error = actual - estimated
+    np.testing.assert_allclose(df_ok["error"], df_ok["actual"] - df_ok["estimated"])
+    # Verify standardized error: error / kriging_std
+    np.testing.assert_allclose(
+        df_ok["standardized_error"], df_ok["error"] / df_ok["kriging_std"]
+    )
+
+    # Check attrs
+    assert "mean_error" in df_ok.attrs
+    assert "mean_absolute_error" in df_ok.attrs
+    assert "root_mean_square_error" in df_ok.attrs
+    assert "mean_standardized_error" in df_ok.attrs
+    assert "variance_standardized_error" in df_ok.attrs
+    assert "pearson_correlation" in df_ok.attrs
+    assert "slope_of_regression" in df_ok.attrs
+    assert df_ok.attrs["total_samples"] == 12
+    assert df_ok.attrs["estimated_samples"] == 12
+    assert abs(df_ok.attrs["mean_error"]) < 0.2  # low global bias
+    assert df_ok.attrs["pearson_correlation"] > 0.5  # reasonable correlation
+
+    # 2. Simple Kriging Cross-Validation
+    df_sk = kriging_cross_validation(
+        samples_xy=xy,
+        sample_grades=grades,
+        variogram_model="spherical",
+        sill=0.05,
+        range_param=35.0,
+        nugget=0.01,
+        method="simple",
+        simple_kriging_mean=float(np.mean(grades)),
+        min_neighbors=2,
+        max_neighbors=8,
+    )
+    assert isinstance(df_sk, pd.DataFrame)
+    assert len(df_sk) == len(xy)
+    assert np.all(df_sk["estimated"].notna())
+    assert df_sk.attrs["method"] == "simple"
+
+
+def test_kriging_cross_validation_sectors_and_anisotropy_3d():
+    """Tests 3D coordinates, sector filtering, and geometric anisotropy in cross-validation."""
+    # 3D coordinates (x, y, z)
+    coords_3d = np.array([
+        [100.0, 100.0, 10.0],
+        [110.0, 100.0, 15.0],
+        [100.0, 110.0, 12.0],
+        [120.0, 120.0, 20.0],
+        [130.0, 110.0, 18.0],
+        [140.0, 130.0, 25.0],
+        [150.0, 140.0, 30.0],
+        [160.0, 150.0, 28.0],
+    ])
+    grades_3d = np.array([1.2, 1.4, 1.1, 1.8, 1.9, 2.2, 2.5, 2.3])
+    hole_ids = ["DH01", "DH01", "DH02", "DH02", "DH03", "DH03", "DH04", "DH04"]
+
+    df_3d = kriging_cross_validation(
+        samples_xy=coords_3d,
+        sample_grades=grades_3d,
+        variogram_model="exponential",
+        sill=0.3,
+        range_param=50.0,
+        nugget=0.05,
+        method="ordinary",
+        anisotropy_ranges=[60.0, 40.0, 20.0],
+        anisotropy_angles=[30.0, 0.0, 0.0],
+        max_per_sector=2,
+        max_per_drillhole=2,
+        sample_hole_ids=hole_ids,
+        min_neighbors=1,
+        max_neighbors=4,
+    )
+
+    assert "z" in df_3d.columns
+    assert len(df_3d) == 8
+    assert np.all(df_3d["z"] == coords_3d[:, 2])
+    assert np.all(df_3d["estimated"].notna())
+    assert df_3d.attrs["estimated_samples"] == 8
+
+
+def test_kriging_cross_validation_input_validation():
+    """Tests strict boundary parameter validation for kriging_cross_validation."""
+    coords = np.array([[0.0, 0.0], [10.0, 10.0]])
+    grades = np.array([1.0, 2.0])
+
+    # 1. samples_xy wrong dimensions
+    with pytest.raises(ValueError, match="samples_xy must be a 2D array"):
+        kriging_cross_validation(
+            samples_xy=np.array([0.0, 1.0]),
+            sample_grades=grades,
+            variogram_model="spherical",
+            sill=1.0,
+            range_param=10.0,
+        )
+
+    # 2. sample_grades length mismatch
+    with pytest.raises(ValueError, match="sample_grades must be a 1D array"):
+        kriging_cross_validation(
+            samples_xy=coords,
+            sample_grades=np.array([1.0]),
+            variogram_model="spherical",
+            sill=1.0,
+            range_param=10.0,
+        )
+
+    # 3. Less than 2 samples
+    with pytest.raises(ValueError, match="At least 2 samples are required"):
+        kriging_cross_validation(
+            samples_xy=np.array([[0.0, 0.0]]),
+            sample_grades=np.array([1.0]),
+            variogram_model="spherical",
+            sill=1.0,
+            range_param=10.0,
+        )
+
+    # 4. Invalid method
+    with pytest.raises(ValueError, match="method must be 'ordinary' or 'simple'"):
+        kriging_cross_validation(
+            samples_xy=coords,
+            sample_grades=grades,
+            variogram_model="spherical",
+            sill=1.0,
+            range_param=10.0,
+            method="invalid",  # type: ignore
+        )
+
+    # 5. Invalid sill / nugget / neighbors
+    with pytest.raises(ValueError, match="sill must be strictly positive"):
+        kriging_cross_validation(
+            samples_xy=coords,
+            sample_grades=grades,
+            variogram_model="spherical",
+            sill=-0.5,
+            range_param=10.0,
+        )
+
+    with pytest.raises(ValueError, match="nugget must be non-negative"):
+        kriging_cross_validation(
+            samples_xy=coords,
+            sample_grades=grades,
+            variogram_model="spherical",
+            sill=1.0,
+            range_param=10.0,
+            nugget=-0.1,
+        )
+
+    with pytest.raises(ValueError, match="max_neighbors .* must be >= min_neighbors"):
+        kriging_cross_validation(
+            samples_xy=coords,
+            sample_grades=grades,
+            variogram_model="spherical",
+            sill=1.0,
+            range_param=10.0,
+            min_neighbors=5,
+            max_neighbors=3,
+        )
+
+
+def test_plot_cross_validation_diagnostics():
+    """Tests generation of the 4-panel cross-validation diagnostic figure."""
+    np.random.seed(42)
+    n = 20
+    actual = np.random.uniform(0.5, 2.5, n)
+    estimated = actual + np.random.normal(0, 0.15, n)
+    error = actual - estimated
+    k_var = np.full(n, 0.04)
+    k_std = np.sqrt(k_var)
+    std_err = error / k_std
+
+    cv_df = pd.DataFrame({
+        "actual": actual,
+        "estimated": estimated,
+        "error": error,
+        "kriging_variance": k_var,
+        "kriging_std": k_std,
+        "standardized_error": std_err,
+        "num_neighbors": np.full(n, 6),
+    })
+    cv_df.attrs["slope_of_regression"] = 0.95
+
+    fig, axes = plot_cross_validation_diagnostics(cv_df, grade_unit="% Cu")
+    assert fig is not None
+    assert axes.shape == (2, 2)
+    plt.close(fig)
+
+    # Missing column validation
+    with pytest.raises(ValueError, match="missing required columns"):
+        plot_cross_validation_diagnostics(pd.DataFrame({"actual": actual}))
+
+    # All NaN validation
+    with pytest.raises(ValueError, match="does not contain any valid"):
+        plot_cross_validation_diagnostics(
+            pd.DataFrame({
+                "actual": [np.nan],
+                "estimated": [np.nan],
+                "error": [np.nan],
+                "standardized_error": [np.nan],
+            })
+        )
+
+
+def test_compare_model_estimation_methods():
+    """Tests multi-method model comparison against declustered samples and NN benchmark."""
+    # Setup synthetic samples and block model
+    samples_xy = np.array([[10.0, 10.0], [20.0, 20.0], [30.0, 30.0]])
+    sample_grades = np.array([0.5, 1.0, 1.5])
+    weights = np.array([0.2, 0.5, 0.3])
+
+    block_model = pd.DataFrame({
+        "tonnes": [1000.0, 2000.0, 3000.0, 4000.0],
+        "nn_grade": [0.5, 0.9, 1.1, 1.4],
+        "ok_grade": [0.6, 0.85, 1.05, 1.3],
+        "idw_grade": [0.55, 0.88, 1.08, 1.35],
+    })
+
+    comp_df = compare_model_estimation_methods(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        block_model=block_model,
+        cutoff_grades=[0.0, 0.8, 1.0],
+        grade_cols={
+            "Nearest Neighbor": "nn_grade",
+            "Ordinary Kriging": "ok_grade",
+            "IDW": "idw_grade",
+        },
+        sample_weights=weights,
+        grade_unit="% Cu",
+        tonnes_col="tonnes",
+    )
+
+    assert isinstance(comp_df, pd.DataFrame)
+    assert len(comp_df) == 3 * 3  # 3 cutoffs * 3 methods
+    assert set(comp_df.columns) == {
+        "cutoff",
+        "method",
+        "ore_tonnes",
+        "mean_grade",
+        "contained_metal",
+        "tonnes_diff_pct_vs_nn",
+        "grade_diff_pct_vs_nn",
+        "metal_diff_pct_vs_nn",
+    }
+
+    # At cutoff 0.0, total tonnes must be 10000.0 for all methods
+    c0_df = comp_df[comp_df["cutoff"] == 0.0]
+    assert np.all(c0_df["ore_tonnes"] == 10000.0)
+
+    # NN relative diff vs NN at cutoff 0.0 must be exactly 0.0%
+    nn_c0 = c0_df[c0_df["method"] == "Nearest Neighbor"]
+    assert float(nn_c0["tonnes_diff_pct_vs_nn"].iloc[0]) == 0.0
+    assert float(nn_c0["grade_diff_pct_vs_nn"].iloc[0]) == 0.0
+    assert float(nn_c0["metal_diff_pct_vs_nn"].iloc[0]) == 0.0
+
+    # Check attrs
+    assert "declustered_sample_mean" in comp_df.attrs
+    expected_dec_mean = float(np.sum(weights * sample_grades) / np.sum(weights))
+    np.testing.assert_allclose(comp_df.attrs["declustered_sample_mean"], expected_dec_mean)
+    assert "global_bias_pct" in comp_df.attrs
+    assert "Ordinary Kriging" in comp_df.attrs["global_bias_pct"]
+    assert "footnotes" in comp_df.attrs
+
+
+def test_compare_model_estimation_methods_input_validation():
+    """Tests input error handling for compare_model_estimation_methods."""
+    samples_xy = np.array([[10.0, 10.0], [20.0, 20.0]])
+    sample_grades = np.array([1.0, 2.0])
+    block_model = pd.DataFrame({"tonnes": [100.0], "ok_grade": [1.5]})
+
+    # Empty cutoff grades
+    with pytest.raises(ValueError, match="cutoff_grades must be a non-empty sequence"):
+        compare_model_estimation_methods(
+            samples_xy=samples_xy,
+            sample_grades=sample_grades,
+            block_model=block_model,
+            cutoff_grades=[],
+            grade_cols={"OK": "ok_grade"},
+        )
+
+    # Missing tonnes_col
+    with pytest.raises(ValueError, match="tonnes_col 'invalid_tonnes' not found"):
+        compare_model_estimation_methods(
+            samples_xy=samples_xy,
+            sample_grades=sample_grades,
+            block_model=block_model,
+            cutoff_grades=[0.5],
+            grade_cols={"OK": "ok_grade"},
+            tonnes_col="invalid_tonnes",
+        )
+
+    # Missing grade column
+    with pytest.raises(ValueError, match="Grade column 'missing_grade'"):
+        compare_model_estimation_methods(
+            samples_xy=samples_xy,
+            sample_grades=sample_grades,
+            block_model=block_model,
+            cutoff_grades=[0.5],
+            grade_cols={"OK": "missing_grade"},
+        )
+
+    # Mismatched sample weights length
+    with pytest.raises(ValueError, match="sample_weights length"):
+        compare_model_estimation_methods(
+            samples_xy=samples_xy,
+            sample_grades=sample_grades,
+            block_model=block_model,
+            cutoff_grades=[0.5],
+            grade_cols={"OK": "ok_grade"},
+            sample_weights=np.array([1.0]),
+        )
+
+
+def test_analyze_crm_standards_comprehensive():
+    """Tests CRM accuracy evaluation, Shewhart control thresholds, and summary statistics."""
+    # Synthetic CRM stream: mean = 1.00, std = 0.05
+    # Pass: 1.00 (z=0), 1.05 (z=1.0), 0.95 (z=-1.0)
+    # Warning: 1.12 (z=2.4)
+    # Failure: 1.20 (z=4.0)
+    assay_df = pd.DataFrame({
+        "sample_id": ["SMP01", "SMP02", "SMP03", "SMP04", "SMP05"],
+        "crm_id": ["OREAS-501", "OREAS-501", "OREAS-501", "OREAS-501", "OREAS-501"],
+        "grade": [1.00, 1.05, 0.95, 1.12, 1.20],
+        "seq": [1, 2, 3, 4, 5],
+    })
+    certified = {
+        "OREAS-501": {"mean": 1.00, "std": 0.05},
+    }
+
+    res = analyze_crm_standards(
+        assay_df=assay_df,
+        standard_id_col="crm_id",
+        grade_col="grade",
+        certified_values=certified,
+        date_or_seq_col="seq",
+    )
+
+    assert len(res) == 5
+    assert list(res["standard_id"]) == ["OREAS-501"] * 5
+    np.testing.assert_allclose(res["z_score"], [0.0, 1.0, -1.0, 2.4, 4.0])
+    np.testing.assert_allclose(res["relative_error_pct"], [0.0, 5.0, -5.0, 12.0, 20.0])
+
+    assert res["status"].iloc[0] == "Pass"
+    assert res["status"].iloc[1] == "Pass"
+    assert res["status"].iloc[2] == "Pass"
+    assert res["status"].iloc[3] == "Warning (+/-2s)"
+    assert res["status"].iloc[4] == "Failure (+/-3s)"
+
+    assert res["is_pass"].sum() == 3
+    assert res["is_warning"].sum() == 1
+    assert res["is_failure"].sum() == 1
+
+    # Check attrs summary
+    assert "summary_by_standard" in res.attrs
+    summary = res.attrs["summary_by_standard"]
+    assert len(summary) == 1
+    assert summary["sample_count"].iloc[0] == 5
+    assert summary["pass_count"].iloc[0] == 3
+    assert summary["warning_count"].iloc[0] == 1
+    assert summary["failure_count"].iloc[0] == 1
+    assert summary["pass_rate_pct"].iloc[0] == 60.0
+    assert "footnotes" in res.attrs
+
+
+def test_analyze_crm_standards_consecutive_warnings():
+    """Tests detection of two consecutive +2s or -2s warnings triggering failure."""
+    # S1: z = +2.5 followed by z = +2.5 should trigger consecutive warning failure
+    # S2: z = +2.5 followed by z = -2.5 is on opposite sides, so not a consecutive same-side warning
+    assay_df = pd.DataFrame({
+        "crm_id": ["S1", "S1", "S2", "S2"],
+        "grade": [1.125, 1.125, 1.125, 0.875],
+        "seq": [1, 2, 3, 4],
+    })
+    certified = {
+        "S1": {"mean": 1.00, "std": 0.05},
+        "S2": {"mean": 1.00, "std": 0.05},
+    }
+
+    res = analyze_crm_standards(
+        assay_df=assay_df,
+        standard_id_col="crm_id",
+        grade_col="grade",
+        certified_values=certified,
+        date_or_seq_col="seq",
+    )
+
+    s1_res = res[res["standard_id"] == "S1"]
+    assert s1_res["status"].iloc[0] == "Warning (+/-2s)"
+    assert s1_res["status"].iloc[1] == "Failure (2 Consecutive +/-2s)"
+    assert bool(s1_res["is_failure"].iloc[1])
+
+    s2_res = res[res["standard_id"] == "S2"]
+    assert s2_res["status"].iloc[0] == "Warning (+/-2s)"
+    assert s2_res["status"].iloc[1] == "Warning (+/-2s)"
+
+
+def test_analyze_crm_standards_validation():
+    """Tests input error handling in analyze_crm_standards."""
+    df = pd.DataFrame({"std": ["S1"], "cu": [1.0]})
+    # Invalid df
+    with pytest.raises(TypeError, match="must be a pandas DataFrame"):
+        analyze_crm_standards("not_df", "std", "cu", {"S1": {"mean": 1.0, "std": 0.1}})
+
+    # Missing column
+    with pytest.raises(ValueError, match="standard_id_col 'missing' not found"):
+        analyze_crm_standards(df, "missing", "cu", {"S1": {"mean": 1.0, "std": 0.1}})
+
+    # Invalid certified values (non-positive std)
+    with pytest.raises(ValueError, match="strictly positive"):
+        analyze_crm_standards(df, "std", "cu", {"S1": {"mean": 1.0, "std": -0.1}})
+
+    # No matching standards
+    with pytest.raises(ValueError, match="No valid CRM standard samples found"):
+        analyze_crm_standards(df, "std", "cu", {"OTHER": {"mean": 1.0, "std": 0.1}})
+
+
+def test_plot_crm_control_chart():
+    """Tests rendering of the Shewhart control chart."""
+    df = pd.DataFrame({
+        "crm_id": ["OREAS-501"] * 10,
+        "grade": [1.01, 0.99, 1.02, 1.00, 1.11, 0.98, 1.03, 1.18, 0.99, 1.01],
+    })
+    certified = {"OREAS-501": {"mean": 1.00, "std": 0.05}}
+    crm_res = analyze_crm_standards(df, "crm_id", "grade", certified)
+
+    fig, ax = plot_crm_control_chart(crm_res, standard_name="OREAS-501", grade_unit="% Cu")
+    assert fig is not None
+    assert ax is not None
+    plt.close(fig)
+
+    # Missing standard in results
+    with pytest.raises(ValueError, match="Standard 'UNKNOWN' not found"):
+        plot_crm_control_chart(crm_res, standard_name="UNKNOWN")
+
+
+def test_analyze_analytical_blanks_comprehensive():
+    """Tests analytical blank carryover evaluation and contamination detection."""
+    # LLD = 0.005. 3x LLD = 0.015, 5x LLD = 0.025
+    # Row 0: regular high-grade sample 2.5%
+    # Row 1: blank 0.003% -> Pass (no carryover)
+    # Row 2: regular high-grade sample 4.0%
+    # Row 3: blank 0.018% -> Warning (3x to 5x LLD)
+    # Row 4: regular high-grade sample 5.0%
+    # Row 5: blank 0.035% -> Failure (> 5x LLD contamination)
+    assay_df = pd.DataFrame({
+        "sample_type": ["ore", "blank", "ore", "blank", "ore", "blank"],
+        "grade": [2.5, 0.003, 4.0, 0.018, 5.0, 0.035],
+        "seq": [1, 2, 3, 4, 5, 6],
+    })
+
+    res = analyze_analytical_blanks(
+        assay_df=assay_df,
+        blank_flag_col="sample_type",
+        grade_col="grade",
+        detection_limit=0.005,
+        failure_multiplier=5.0,
+        warning_multiplier=3.0,
+        date_or_seq_col="seq",
+    )
+
+    assert len(res) == 3
+    assert bool(res["is_pass"].iloc[0])
+    assert bool(res["is_contamination_warning"].iloc[1])
+    assert bool(res["is_contamination_failure"].iloc[2])
+
+    # Preceding sample grades correctly captured
+    assert res["preceding_grade"].iloc[0] == 2.5
+    assert res["preceding_grade"].iloc[1] == 4.0
+    assert res["preceding_grade"].iloc[2] == 5.0
+
+    # Attrs summary
+    assert res.attrs["total_blanks"] == 3
+    assert res.attrs["pass_count"] == 1
+    assert res.attrs["warning_count"] == 1
+    assert res.attrs["failure_count"] == 1
+    assert res.attrs["compliance_verdict"] == "ACTION REQUIRED: Contamination Detected"
+
+
+def test_analyze_analytical_blanks_validation():
+    """Tests input validation for analyze_analytical_blanks."""
+    df = pd.DataFrame({"is_blk": [True], "grade": [0.01]})
+    with pytest.raises(ValueError, match="detection_limit must be strictly positive"):
+        analyze_analytical_blanks(df, "is_blk", "grade", detection_limit=-0.01)
+
+    with pytest.raises(ValueError, match="failure_multiplier .* must be greater"):
+        analyze_analytical_blanks(df, "is_blk", "grade", detection_limit=0.01, failure_multiplier=2.0, warning_multiplier=3.0)
+
+    with pytest.raises(ValueError, match="No blank samples identified"):
+        analyze_analytical_blanks(pd.DataFrame({"is_blk": [False], "grade": [0.01]}), "is_blk", "grade", detection_limit=0.01)
+
+
+def test_plot_blanks_performance():
+    """Tests plotting of analytical blanks performance chart."""
+    df = pd.DataFrame({
+        "is_blank": [True, True, True, True],
+        "grade": [0.002, 0.004, 0.016, 0.003],
+    })
+    b_res = analyze_analytical_blanks(df, "is_blank", "grade", detection_limit=0.005)
+    fig, ax = plot_blanks_performance(b_res, grade_unit="% Cu")
+    assert fig is not None
+    assert ax is not None
+    plt.close(fig)
+
+
+def test_analyze_assay_duplicates_stages():
+    """Tests duplicate precision calculations across pulp, coarse, and field stages."""
+    orig = np.array([1.0, 2.0, 1.5, 0.8, 3.0])
+    # 5% relative difference
+    dup_pulp = orig * 1.05
+    df_pulp = pd.DataFrame({"orig": orig, "dup": dup_pulp})
+
+    # Pulp: threshold is 10.0%
+    res_pulp = analyze_assay_duplicates(df_pulp, "orig", "dup", pair_type="pulp")
+    assert len(res_pulp) == 5
+    assert res_pulp["meets_hard_threshold"].all()
+    assert res_pulp.attrs["hard_threshold_pct"] == 10.0
+    assert res_pulp.attrs["pct_meeting_hard_threshold"] == 100.0
+    assert res_pulp.attrs["compliance_verdict"] == "PASSED"
+    np.testing.assert_allclose(res_pulp.attrs["rma_slope"], 1.05, rtol=1e-3)
+
+    # Coarse: 15% diff meets coarse threshold (20%) but fails pulp threshold (10%)
+    df_coarse = pd.DataFrame({"orig": orig, "dup": orig * 1.15})
+    res_coarse = analyze_assay_duplicates(df_coarse, "orig", "dup", pair_type="coarse")
+    assert res_coarse.attrs["hard_threshold_pct"] == 20.0
+    assert res_coarse.attrs["pct_meeting_hard_threshold"] == 100.0
+
+    # Field: 25% diff meets field threshold (30%) but fails coarse threshold (20%)
+    df_field = pd.DataFrame({"orig": orig, "dup": orig * 1.25})
+    res_field = analyze_assay_duplicates(df_field, "orig", "dup", pair_type="field")
+    assert res_field.attrs["hard_threshold_pct"] == 30.0
+    assert res_field.attrs["pct_meeting_hard_threshold"] == 100.0
+
+
+def test_analyze_assay_duplicates_detection_limit():
+    """Tests duplicate evaluation with detection limit filtering."""
+    # LLD = 0.01. 10x LLD = 0.10.
+    # Pair 1: mean = 0.05 (< 10x LLD, flagged above_10x_lld = False)
+    # Pair 2: mean = 1.00 (>= 10x LLD)
+    df = pd.DataFrame({
+        "orig": [0.04, 1.00],
+        "dup": [0.06, 1.02],
+    })
+    res = analyze_assay_duplicates(df, "orig", "dup", pair_type="pulp", detection_limit=0.01)
+    assert not bool(res["above_10x_lld"].iloc[0])
+    assert bool(res["above_10x_lld"].iloc[1])
+    assert res.attrs["evaluated_pairs"] == 1
+
+
+def test_analyze_assay_duplicates_validation():
+    """Tests validation for duplicate analysis."""
+    df = pd.DataFrame({"orig": [1.0], "dup": [1.0]})
+    with pytest.raises(ValueError, match="pair_type must be one of"):
+        analyze_assay_duplicates(df, "orig", "dup", pair_type="invalid_stage")
+
+    with pytest.raises(ValueError, match="original_col 'missing' not found"):
+        analyze_assay_duplicates(df, "missing", "dup")
+
+
+def test_plot_duplicate_analysis():
+    """Tests dual-panel duplicate precision figure generation."""
+    np.random.seed(42)
+    orig = np.random.uniform(0.5, 3.0, 30)
+    dup = orig * np.random.normal(1.0, 0.04, 30)
+    df = pd.DataFrame({"orig": orig, "dup": dup})
+
+    res = analyze_assay_duplicates(df, "orig", "dup", pair_type="pulp")
+    fig, axes = plot_duplicate_analysis(res, grade_unit="% Cu")
+    assert fig is not None
+    assert len(axes) == 2
+    plt.close(fig)
+
+
+def test_generate_qaqc_compliance_summary():
+    """Tests generating the comprehensive NI 43-101 / JORC QA/QC compliance summary table."""
+    total_drillhole_samples = 1000
+
+    # 50 CRMs (5%), 50 Blanks (5%), 50 Duplicates (5%) -> Total 150 (15%)
+    crm_df = pd.DataFrame({
+        "crm_id": ["S1"] * 50,
+        "grade": [1.00] * 50,
+    })
+    crm_res = analyze_crm_standards(crm_df, "crm_id", "grade", {"S1": {"mean": 1.00, "std": 0.05}})
+
+    blanks_df = pd.DataFrame({
+        "is_blank": [True] * 50,
+        "grade": [0.002] * 50,
+    })
+    blanks_res = analyze_analytical_blanks(blanks_df, "is_blank", "grade", detection_limit=0.005)
+
+    dup_df = pd.DataFrame({
+        "orig": [1.00] * 50,
+        "dup": [1.02] * 50,
+    })
+    dup_res = analyze_assay_duplicates(dup_df, "orig", "dup", pair_type="pulp")
+
+    summary_df = generate_qaqc_compliance_summary(
+        total_drillhole_samples=total_drillhole_samples,
+        crm_results=crm_res,
+        blanks_results=blanks_res,
+        duplicate_results=dup_res,
+    )
+
+    assert len(summary_df) == 4
+    # All streams meet 5% target and total meets 15%
+    np.testing.assert_allclose(summary_df["insertion_rate_pct"], [5.0, 5.0, 5.0, 15.0])
+    assert (summary_df["compliance_verdict"] == "PASSED").all()
+    assert summary_df.attrs["overall_compliance_verdict"] == "PASSED"
+    assert summary_df.attrs["total_qaqc_samples"] == 150
+    assert summary_df.attrs["total_stream_samples"] == 1150
+
+    # Test error on invalid total samples
+    with pytest.raises(ValueError, match="strictly positive"):
+        generate_qaqc_compliance_summary(total_drillhole_samples=0)
+
+    # Test graceful handling with None inputs
+    empty_summary = generate_qaqc_compliance_summary(total_drillhole_samples=500)
+    assert len(empty_summary) == 4
+    assert empty_summary.attrs["overall_compliance_verdict"] == "NO QA/QC DATA"
+
+
+# =============================================================================
+# PART 3 UNIT TESTS: SIMULATION SPATIAL VALIDATION & UNCERTAINTY
+# =============================================================================
+
+
+def test_check_simulation_variogram_reproduction_comprehensive():
+    """Validates multi-realization experimental variogram vs theoretical model reproduction."""
+    rng = np.random.default_rng(42)
+    # 2D regular grid (10 x 10 = 100 points)
+    x = np.linspace(0, 90, 10)
+    y = np.linspace(0, 90, 10)
+    xx, yy = np.meshgrid(x, y)
+    coords = np.column_stack([xx.ravel(), yy.ravel()])
+    n_points = len(coords)
+
+    # 15 synthetic realizations with spatial correlation
+    # We create correlated fields by filtering white noise
+    n_reals = 15
+    reals = np.zeros((n_points, n_reals))
+    for i in range(n_reals):
+        # smoothed white noise + random baseline
+        noise = rng.normal(0, 1, (10, 10))
+        # simple blur
+        from scipy.ndimage import gaussian_filter
+        filtered = gaussian_filter(noise, sigma=1.5)
+        filtered = (filtered - filtered.mean()) / (filtered.std() + 1e-6)
+        reals[:, i] = filtered.ravel()
+
+    # 1. Test standard spherical model
+    df_sph = check_simulation_variogram_reproduction(
+        realizations=reals,
+        grid_points=coords,
+        variogram_model="spherical",
+        sill=1.0,
+        range_param=35.0,
+        nugget=0.1,
+        n_lags=8,
+    )
+
+    expected_cols = [
+        "lag",
+        "model_gamma",
+        "mean_realization_gamma",
+        "p10_gamma",
+        "p50_gamma",
+        "p90_gamma",
+        "pair_count",
+    ]
+    for c in expected_cols:
+        assert c in df_sph.columns
+
+    assert len(df_sph) == 8
+    # At lag 0, gamma starts near nugget and increases
+    assert df_sph["model_gamma"].iloc[-1] >= df_sph["model_gamma"].iloc[0]
+
+    # Verify attributes
+    assert df_sph.attrs["variogram_model"] == "spherical"
+    assert df_sph.attrs["sill"] == 1.0
+    assert df_sph.attrs["range_param"] == 35.0
+    assert df_sph.attrs["n_realizations"] == 15
+    assert df_sph.attrs["total_sill"] == 1.1  # nugget 0.1 + sill 1.0
+    assert "reproduction_verdict" in df_sph.attrs
+    assert len(df_sph.attrs["footnotes"]) >= 2
+
+    # 2. Test exponential model with anisotropic range mapping and 3D coords
+    coords_3d = np.column_stack([coords, np.zeros(n_points)])
+    df_exp = check_simulation_variogram_reproduction(
+        realizations=reals,
+        grid_points=coords_3d,
+        variogram_model="exponential",
+        sill=1.2,
+        range_param={"x": 30.0, "y": 40.0, "z": 20.0},
+        nugget=0.0,
+        azimuth=45.0,
+        dip=0.0,
+        tolerance_angle=30.0,
+        max_lag=60.0,
+        n_lags=6,
+    )
+    assert df_exp.attrs["variogram_model"] == "exponential"
+    assert len(df_exp) == 6
+
+    # 3. Test Gaussian model with 1D single realization
+    df_gauss = check_simulation_variogram_reproduction(
+        realizations=reals[:, 0],
+        grid_points=coords,
+        variogram_model="gaussian",
+        sill=1.0,
+        range_param=25.0,
+        lags=[10.0, 20.0, 30.0, 40.0],
+    )
+    assert len(df_gauss) == 4
+    assert df_gauss.attrs["n_realizations"] == 1
+
+    # 4. Error validations
+    with pytest.raises(ValueError, match="grid_points must have shape"):
+        check_simulation_variogram_reproduction(reals, np.zeros((100, 4)), "spherical", 1.0, 20.0)
+
+    with pytest.raises(ValueError, match="does not match realizations"):
+        check_simulation_variogram_reproduction(reals, coords[:50], "spherical", 1.0, 20.0)
+
+    with pytest.raises(ValueError, match="sill must be strictly positive"):
+        check_simulation_variogram_reproduction(reals, coords, "spherical", -1.0, 20.0)
+
+    with pytest.raises(ValueError, match="nugget must be non-negative"):
+        check_simulation_variogram_reproduction(reals, coords, "spherical", 1.0, 20.0, nugget=-0.1)
+
+    with pytest.raises(ValueError, match="Unknown variogram model"):
+        check_simulation_variogram_reproduction(reals, coords, "linear_invalid", 1.0, 20.0)
+
+    with pytest.raises(ValueError, match="n_lags must be at least 2"):
+        check_simulation_variogram_reproduction(reals, coords, "spherical", 1.0, 20.0, n_lags=1)
+
+
+def test_plot_simulation_variogram_reproduction():
+    """Tests plotting function for variogram reproduction curves."""
+    import matplotlib.pyplot as plt
+
+    reals = np.random.default_rng(0).normal(0, 1, (50, 5))
+    coords = np.random.default_rng(0).uniform(0, 100, (50, 2))
+    df = check_simulation_variogram_reproduction(
+        realizations=reals,
+        grid_points=coords,
+        variogram_model="spherical",
+        sill=1.0,
+        range_param=40.0,
+        n_lags=6,
+    )
+
+    fig, ax = plot_simulation_variogram_reproduction(df, title="Test Variogram Reproduction")
+    assert fig is not None
+    assert ax is not None
+    assert "Separation Distance" in ax.get_xlabel()
+    assert "Semivariance" in ax.get_ylabel()
+    plt.close(fig)
+
+    # Test error handling on bad input
+    with pytest.raises(TypeError, match="must be a DataFrame"):
+        plot_simulation_variogram_reproduction("not_a_df")
+
+    with pytest.raises(ValueError, match="must contain 'lag' column"):
+        plot_simulation_variogram_reproduction(pd.DataFrame({"wrong_col": [1, 2]}))
+
+
+def test_compute_simulation_grade_tonnage_envelopes_comprehensive():
+    """Tests grade-tonnage non-linear transfer function evaluation and risk envelopes."""
+    rng = np.random.default_rng(123)
+    n_blocks = 200
+    n_reals = 40
+
+    # Lognormal grades with mean ~1.5% and std ~0.8%
+    reals = rng.lognormal(mean=0.3, sigma=0.5, size=(n_blocks, n_reals))
+
+    # Block model with variable tonnages
+    tonnes = rng.uniform(5000, 15000, n_blocks)
+    bm = pd.DataFrame({
+        "block_id": np.arange(n_blocks),
+        "tonnes": tonnes,
+    })
+    total_dep_tonnes = float(np.sum(tonnes))
+
+    cogs = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
+    env_df = compute_simulation_grade_tonnage_envelopes(
+        block_realizations=reals,
+        block_model=bm,
+        cutoff_grades=cogs,
+        tonnes_col="tonnes",
+    )
+
+    expected_cols = [
+        "cutoff_grade",
+        "tonnage_p10", "tonnage_p50", "tonnage_p90", "tonnage_mean",
+        "grade_p10", "grade_p50", "grade_p90", "grade_mean",
+        "metal_p10", "metal_p50", "metal_p90", "metal_mean",
+    ]
+    for c in expected_cols:
+        assert c in env_df.columns
+
+    assert len(env_df) == len(cogs)
+
+    # Cutoff 0.0 properties: all tonnes recovered
+    np.testing.assert_allclose(env_df["tonnage_p50"].iloc[0], total_dep_tonnes, rtol=1e-5)
+    np.testing.assert_allclose(env_df["tonnage_mean"].iloc[0], total_dep_tonnes, rtol=1e-5)
+
+    # Monotonicity checks:
+    # 1. Ore tonnage should decrease or stay constant as cutoff increases
+    assert (np.diff(env_df["tonnage_mean"]) <= 1e-3).all()
+    assert (np.diff(env_df["tonnage_p50"]) <= 1e-3).all()
+
+    # 2. Average ore grade should increase or stay constant as cutoff increases
+    assert (np.diff(env_df["grade_mean"]) >= -1e-3).all()
+    assert (np.diff(env_df["grade_p50"]) >= -1e-3).all()
+
+    # 3. Quantile relationships (In mining risk conventions: P10 optimistic >= P50 median >= P90 conservative)
+    assert (env_df["tonnage_p10"] >= env_df["tonnage_p50"] - 1e-3).all()
+    assert (env_df["tonnage_p50"] >= env_df["tonnage_p90"] - 1e-3).all()
+
+    # Verify attributes
+    assert env_df.attrs["n_realizations"] == n_reals
+    assert env_df.attrs["n_blocks"] == n_blocks
+    assert len(env_df.attrs["footnotes"]) >= 2
+
+    # Test with single 1D realization
+    single_env = compute_simulation_grade_tonnage_envelopes(
+        block_realizations=reals[:, 0],
+        block_model=bm,
+        cutoff_grades=[0.5, 1.0],
+    )
+    assert len(single_env) == 2
+    assert single_env.attrs["n_realizations"] == 1
+
+    # Error handling
+    with pytest.raises(TypeError, match="block_model must be a pandas DataFrame"):
+        compute_simulation_grade_tonnage_envelopes(reals, "not_df", [0.5])
+
+    with pytest.raises(ValueError, match="tonnes_col 'missing' not found"):
+        compute_simulation_grade_tonnage_envelopes(reals, bm, [0.5], tonnes_col="missing")
+
+    with pytest.raises(ValueError, match="must be a non-empty sequence"):
+        compute_simulation_grade_tonnage_envelopes(reals, bm, [])
+
+    with pytest.raises(ValueError, match="Cut-off grades must be non-negative"):
+        compute_simulation_grade_tonnage_envelopes(reals, bm, [-0.5, 1.0])
+
+    with pytest.raises(ValueError, match="must match block_realizations rows"):
+        compute_simulation_grade_tonnage_envelopes(reals, bm.iloc[:10], [0.5])
+
+
+def test_plot_simulation_grade_tonnage_envelopes():
+    """Tests dual-panel plotting of grade-tonnage risk envelopes."""
+    import matplotlib.pyplot as plt
+
+    bm = pd.DataFrame({"tonnes": [1000, 2000, 3000]})
+    reals = np.array([[1.0, 1.2], [2.0, 2.2], [3.0, 3.2]])
+    df = compute_simulation_grade_tonnage_envelopes(reals, bm, cutoff_grades=[0.5, 1.5, 2.5])
+
+    fig, (ax1, ax2) = plot_simulation_grade_tonnage_envelopes(df, grade_unit="% Cu")
+    assert fig is not None
+    assert ax1 is not None
+    assert ax2 is not None
+    assert "Ore Tonnage" in ax1.get_ylabel()
+    assert "Average Ore Grade" in ax2.get_ylabel()
+    plt.close(fig)
+
+    # Test error handling
+    with pytest.raises(TypeError, match="must be a DataFrame"):
+        plot_simulation_grade_tonnage_envelopes([])
+
+    with pytest.raises(ValueError, match="envelopes_results must contain 'cutoff_grade' column"):
+        plot_simulation_grade_tonnage_envelopes(pd.DataFrame({"wrong_col": [0.5]}))
+
+
+def test_drill_spacing_analysis_by_simulation_comprehensive():
+    """Tests Parker-Verly drill spacing analysis calibrating CIM/JORC resource classification."""
+    rng = np.random.default_rng(99)
+    n_blocks = 120
+    n_reals = 50
+
+    # 120 blocks arranged in a 3D block model
+    x = np.repeat(np.arange(10) * 10.0, 12)
+    y = np.repeat(np.tile(np.arange(6) * 10.0, 2), 10)
+    z = np.tile(np.arange(2) * 5.0, 60)
+    tonnes = np.full(n_blocks, 2700.0)  # 10x10x5m block = 500m3 * 2.7 t/m3 = 1350 tonnes
+
+    bm = pd.DataFrame({
+        "x": x,
+        "y": y,
+        "z": z,
+        "tonnes": tonnes,
+        "density": np.full(n_blocks, 2.7),
+        "block_volume": np.full(n_blocks, 1000.0),
+    })
+
+    # Simulated copper grades with low variance (high certainty -> should qualify)
+    reals_tight = rng.normal(loc=1.20, scale=0.03, size=(n_blocks, n_reals))
+
+    # Quarterly parcel: e.g. 5,000 m3 = 5 blocks per parcel
+    dsa_quarterly = drill_spacing_analysis_by_simulation(
+        block_realizations=reals_tight,
+        block_model=bm,
+        production_volume_m3=5000.0,
+        confidence_level=0.90,
+        target_precision_pct=15.0,
+    )
+
+    expected_cols = [
+        "parcel_id",
+        "block_count",
+        "parcel_volume_m3",
+        "parcel_tonnes",
+        "mean_grade",
+        "std_grade",
+        "p_lower",
+        "p_upper",
+        "relative_error_pct",
+        "status",
+        "classification_qualification",
+        "meets_target_precision",
+    ]
+    for c in expected_cols:
+        assert c in dsa_quarterly.columns
+
+    assert len(dsa_quarterly) == 24  # 120 / 5 = 24 parcels
+    # With scale 0.03 relative to mean 1.2, relative error should be ~ 4%, well within 15%
+    assert (dsa_quarterly["relative_error_pct"] < 10.0).all()
+    assert bool(dsa_quarterly["meets_target_precision"].all())
+    # For small parcel volume (5,000 m3 <= 50,000 m3), qualifying parcels become "Measured Candidate"
+    assert (dsa_quarterly["classification_qualification"] == "Measured Candidate").all()
+
+    # Check attrs
+    assert dsa_quarterly.attrs["total_parcels"] == 24
+    assert dsa_quarterly.attrs["parcels_qualifying"] == 24
+    assert dsa_quarterly.attrs["qualification_rate_pct"] == 100.0
+    assert "CONFIRMED" in dsa_quarterly.attrs["overall_classification_verdict"]
+    assert len(dsa_quarterly.attrs["footnotes"]) >= 3
+
+    # Annual parcel: e.g. 60,000 m3 (which is > 50,000 m3 -> Indicated Candidate)
+    dsa_annual = drill_spacing_analysis_by_simulation(
+        block_realizations=reals_tight,
+        block_model=bm,
+        production_volume_m3=60000.0,
+        confidence_level=0.90,
+        target_precision_pct=15.0,
+    )
+    assert (dsa_annual["classification_qualification"] == "Indicated Candidate").all()
+
+    # High uncertainty case (scale = 0.50 -> relative error ~ 60% -> fails criteria)
+    reals_noisy = rng.normal(loc=1.20, scale=0.50, size=(n_blocks, n_reals))
+    dsa_noisy = drill_spacing_analysis_by_simulation(
+        block_realizations=reals_noisy,
+        block_model=bm,
+        production_volume_m3=5000.0,
+        confidence_level=0.90,
+        target_precision_pct=15.0,
+    )
+    assert not bool(dsa_noisy["meets_target_precision"].all())
+    assert (dsa_noisy["classification_qualification"] == "Inferred / Requires Infill Drilling").any()
+    assert "UNCONFIRMED" in dsa_noisy.attrs["overall_classification_verdict"]
+
+    # Test fallback when no coordinates are present in block_model
+    bm_no_coords = pd.DataFrame({"tonnes": tonnes})
+    dsa_no_coords = drill_spacing_analysis_by_simulation(
+        block_realizations=reals_tight,
+        block_model=bm_no_coords,
+        production_volume_m3=5000.0,
+    )
+    assert len(dsa_no_coords) > 0
+
+    # Error handling
+    with pytest.raises(TypeError, match="block_model must be a pandas DataFrame"):
+        drill_spacing_analysis_by_simulation(reals_tight, "bad_model", 5000.0)
+
+    with pytest.raises(ValueError, match="production_volume_m3 must be strictly positive"):
+        drill_spacing_analysis_by_simulation(reals_tight, bm, -100.0)
+
+    with pytest.raises(ValueError, match="confidence_level must be between 0 and 1"):
+        drill_spacing_analysis_by_simulation(reals_tight, bm, 5000.0, confidence_level=1.5)
+
+    with pytest.raises(ValueError, match="target_precision_pct must be strictly positive"):
+        drill_spacing_analysis_by_simulation(reals_tight, bm, 5000.0, target_precision_pct=-5.0)
+
+    with pytest.raises(ValueError, match="block_model rows"):
+        drill_spacing_analysis_by_simulation(reals_tight, bm.iloc[:10], 5000.0)
+
+
+# =============================================================================
+# PART 4 UNIT TESTS: POLYMETALLIC EQUIVALENCY & NET SMELTER RETURN
+# =============================================================================
+
+
+def test_calculate_net_smelter_return_comprehensive():
+    """Tests multi-element Net Smelter Return (NSR) calculation under CIM MRMR §7.2."""
+    n_blocks = 50
+    rng = np.random.default_rng(42)
+
+    bm = pd.DataFrame({
+        "block_id": np.arange(n_blocks),
+        "grade_cu": rng.uniform(0.3, 2.5, n_blocks),     # % Cu
+        "grade_au": rng.uniform(0.1, 1.5, n_blocks),     # g/t Au
+        "grade_ag": rng.uniform(5.0, 45.0, n_blocks),    # g/t Ag
+        "tonnes": np.full(n_blocks, 10000.0),
+    })
+
+    commodities_cfg = {
+        "Cu": {
+            "grade_col": "grade_cu",
+            "price": 3.80,              # $/lb
+            "unit_conversion": 22.0462, # 1% = 22.0462 lbs/t
+            "recovery": 0.88,
+            "payability": 0.95,
+            "refining_charge": 0.08,    # $/lb RC
+            "treatment_charge_per_metal_unit": 0.05, # $/lb TC
+        },
+        "Au": {
+            "grade_col": "grade_au",
+            "price": 1900.0,            # $/oz
+            "unit_conversion": 0.0321507, # 1 g/t = 0.0321507 oz/t
+            "recovery": 0.75,
+            "payability": 0.90,
+            "refining_charge": 5.0,     # $/oz RC
+        },
+        "Ag": {
+            "grade_col": "grade_ag",
+            "price": 24.0,              # $/oz
+            "unit_conversion": 0.0321507,
+            "recovery": 0.70,
+            "payability": 0.85,
+            "refining_charge": 0.50,
+        },
+    }
+
+    royalty_pct = 2.5
+    offsite_costs = 3.50
+
+    nsr_df = calculate_net_smelter_return(
+        block_model=bm,
+        commodities_config=commodities_cfg,
+        royalty_pct=royalty_pct,
+        offsite_costs_per_tonne=offsite_costs,
+        currency="$",
+    )
+
+    # 1. Output columns
+    for c in ["nsr_cu", "nsr_au", "nsr_ag", "nsr_gross", "nsr"]:
+        assert c in nsr_df.columns
+
+    # 2. Mathematical consistency: Gross NSR equals sum of individual commodity revenues
+    expected_gross = nsr_df["nsr_cu"] + nsr_df["nsr_au"] + nsr_df["nsr_ag"]
+    np.testing.assert_allclose(nsr_df["nsr_gross"], expected_gross, rtol=1e-6)
+
+    # 3. Mathematical consistency: Net NSR equals (Gross - offsite) * (1 - royalty)
+    expected_net = np.maximum(0.0, (expected_gross - offsite_costs) * (1.0 - royalty_pct / 100.0))
+    np.testing.assert_allclose(nsr_df["nsr"], expected_net, rtol=1e-6)
+
+    # 4. Check specific copper revenue formula
+    # Cu: payable metal = grade * 22.0462 * 0.88 * 0.95
+    # net price = 3.80 - 0.08 = 3.72
+    # TC = 0.05
+    cu_payable_metal = bm["grade_cu"] * 22.0462 * 0.88 * 0.95
+    cu_expected_rev = cu_payable_metal * (3.72 - 0.05)
+    np.testing.assert_allclose(nsr_df["nsr_cu"], cu_expected_rev, rtol=1e-5)
+
+    # 5. Attributes verification
+    assert nsr_df.attrs["commodities"] == ["Cu", "Au", "Ag"]
+    assert nsr_df.attrs["royalty_pct"] == 2.5
+    assert nsr_df.attrs["offsite_costs_per_tonne"] == 3.50
+    assert nsr_df.attrs["currency"] == "$"
+    assert nsr_df.attrs["mean_nsr"] > 0.0
+    assert len(nsr_df.attrs["footnotes"]) >= 3
+
+    # 6. Test percentage auto-scaling (e.g., recovery 88.0 and payability 95.0)
+    cfg_scaled = {
+        "Cu": {
+            "grade_col": "grade_cu",
+            "price": 3.80,
+            "unit_conversion": 22.0462,
+            "recovery": 88.0,
+            "payability": 95.0,
+            "refining_charge": 0.08,
+            "treatment_charge_per_metal_unit": 0.05,
+        }
+    }
+    nsr_scaled = calculate_net_smelter_return(bm, cfg_scaled)
+    np.testing.assert_allclose(nsr_scaled["nsr_cu"], nsr_df["nsr_cu"], rtol=1e-5)
+
+    # 7. Error handling
+    with pytest.raises(TypeError, match="must be a pandas DataFrame"):
+        calculate_net_smelter_return("not_df", commodities_cfg)
+
+    with pytest.raises(ValueError, match="block_model cannot be empty"):
+        calculate_net_smelter_return(pd.DataFrame(), commodities_cfg)
+
+    with pytest.raises(ValueError, match="must be a non-empty mapping"):
+        calculate_net_smelter_return(bm, {})
+
+    with pytest.raises(ValueError, match="not found in block_model"):
+        calculate_net_smelter_return(bm, {"Cu": {"grade_col": "non_existent", "price": 3.5}})
+
+    with pytest.raises(ValueError, match="price for commodity 'Cu' must be strictly positive"):
+        calculate_net_smelter_return(bm, {"Cu": {"grade_col": "grade_cu", "price": -1.0}})
+
+    with pytest.raises(ValueError, match="royalty_pct must be between"):
+        calculate_net_smelter_return(bm, commodities_cfg, royalty_pct=105.0)
+
+    with pytest.raises(ValueError, match="offsite_costs_per_tonne must be non-negative"):
+        calculate_net_smelter_return(bm, commodities_cfg, offsite_costs_per_tonne=-2.0)
+
+
+def test_calculate_equivalent_grade_comprehensive():
+    """Tests multi-metal equivalent grade calculation in compliance with JORC Clause 50."""
+    n_blocks = 30
+    rng = np.random.default_rng(10)
+
+    bm = pd.DataFrame({
+        "grade_cu": rng.uniform(0.5, 2.0, n_blocks),     # % Cu
+        "grade_au": rng.uniform(0.2, 1.2, n_blocks),     # g/t Au
+        "grade_mo": rng.uniform(0.01, 0.08, n_blocks),   # % Mo
+    })
+
+    # Primary: Cu (% Cu, price $3.80/lb, recovery 0.88, unit_conversion 22.0462)
+    # Secondary: Au ($1900/oz, recovery 0.75, conversion 0.0321507)
+    #            Mo ($18.00/lb, recovery 0.70, conversion 22.0462)
+    secondary_cfg = {
+        "Au": {
+            "grade_col": "grade_au",
+            "price": 1900.0,
+            "recovery": 0.75,
+            "conversion_factor": 0.0321507,
+        },
+        "Mo": {
+            "grade_col": "grade_mo",
+            "price": 18.00,
+            "recovery": 0.70,
+            "conversion_factor": 22.0462,
+        },
+    }
+
+    eq_df = calculate_equivalent_grade(
+        block_model=bm,
+        primary_commodity="Cu",
+        primary_grade_col="grade_cu",
+        primary_price=3.80,
+        primary_recovery=0.88,
+        secondary_commodities=secondary_cfg,
+        primary_unit_conversion=22.0462,
+    )
+
+    # 1. Output column verification
+    assert "cu_eq" in eq_df.columns
+    # Equivalent grade must be strictly greater than or equal to primary grade
+    assert (eq_df["cu_eq"] >= eq_df["grade_cu"]).all()
+
+    # 2. Formula verification:
+    # denom = 3.80 * 0.88 * 22.0462 = 73.7224928
+    # factor_au = (1900.0 * 0.75 * 0.0321507) / denom
+    # factor_mo = (18.00 * 0.70 * 22.0462) / denom
+    denom = 3.80 * 0.88 * 22.0462
+    factor_au = (1900.0 * 0.75 * 0.0321507) / denom
+    factor_mo = (18.00 * 0.70 * 22.0462) / denom
+
+    expected_cueq = bm["grade_cu"] + bm["grade_au"] * factor_au + bm["grade_mo"] * factor_mo
+    np.testing.assert_allclose(eq_df["cu_eq"], expected_cueq, rtol=1e-6)
+
+    # 3. JORC Clause 50 attributes verification
+    assert eq_df.attrs["primary_commodity"] == "Cu"
+    assert eq_df.attrs["secondary_commodities"] == ["Au", "Mo"]
+    np.testing.assert_allclose(eq_df.attrs["equivalency_factors"]["Au"], factor_au, rtol=1e-5)
+    np.testing.assert_allclose(eq_df.attrs["equivalency_factors"]["Mo"], factor_mo, rtol=1e-5)
+
+    # JORC Clause 50 disclosure formula check
+    formula_str = eq_df.attrs["formula_string"]
+    assert "CuEq = Cu +" in formula_str
+    assert "Au" in formula_str
+    assert "Mo" in formula_str
+    assert len(eq_df.attrs["footnotes"]) >= 3
+
+    # 4. Custom output column name
+    custom_df = calculate_equivalent_grade(
+        block_model=bm,
+        primary_commodity="Cu",
+        primary_grade_col="grade_cu",
+        primary_price=3.80,
+        primary_recovery=0.88,
+        secondary_commodities=secondary_cfg,
+        output_col="Copper_Equivalent_Pct",
+        primary_unit_conversion=22.0462,
+    )
+    assert "Copper_Equivalent_Pct" in custom_df.columns
+
+    # 5. Error handling
+    with pytest.raises(TypeError, match="must be a pandas DataFrame"):
+        calculate_equivalent_grade("bad_input", "Cu", "grade_cu", 3.8, 0.88, secondary_cfg)
+
+    with pytest.raises(ValueError, match="primary_grade_col 'missing' not found"):
+        calculate_equivalent_grade(bm, "Cu", "missing", 3.8, 0.88, secondary_cfg)
+
+    with pytest.raises(ValueError, match="primary_price must be strictly positive"):
+        calculate_equivalent_grade(bm, "Cu", "grade_cu", -3.8, 0.88, secondary_cfg)
+
+    with pytest.raises(ValueError, match="primary_recovery must be strictly positive"):
+        calculate_equivalent_grade(bm, "Cu", "grade_cu", 3.8, -0.88, secondary_cfg)
+
+    with pytest.raises(ValueError, match="secondary_commodities must be a non-empty mapping"):
+        calculate_equivalent_grade(bm, "Cu", "grade_cu", 3.8, 0.88, {})
+
+
+def test_plot_net_smelter_return_breakdown():
+    """Tests dual-panel plotting of NSR breakdown and distribution."""
+    import matplotlib.pyplot as plt
+
+    bm = pd.DataFrame({
+        "grade_cu": [1.0, 1.5, 2.0],
+        "grade_au": [0.5, 0.8, 1.2],
+    })
+    cfg = {
+        "Cu": {"grade_col": "grade_cu", "price": 3.80, "unit_conversion": 22.0462, "recovery": 0.88, "payability": 0.95},
+        "Au": {"grade_col": "grade_au", "price": 1900.0, "unit_conversion": 0.0321507, "recovery": 0.75, "payability": 0.90},
+    }
+    nsr_df = calculate_net_smelter_return(bm, cfg, royalty_pct=2.0, offsite_costs_per_tonne=3.0)
+
+    fig, (ax1, ax2) = plot_net_smelter_return_breakdown(nsr_df, title="Test NSR Breakdown")
+    assert fig is not None
+    assert ax1 is not None
+    assert ax2 is not None
+    assert "Average Value" in ax1.get_ylabel()
+    assert "Net Smelter Return" in ax2.get_xlabel()
+    plt.close(fig)
+
+    # Test error handling
+    with pytest.raises(TypeError, match="must be a pandas DataFrame"):
+        plot_net_smelter_return_breakdown("not_df")
+
+    with pytest.raises(ValueError, match="must contain 'nsr' and 'nsr_gross'"):
+        plot_net_smelter_return_breakdown(pd.DataFrame({"wrong_col": [1, 2]}))
 
 
 

@@ -9,6 +9,8 @@ from drs import (
     Telemetry,
     Storage,
     Processor,
+)
+from drs.material import (
     Flow,
     blend_flows,
 )

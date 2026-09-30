@@ -19,7 +19,8 @@ import numpy as np
 import pandas as pd
 
 import drs
-from drs import DRSEngine, Telemetry, Processor, Storage, Flow, blend_flows
+from drs import DRSEngine, Telemetry, Processor, Storage
+from drs.material import Flow, blend_flows
 
 from drs_mining.components import (
     OperatingMode,

@@ -36,6 +36,9 @@ from drs_mining.components.estimation import (
     ordinary_kriging_block_estimation,
     inverse_distance_weighting_block_estimation,
     nearest_neighbor_block_estimation,
+    kriging_cross_validation,
+    plot_cross_validation_diagnostics,
+    compare_model_estimation_methods,
     kriging_neighborhood_analysis,
     classify_resources_by_sor,
     classify_mineral_resources,
@@ -368,6 +371,70 @@ def main():
     print(f"  • 3D Ordinary Kriging mean block grade: {np.nanmean(estimates):.3f}% Cu")
 
     # -------------------------------------------------------------------------
+    # 3b. Kriging Model Cross-Validation (Leave-One-Out Jackknife)
+    # -------------------------------------------------------------------------
+    print("\n[Step 3b] 3D Kriging Cross-Validation (Leave-One-Out Jackknife, CIM MRMR §6.10)...")
+    cv_df = kriging_cross_validation(
+        samples_xy=samples_xyz,
+        sample_grades=sample_grades,
+        variogram_model="spherical",
+        sill=sill,
+        range_param=range_param,
+        nugget=nugget,
+        method="ordinary",
+        min_neighbors=2,
+        max_neighbors=16,
+        search_radius=110.0,
+        max_per_drillhole=4,
+        sample_hole_ids=df_dh["hole_id"].tolist(),
+    )
+    print(f"  • Cross-Validated Samples  : {cv_df.attrs['estimated_samples']} / {cv_df.attrs['total_samples']}")
+    print(f"  • Mean Error (Bias)        : {cv_df.attrs['mean_error']:+.4f}% Cu  (Target: ~0.0)")
+    print(f"  • Root Mean Sq Error (RMSE): {cv_df.attrs['root_mean_square_error']:.4f}% Cu")
+    print(f"  • Mean Std Error (MSE)     : {cv_df.attrs['mean_standardized_error']:+.4f}  (Target: ~0.0)")
+    print(f"  • Var Std Error (Var(SE))  : {cv_df.attrs['variance_standardized_error']:.4f}  (Target: ~1.0)")
+    print(f"  • Pearson Correlation r    : {cv_df.attrs['pearson_correlation']:.3f}")
+    print(f"  • Slope of Regression (SoR): {cv_df.attrs['slope_of_regression']:.3f}  (Target: ~1.0)")
+
+    # -------------------------------------------------------------------------
+    # 3c. Multi-Method Comparison vs. NN Benchmark (CIM MRMR §6.10)
+    # -------------------------------------------------------------------------
+    print("\n[Step 3c] Multi-Method Comparison vs. NN Benchmark (CIM MRMR §6.10)...")
+    comp_df = compare_model_estimation_methods(
+        samples_xy=samples_xyz,
+        sample_grades=sample_grades,
+        block_model=block_model,
+        cutoff_grades=[0.0, 0.4, 0.6, 0.8, 1.0],
+        grade_cols={
+            "Nearest Neighbor": "nn_grade",
+            "Ordinary Kriging": "estimated_grade",
+            "IDW²": "idw_grade",
+        },
+        sample_weights=None,
+        grade_unit="% Cu",
+        tonnes_col="tonnes",
+    )
+    comp_disp = comp_df.copy()
+    comp_disp["ore_tonnes"] = (comp_disp["ore_tonnes"] / 1e6).map(lambda x: f"{x:.2f} Mt")
+    comp_disp["mean_grade"] = comp_disp["mean_grade"].map(lambda x: f"{x:.3f}%")
+    comp_disp["contained_metal"] = (comp_disp["contained_metal"] / 1e3).map(lambda x: f"{x:.1f} kt")
+    comp_disp["tonnes_diff_pct_vs_nn"] = comp_disp["tonnes_diff_pct_vs_nn"].map(
+        lambda x: f"{x:+.1f}%" if pd.notna(x) else "N/A"
+    )
+    comp_disp["grade_diff_pct_vs_nn"] = comp_disp["grade_diff_pct_vs_nn"].map(
+        lambda x: f"{x:+.1f}%" if pd.notna(x) else "N/A"
+    )
+    comp_disp["metal_diff_pct_vs_nn"] = comp_disp["metal_diff_pct_vs_nn"].map(
+        lambda x: f"{x:+.1f}%" if pd.notna(x) else "N/A"
+    )
+    print(comp_disp.to_string(index=False))
+
+    print("\nGlobal Bias at Zero Cut-off (vs. Declustered Sample Mean):")
+    for m_name, b_val in comp_df.attrs["global_bias_pct"].items():
+        flag = "PASSED (within +/-5%)" if abs(b_val) <= 5.0 else "WARNING (>5%)"
+        print(f"  • {m_name:20s}: {b_val:+.2f}% bias [{flag}]")
+
+    # -------------------------------------------------------------------------
     # 4. Generate Grade-Tonnage Sensitivity Table
     # -------------------------------------------------------------------------
     print("\n[Step 4] Computing Grade-Tonnage Sensitivity Curve...")
@@ -559,7 +626,18 @@ def main():
         plt.close(fig_swath)
         print(f"  -> Saved: {fig_swath_path}")
 
-        print("\n[Step 8d] Generating 3-View Orthogonal Resource Classification Projections...")
+        print("\n[Step 8d] Generating 3D Kriging Cross-Validation Diagnostics Dashboard...")
+        fig_cv, _ = plot_cross_validation_diagnostics(
+            cv_df,
+            grade_unit="% Cu",
+            title="3D Block Kriging: Cross-Validation Diagnostics (CIM MRMR §6.10, SME Ch. 4.5)",
+        )
+        fig_cv_path = output_dir / "block_kriging_cross_validation_diagnostics.png"
+        fig_cv.savefig(fig_cv_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_cv)
+        print(f"  -> Saved: {fig_cv_path}")
+
+        print("\n[Step 8e] Generating 3-View Orthogonal Resource Classification Projections...")
         fig_ortho_class, _ = plot_resource_classification_orthogonal_slices(
             block_model=block_model,
             category_col="category",

@@ -1,5 +1,6 @@
 import pytest
-from drs import Storage, Flow, Entity
+from drs import Storage
+from drs.material import Flow, Entity
 
 
 def test_storage_initialization():

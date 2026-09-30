@@ -1,5 +1,6 @@
 import pytest
-from drs import Processor, Flow, Entity
+from drs import Processor
+from drs.material import Flow, Entity
 
 
 def test_processor_pass_through_and_rate_limit():

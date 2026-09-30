@@ -7,7 +7,7 @@ import random
 from typing import Iterable, Iterator, Mapping, Optional
 
 import drs
-from drs import Flow, Entity
+from drs.material import Flow, Entity
 
 
 def autocorrelated_generator(

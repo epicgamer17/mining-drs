@@ -18,6 +18,13 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+# Ensure repository root is on sys.path for direct script execution
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import matplotlib.pyplot as plt
 from matplotlib.path import Path as MplPath
 import numpy as np
@@ -28,6 +35,10 @@ from drs_mining.components.estimation import (
     simple_kriging_grid_estimation,
     ordinary_kriging_grid_estimation,
     inverse_distance_weighting,
+    nearest_neighbor_grid_estimation,
+    kriging_cross_validation,
+    plot_cross_validation_diagnostics,
+    compare_model_estimation_methods,
     is_within_convex_hull,
     grade_tonnage_table,
     plot_grade_tonnage_curve,
@@ -350,7 +361,7 @@ def main():
     )
 
     # 7. Estimator 4: Inverse Distance Squared (IDW^2) - Benchmark
-    print(f"[4/4] Running Inverse Distance Squared (IDW^2, power=2.0)...")
+    print(f"[4/5] Running Inverse Distance Squared (IDW^2, power=2.0)...")
     idw_grades, _ = inverse_distance_weighting(
         samples_xy,
         sample_grades,
@@ -361,12 +372,23 @@ def main():
         mask_extrapolation=False,
     )
 
-    # 7. Model Comparative Statistics
+    # 8. Estimator 5: Nearest Neighbor (NN) - Declustered Polygonal Benchmark
+    print(f"[5/5] Running Nearest Neighbor (NN, Unbiased Global Benchmark)...")
+    nn_grades, _ = nearest_neighbor_grid_estimation(
+        samples_xy,
+        sample_grades,
+        grid_points,
+        max_radius=args.max_radius,
+        mask_extrapolation=False,
+    )
+
+    # Model Comparative Statistics
     models = {
         "Ordinary Kriging (OK)": (ok_grades, ok_variances),
         "Ordinary Kriging (Strict Interp)": (ok_strict_grades, ok_strict_variances),
         "Simple Kriging (SK)": (sk_grades, sk_variances),
         "Inverse Distance Squared (IDW²)": (idw_grades, None),
+        "Nearest Neighbor (NN)": (nn_grades, None),
     }
 
     print("\n--- Model Comparative Statistics (Estimates & Kriging Variances) ---")
@@ -386,6 +408,80 @@ def main():
             }
         )
     print(pd.DataFrame(stats_rows).to_string(index=False))
+
+    # =========================================================================
+    # Kriging Model Cross-Validation (CIM MRMR §6.10, SME Ch. 4.5)
+    # =========================================================================
+    print("\n--- Kriging Model Cross-Validation (Leave-One-Out Jackknife) ---")
+    cv_df = kriging_cross_validation(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        variogram_model=args.variogram,
+        sill=args.sill,
+        range_param=args.range,
+        nugget=args.nugget,
+        method="ordinary",
+        min_neighbors=1,
+        max_neighbors=args.k_neighbors,
+        search_radius=args.max_radius,
+    )
+    print(f"  • Cross-Validated Samples  : {cv_df.attrs['estimated_samples']} / {cv_df.attrs['total_samples']}")
+    print(f"  • Mean Error (Bias)        : {cv_df.attrs['mean_error']:+.4f}% Cu  (Target: ~0.0)")
+    print(f"  • Mean Absolute Error (MAE): {cv_df.attrs['mean_absolute_error']:.4f}% Cu")
+    print(f"  • Root Mean Sq Error (RMSE): {cv_df.attrs['root_mean_square_error']:.4f}% Cu")
+    print(f"  • Mean Std Error (MSE)     : {cv_df.attrs['mean_standardized_error']:+.4f}  (Target: ~0.0)")
+    print(f"  • Var Std Error (Var(SE))  : {cv_df.attrs['variance_standardized_error']:.4f}  (Target: ~1.0)")
+    print(f"  • Pearson Correlation r    : {cv_df.attrs['pearson_correlation']:.3f}")
+    print(f"  • Slope of Regression (SoR): {cv_df.attrs['slope_of_regression']:.3f}  (Target: ~1.0)")
+
+    # =========================================================================
+    # Multi-Method Global Comparison & Bias Audit (CIM MRMR §6.10)
+    # =========================================================================
+    cutoffs = [0.0, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5]
+    comp_block_model = pd.DataFrame(
+        {
+            "x": grid_points[:, 0],
+            "y": grid_points[:, 1],
+            "tonnes": block_tonnes,
+            "nn_grade": nn_grades,
+            "ok_grade": ok_grades,
+            "sk_grade": sk_grades,
+            "idw_grade": idw_grades,
+        }
+    )
+    comp_table = compare_model_estimation_methods(
+        samples_xy=samples_xy,
+        sample_grades=sample_grades,
+        block_model=comp_block_model,
+        cutoff_grades=cutoffs,
+        grade_cols={
+            "Nearest Neighbor": "nn_grade",
+            "Ordinary Kriging": "ok_grade",
+            "Simple Kriging": "sk_grade",
+            "IDW²": "idw_grade",
+        },
+        sample_weights=None,
+        grade_unit="% Cu",
+        tonnes_col="tonnes",
+    )
+
+    print("\n--- Method Comparison vs. Nearest Neighbor Benchmark (CIM MRMR §6.10) ---")
+    comp_disp = comp_table[comp_table["cutoff"].isin([0.0, 0.4, 0.6, 0.8, 1.0])].copy()
+    comp_disp["ore_tonnes"] = (comp_disp["ore_tonnes"] / 1e6).map(lambda x: f"{x:.2f} Mt")
+    comp_disp["mean_grade"] = comp_disp["mean_grade"].map(lambda x: f"{x:.3f}%")
+    comp_disp["contained_metal"] = (comp_disp["contained_metal"] / 1e3).map(lambda x: f"{x:.1f} kt")
+    comp_disp["tonnes_diff_pct_vs_nn"] = comp_disp["tonnes_diff_pct_vs_nn"].map(
+        lambda x: f"{x:+.1f}%" if pd.notna(x) else "N/A"
+    )
+    comp_disp["grade_diff_pct_vs_nn"] = comp_disp["grade_diff_pct_vs_nn"].map(
+        lambda x: f"{x:+.1f}%" if pd.notna(x) else "N/A"
+    )
+    print(comp_disp.to_string(index=False))
+
+    print("\nGlobal Bias at Zero Cut-off (vs. Declustered Sample Mean):")
+    for m_name, b_val in comp_table.attrs["global_bias_pct"].items():
+        flag = "PASSED (within +/-5%)" if abs(b_val) <= 5.0 else "WARNING (>5%)"
+        print(f"  • {m_name:20s}: {b_val:+.2f}% bias [{flag}]")
 
     # 8. Grade-Tonnage Sensitivity for All Models (Model Audit)
     cutoffs = [0.0, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5]
@@ -705,6 +801,17 @@ def main():
         fig_dec.savefig(declust_plot_file, dpi=180, bbox_inches="tight")
         plt.close(fig_dec)
         print(f"  • Cell Declustering curve: saved to {declust_plot_file}")
+
+        # D0. Point Cross-Validation Diagnostics Dashboard (CIM MRMR §6.10 & SME Ch. 4.5)
+        cv_plot_file = str(plots_dir / "kriging_cross_validation_diagnostics.png")
+        fig_cv, _ = plot_cross_validation_diagnostics(
+            cv_df,
+            grade_unit="% Cu",
+            title="Ordinary Kriging Cross-Validation Diagnostics (CIM MRMR §6.10)",
+        )
+        fig_cv.savefig(cv_plot_file, dpi=180, bbox_inches="tight")
+        plt.close(fig_cv)
+        print(f"  • Cross-Validation Diagnostics: saved to {cv_plot_file}")
 
         # D. Directional Swath Plots (Local Drift Analysis - NI 43-101 / JORC Standard)
         block_model_df = pd.DataFrame(

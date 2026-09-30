@@ -1,5 +1,5 @@
 import pytest
-from drs import Entity
+from drs.material import Entity
 from drs_mining.components import MaterialSource, autocorrelated_generator
 
 

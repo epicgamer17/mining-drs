@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union
 import warnings
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -25,9 +25,11 @@ import pandas as pd
 from shapely.geometry import MultiPoint, Point, Polygon, box
 from shapely.ops import voronoi_diagram
 from scipy.spatial import KDTree, cKDTree, Delaunay
+from scipy.spatial.distance import cdist, pdist
 from scipy.sparse import lil_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy import stats
+from scipy.stats import multivariate_normal
 
 
 def polygonal_estimation(
@@ -1018,7 +1020,9 @@ def _filter_neighborhood_sectors(
     if min_sectors > 1 and len(sector_counts) < min_sectors:
         return np.array([], dtype=int), np.array([], dtype=float)
 
-    return np.asarray(selected_indices, dtype=int), np.asarray(selected_distances, dtype=float)
+    return np.asarray(selected_indices, dtype=int), np.asarray(
+        selected_distances, dtype=float
+    )
 
 
 def _compute_quadratic_estimation_variance(
@@ -1172,6 +1176,8 @@ def _solve_ordinary_kriging_system(
     return weights, mu
 
 
+# TODO: should follow naming convention and be called grid.
+# TODO: do we need 3d anistropy for a grid estimation?
 def inverse_distance_weighting(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
@@ -1791,6 +1797,9 @@ def _theoretical_covariance(
     total_sill = c0 + c
 
     h_arr = np.asarray(h, dtype=float)
+    is_scalar = h_arr.ndim == 0
+    if is_scalar:
+        h_arr = np.atleast_1d(h_arr)
 
     eff_ranges = (
         anisotropy_ranges
@@ -1847,7 +1856,638 @@ def _theoretical_covariance(
     # Covariance relation: C(h) = C(0) - gamma(h)
     cov = total_sill - gamma
     cov[~pos_mask] = total_sill
-    return cov
+    return float(cov[0]) if is_scalar else cov
+
+
+# =============================================================================
+# SPATIAL VARIOGRAPHY & STRUCTURAL ANALYSIS (EXPERIMENTAL & MODEL FITTING)
+# =============================================================================
+
+
+def calculate_experimental_semivariogram(
+    coords: Union[np.ndarray, pd.DataFrame],
+    grades: Union[np.ndarray, Sequence[float], str],
+    lag_distance: float,
+    n_lags: int,
+    lag_tolerance: Optional[float] = None,
+    azimuth: Optional[float] = None,
+    dip: Optional[float] = None,
+    angular_tolerance: Optional[float] = None,
+    bandwidth_horizontal: Optional[float] = None,
+    bandwidth_vertical: Optional[float] = None,
+    domain_col: Optional[str] = None,
+    sample_domains: Optional[Sequence[Any]] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """Computes the empirical experimental semivariogram from spatial samples or composites.
+
+    Evaluates the classical Matheron (1965) estimator across discrete separation lag bins
+    in accordance with SME Mining Engineering Handbook (§4.3) and CIM MRMR Best Practice
+    Guidelines (§5 on Spatial and Structural Analysis) (TODO: Manually Verify):
+
+        \\hat{\\gamma}(h) = \\frac{1}{2 |N(h)|} \\sum_{(i,j) \\in N(h)} (Z(x_i) - Z(x_j))^2
+
+    where |N(h)| is the number of paired samples falling within separation lag distance
+    interval h \\pm \\Delta h, and Z(x_i) is the measured grade attribute.
+
+    Supports both Omnidirectional and Directional evaluation:
+    - In Omnidirectional mode (azimuth=None, dip=None): All sample pairs separated by
+      distance h are included regardless of direction.
+    - In Directional mode: Pairs are filtered through a directional tolerance cone defined
+      by azimuth, dip, angular_tolerance (\\pm \\Delta \\theta), and maximum horizontal and
+      vertical bandwidths to detect spatial anisotropy.
+    - Honors Geological Domain Segregation: When `domain_col` or `sample_domains` is provided,
+      pairs are only formed between samples belonging to the same domain (CIM MRMR §4.2/§5.1) (TODO: Manually Verify).
+
+    Parameters
+    ----------
+    coords : np.ndarray or pd.DataFrame
+        Sample spatial coordinates of shape (N, 2) or (N, 3), or DataFrame containing coordinate columns.
+    grades : np.ndarray, Sequence[float], or str
+        Sample grade array of shape (N,), or column name in coords DataFrame.
+    lag_distance : float
+        Nominal separation distance increment (h) between lag bins.
+        Must be strictly positive. Site-specific parameter required without default (CONTRIBUTING.md).
+    n_lags : int
+        Total number of lag intervals to compute. Must be >= 1. Required without default.
+    lag_tolerance : float, optional
+        Half-width of the distance lag bin (\\pm \\Delta h). If None, defaults to lag_distance / 2.0.
+    azimuth : float, optional
+        Directional search azimuth in degrees clockwise from North [0, 360).
+        If specified, activates directional variogram calculation.
+    dip : float, optional
+        Directional search dip in degrees from horizontal [-90, +90] (negative downwards).
+    angular_tolerance : float, optional
+        Half-angle tolerance window in degrees (\\pm \\Delta \\theta), e.g. 22.5 deg.
+        Required when azimuth or dip is specified.
+    bandwidth_horizontal : float, optional
+        Maximum horizontal perpendicular distance from directional vector to prevent
+        the search cone from expanding indefinitely at large lags.
+    bandwidth_vertical : float, optional
+        Maximum vertical perpendicular distance from directional vector.
+    domain_col : str, optional
+        Column name in coords DataFrame indicating domain code.
+    sample_domains : Sequence[Any], optional
+        Domain identifiers for each sample when coords is an array.
+    x_col : str, default "x"
+        Easting coordinate column name if coords is a DataFrame.
+    y_col : str, default "y"
+        Northing coordinate column name if coords is a DataFrame.
+    z_col : str, optional
+        Elevation coordinate column name if coords is a DataFrame.
+
+    Returns
+    -------
+    pd.DataFrame
+        Experimental semivariogram table containing:
+        - "lag_index": 1-based integer lag index.
+        - "nominal_lag": Nominal lag center distance (lag_index * lag_distance).
+        - "average_distance": True centroid separation distance of paired samples in bin.
+        - "semivariance": Experimental semivariance \\hat{\\gamma}(h).
+        - "covariance": Experimental covariance \\hat{C}(h) = \\hat{C}(0) - \\hat{\\gamma}(h).
+        - "pair_count": Number of valid sample pairs |N(h)| informing the lag.
+        Attributes (.attrs) contain sample variance, direction metadata, and audit parameters.
+    """
+    raise NotImplementedError(
+        "Experimental semivariogram calculation engine is planned. "
+        "Will compute pairwise binned semivariances with directional tolerance cones."
+    )
+
+
+def calculate_directional_semivariograms(
+    coords: Union[np.ndarray, pd.DataFrame],
+    grades: Union[np.ndarray, Sequence[float], str],
+    directions: Sequence[Union[float, Tuple[float, float], Mapping[str, float]]],
+    lag_distance: float,
+    n_lags: int,
+    lag_tolerance: Optional[float] = None,
+    angular_tolerance: float = 22.5,
+    bandwidth_horizontal: Optional[float] = None,
+    bandwidth_vertical: Optional[float] = None,
+    domain_col: Optional[str] = None,
+    sample_domains: Optional[Sequence[Any]] = None,
+    x_col: str = "x",
+    y_col: str = "y",
+    z_col: Optional[str] = None,
+) -> Dict[str, pd.DataFrame]:
+    """Calculates a multi-directional suite of experimental semivariograms to identify anisotropy.
+
+    Following standard geostatistical exploration practice (SME Mining Engineering Handbook §4.3;
+    Deutsch & Journel 1998; Armstrong 1998) (TODO: Manually Verify), evaluates experimental
+    semivariograms along candidate strike, dip, and plunge directions (e.g., 0, 45, 90, 135 deg)
+    to detect Geometric Anisotropy (varying range with identical sill) or Zonal Anisotropy
+    (varying sill by direction).
+
+    Parameters
+    ----------
+    coords : np.ndarray or pd.DataFrame
+        Sample spatial coordinates (N, 2) or (N, 3), or DataFrame.
+    grades : np.ndarray, Sequence[float], or str
+        Sample grade array or column name.
+    directions : Sequence[Union[float, Tuple[float, float], Mapping[str, float]]]
+        List of direction definitions to evaluate. Each element can be:
+        - float: Azimuth in degrees (horizontal 2D directional search).
+        - (azimuth, dip) tuple: 3D spatial search direction.
+        - dict: {"azimuth": float, "dip": float, "label": str}.
+    lag_distance : float
+        Nominal distance increment between lags (required, no default).
+    n_lags : int
+        Number of lags to compute (required, no default).
+    lag_tolerance : float, optional
+        Half-width distance lag tolerance (defaults to lag_distance / 2.0).
+    angular_tolerance : float, default 22.5
+        Angular half-window (\\pm \\Delta \\theta) in degrees.
+    bandwidth_horizontal : float, optional
+        Maximum horizontal perpendicular search width.
+    bandwidth_vertical : float, optional
+        Maximum vertical perpendicular search height.
+    domain_col : str, optional
+        Domain column name in DataFrame.
+    sample_domains : Sequence[Any], optional
+        Domain array matching coords.
+    x_col, y_col, z_col : str
+        Coordinate column names.
+
+    Returns
+    -------
+    Dict[str, pd.DataFrame]
+        Dictionary mapping directional labels (e.g. "Az000_Dip00", "Az090_Dip00") to
+        their respective experimental semivariogram DataFrames.
+    """
+    raise NotImplementedError(
+        "Directional semivariogram suite calculation is planned. "
+        "Will compute multiple directional variograms across specified strike and dip orientations."
+    )
+
+
+def calculate_downhole_variogram(
+    df: pd.DataFrame,
+    lag_distance: float,
+    n_lags: int,
+    lag_tolerance: Optional[float] = None,
+    hole_id_col: str = "hole_id",
+    from_col: str = "from_m",
+    to_col: str = "to_m",
+    grade_col: str = "grade",
+    domain_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """Calculates down-hole experimental semivariogram along continuous drillhole traces.
+
+    In 3D mineral deposit evaluation (SME Mining Engineering Handbook §4.3; CIM MRMR Guidelines §5) (TODO: Manually Verify),
+    sample spacing along drillhole cores (typically 1–3 m composites) is orders of magnitude
+    denser than lateral spacing between hole collars (50–100 m).
+    The down-hole variogram computes semivariances strictly between pairs sharing the same
+    drillhole trajectory:
+    1. Accurately isolates the true 3D Nugget Effect (c0) without interference from wide drill patterns.
+    2. Resets at geological domain contacts (domain_col) to avoid contact smearing.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Drillhole assay or composite table containing hole identifier and downhole intervals.
+    lag_distance : float
+        Downhole lag spacing increment (typically equal to composite interval length).
+        Required without default (CONTRIBUTING.md).
+    n_lags : int
+        Number of downhole lags to compute. Required without default.
+    lag_tolerance : float, optional
+        Downhole lag distance tolerance. Defaults to lag_distance / 2.0.
+    hole_id_col : str, default "hole_id"
+        Drillhole identifier column name. Pairs are formed strictly within each hole_id.
+    from_col : str, default "from_m"
+        Downhole from-depth column name.
+    to_col : str, default "to_m"
+        Downhole to-depth column name.
+    grade_col : str, default "grade"
+        Assay or composite grade column name.
+    domain_col : str, optional
+        Geological domain column name. Pairs must belong to the same contiguous domain interval.
+
+    Returns
+    -------
+    pd.DataFrame
+        Down-hole experimental semivariogram DataFrame with columns:
+        - "lag_index", "nominal_lag", "average_distance", "semivariance", "pair_count".
+        Attributes (.attrs) contain "nugget_estimate" extrapolated back to h=0.
+    """
+    raise NotImplementedError(
+        "Down-hole experimental variogram calculation is planned. "
+        "Will compute strictly intra-hole pair semivariances to isolate the 3D nugget effect."
+    )
+
+
+def fit_variogram_model(
+    experimental_df: pd.DataFrame,
+    model: str = "spherical",
+    initial_nugget: Optional[float] = None,
+    initial_sill: Optional[float] = None,
+    initial_range: Optional[float] = None,
+    fix_nugget: Optional[float] = None,
+    fix_total_sill: Optional[float] = None,
+    fit_method: Literal[
+        "weighted_least_squares", "ordinary_least_squares"
+    ] = "weighted_least_squares",
+    weighting_scheme: Literal["cressie", "pair_count", "equal"] = "cressie",
+) -> Dict[str, Any]:
+    """Fits analytical positive-definite variogram models to empirical experimental semivariances.
+
+    Models the spatial continuity curve via Nugget Effect (c0), Partial Sill (c), Total Sill
+    (c0 + c), and Practical Range (a) using non-linear least-squares optimization
+    (Cressie 1985; SME Mining Engineering Handbook §4.3) (TODO: Manually Verify).
+
+    Supported Analytical Models:
+    - Spherical: \\gamma(h) = c0 + c * [1.5 * (h/a) - 0.5 * (h/a)^3] for h <= a, else c0 + c
+    - Exponential: \\gamma(h) = c0 + c * [1 - exp(-3h/a)]
+    - Gaussian: \\gamma(h) = c0 + c * [1 - exp(-3h^2 / a^2)]
+
+    Optimization Weighting Schemes:
+    - "cressie" (Cressie 1985): Weight w_k = |N(h_k)| / [\\gamma(h_k)]^2.
+      Assigns highest weight to short-lag pairs with high reliability, prioritizing accurate
+      estimation near the origin (critical for kriging weights).
+    - "pair_count": Weight w_k = |N(h_k)|.
+    - "equal": Ordinary unweighted least-squares.
+
+    Parameters
+    ----------
+    experimental_df : pd.DataFrame
+        Table containing 'average_distance' (or 'nominal_lag'), 'semivariance', and 'pair_count'
+        from calculate_experimental_semivariogram.
+    model : {"spherical", "exponential", "gaussian"}, default "spherical"
+        Theoretical positive-definite variogram model structure.
+    initial_nugget : float, optional
+        Initial guess for nugget variance (c0). If None, estimated from first lag.
+    initial_sill : float, optional
+        Initial guess for partial sill (c). If None, estimated from sample variance - c0.
+    initial_range : float, optional
+        Initial guess for range (a). If None, estimated at 2/3 of maximum lag.
+    fix_nugget : float, optional
+        If specified, holds nugget variance strictly fixed (e.g., from down-hole variogram analysis).
+    fix_total_sill : float, optional
+        If specified, constrains total sill (c0 + c) to an exact value (e.g., declustered sample variance).
+    fit_method : {"weighted_least_squares", "ordinary_least_squares"}, default "weighted_least_squares"
+        Optimization loss function.
+    weighting_scheme : {"cressie", "pair_count", "equal"}, default "cressie"
+        Statistical weighting scheme across lag bins.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Fitted model parameters dictionary containing:
+        - "model": Model name string.
+        - "nugget": Fitted nugget variance c0.
+        - "sill": Fitted partial sill variance c.
+        - "total_sill": Total sill c0 + c.
+        - "range": Practical range parameter a (meters).
+        - "rmse": Root Mean Square Error of the fit.
+        - "r2": Coefficient of determination.
+        - "fitted_curve": DataFrame with dense (h, gamma) evaluations for plotting.
+    """
+    raise NotImplementedError(
+        "Variogram model parameterization and curve fitting is planned. "
+        "Will optimize nugget, sill, and range via non-linear weighted least squares."
+    )
+
+
+def plot_variogram_model(
+    experimental_data: Union[pd.DataFrame, Mapping[str, pd.DataFrame]],
+    fitted_model: Optional[
+        Union[Mapping[str, Any], Sequence[Mapping[str, Any]]]
+    ] = None,
+    grade_unit: str = "% Cu",
+    distance_unit: str = "m",
+    title: str = "Experimental Semivariogram and Fitted Model",
+    show_pair_counts: bool = True,
+    figsize: Tuple[float, float] = (9.0, 6.0),
+    ax: Optional[plt.Axes] = None,
+) -> Tuple[plt.Figure, Union[plt.Axes, Sequence[plt.Axes]]]:
+    """Plots experimental semivariogram points against the fitted continuous theoretical curve.
+
+    Standard publication-quality variogram diagnostic chart conforming to NI 43-101 and JORC
+    reporting standards (TODO: Manually Verify):
+    1. Upper panel: Experimental semivariance points \\hat{\\gamma}(h) with marker sizes
+       proportional to pair counts, fitted continuous model curve, total sill line, and practical range indicator.
+    2. Lower panel: Bar chart of sample pair counts |N(h)| informing each lag interval.
+    3. Multi-directional overlay: Supports comparing multiple directional curves simultaneously.
+
+    Parameters
+    ----------
+    experimental_data : pd.DataFrame or Mapping[str, pd.DataFrame]
+        Experimental semivariogram table, or dictionary mapping directional labels to tables.
+    fitted_model : dict or Sequence[dict], optional
+        Output from fit_variogram_model containing fitted parameters and curve coordinates.
+    grade_unit : str, default "% Cu"
+        Unit of mineral grade (used for variance axis label: e.g. "(% Cu)^2").
+    distance_unit : str, default "m"
+        Spatial separation distance unit (default "m").
+    title : str, default "Experimental Semivariogram and Fitted Model"
+        Figure title.
+    show_pair_counts : bool, default True
+        If True, displays lower sub-panel with pair counts per lag bin.
+    figsize : Tuple[float, float], default (9.0, 6.0)
+        Matplotlib figure dimensions.
+    ax : plt.Axes, optional
+        Existing Axes to draw on (only if show_pair_counts=False).
+
+    Returns
+    -------
+    Tuple[plt.Figure, Union[plt.Axes, Sequence[plt.Axes]]]
+        Figure and axes (or tuple of upper/lower axes).
+    """
+    raise NotImplementedError(
+        "Variogram model visualization is planned. "
+        "Will plot experimental variogram points, pair count bars, and fitted analytical curves."
+    )
+
+
+def _solve_local_simple_kriging_grid(
+    target_coord: np.ndarray,
+    candidate_coords: np.ndarray,
+    candidate_values: np.ndarray,
+    candidate_distances: np.ndarray,
+    candidate_hole_ids: Optional[Sequence[Any]] = None,
+    variogram_model: str = "spherical",
+    nugget: float = 0.0,
+    sill: float = 1.0,
+    range_param: float = 100.0,
+    k_neighbors: int = 16,
+    max_per_sector: Optional[int] = None,
+    min_sectors: int = 1,
+    max_per_drillhole: Optional[int] = None,
+    clip_negative_weights: bool = False,
+    mean: float = 0.0,
+) -> Tuple[float, float]:
+    """Solves Simple Kriging for a single target grid node given candidate conditioning points.
+
+    Reuses sector filtering (_filter_neighborhood_sectors), collocated sample deduplication
+    (_deduplicate_collocated_samples), and theoretical covariance computation (_theoretical_covariance).
+
+    Parameters
+    ----------
+    target_coord : np.ndarray
+        Coordinates of the target point of shape (D,).
+    candidate_coords : np.ndarray
+        Coordinates of candidate conditioning samples of shape (k_cand, D).
+    candidate_values : np.ndarray
+        Values (grades or normal scores) of candidate samples of shape (k_cand,).
+    candidate_distances : np.ndarray
+        Distances from target_coord to candidates of shape (k_cand,).
+    candidate_hole_ids : Sequence[Any], optional
+        Drillhole trace IDs for candidates.
+    variogram_model : str, default "spherical"
+        Variogram model name.
+    nugget : float, default 0.0
+        Nugget variance c0.
+    sill : float, default 1.0
+        Partial sill variance c.
+    range_param : float, default 100.0
+        Practical range a.
+    k_neighbors : int, default 16
+        Maximum neighbors to select.
+    max_per_sector : int, optional
+        Maximum samples per angular sector (quadrant or octant).
+    min_sectors : int, default 1
+        Minimum active sectors required.
+    max_per_drillhole : int, optional
+        Maximum samples per drillhole trace.
+    clip_negative_weights : bool, default False
+        Whether to clip negative weights and renormalize.
+    mean : float, default 0.0
+        Known stationary mean.
+
+    Returns
+    -------
+    Tuple[float, float]
+        (estimate, estimation_variance).
+    """
+    total_sill = float(nugget + sill)
+    if len(candidate_coords) == 0:
+        return float(mean), float(total_sill)
+
+    has_sector_search = (
+        (max_per_sector is not None)
+        or (max_per_drillhole is not None)
+        or (min_sectors > 1)
+    )
+    if has_sector_search:
+        idx_sel, d_sel = _filter_neighborhood_sectors(
+            candidate_coords=candidate_coords,
+            candidate_indices=np.arange(len(candidate_coords)),
+            candidate_distances=candidate_distances,
+            target_coord=target_coord,
+            k_neighbors=k_neighbors,
+            max_per_sector=max_per_sector,
+            min_sectors=min_sectors,
+            max_per_drillhole=max_per_drillhole,
+            sample_hole_ids=candidate_hole_ids,
+        )
+        if len(idx_sel) == 0:
+            return float(mean), float(total_sill)
+        c_coords = candidate_coords[idx_sel]
+        c_vals = candidate_values[idx_sel]
+        d_m = d_sel
+    else:
+        take = min(k_neighbors, len(candidate_coords))
+        c_coords = candidate_coords[:take]
+        c_vals = candidate_values[:take]
+        d_m = candidate_distances[:take]
+
+    # Exact collocation check
+    if d_m[0] < 1e-6:
+        return float(c_vals[0]), 0.0
+
+    # Deduplicate collocated samples (e.g., duplicate drillholes)
+    coords_m, vals_m, h_matrix, d_m_new = _deduplicate_collocated_samples(
+        c_coords, c_vals, target_point=target_coord
+    )
+    if d_m_new is not None:
+        d_m = d_m_new
+    k_m = len(coords_m)
+
+    if d_m[0] < 1e-6:
+        return float(vals_m[0]), 0.0
+
+    # Build covariance matrix K_m of shape (k_m, k_m)
+    K_m = _theoretical_covariance(h_matrix, variogram_model, nugget, sill, range_param)
+    K_m[np.diag_indices(k_m)] += 1e-9
+
+    # Build sample-to-target covariance vector k0_m of shape (k_m,)
+    k0_m = _theoretical_covariance(d_m, variogram_model, nugget, sill, range_param)
+
+    # Solve linear system K_m * lambda_m = k0_m
+    try:
+        weights_m = np.linalg.solve(K_m, k0_m)
+    except np.linalg.LinAlgError:
+        warnings.warn(
+            "Singular covariance matrix encountered during Simple Kriging; "
+            "falling back to stationary prior mean and total variance.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return float(mean), float(total_sill)
+
+    if clip_negative_weights:
+        weights_m, _ = _clip_and_renormalize_weights(weights_m, preserve_sum=True)
+
+    # Estimate: Z*_SK = mean + sum_i lambda_i * (Z_i - mean)
+    est_val = mean + np.sum(weights_m * (vals_m - mean))
+
+    # Variance: sigma_SK^2 = C(0) - sum_i lambda_i * k0_i (or quadratic formula if clipped)
+    if clip_negative_weights:
+        var_val = _compute_quadratic_estimation_variance(
+            total_sill, weights_m, K_m, k0_m
+        )
+    else:
+        var_val = total_sill - np.sum(weights_m * k0_m)
+
+    return float(est_val), max(0.0, float(var_val))
+
+
+def _solve_local_simple_kriging_block(
+    block_centroid: np.ndarray,
+    disc_offsets: np.ndarray,
+    candidate_coords: np.ndarray,
+    candidate_values: np.ndarray,
+    candidate_distances: np.ndarray,
+    candidate_hole_ids: Optional[Sequence[Any]] = None,
+    variogram_model: str = "spherical",
+    nugget: float = 0.0,
+    sill: float = 1.0,
+    range_param: float = 100.0,
+    c_vv: float = 1.0,
+    k_neighbors: int = 16,
+    max_per_sector: Optional[int] = None,
+    min_sectors: int = 1,
+    max_per_drillhole: Optional[int] = None,
+    clip_negative_weights: bool = False,
+    mean: float = 0.0,
+    min_samples: int = 1,
+) -> Tuple[float, float]:
+    """Solves Simple Kriging for a single 3D mining block given candidate conditioning samples and discretization offsets.
+
+    Parameters
+    ----------
+    block_centroid : np.ndarray
+        Centroid coordinates of the mining block of shape (3,).
+    disc_offsets : np.ndarray
+        Discretization point offsets from block centroid of shape (M, 3).
+    candidate_coords : np.ndarray
+        Coordinates of candidate conditioning samples of shape (k_cand, 3).
+    candidate_values : np.ndarray
+        Values (grades) of candidate samples of shape (k_cand,).
+    candidate_distances : np.ndarray
+        Distances from block_centroid to candidates of shape (k_cand,).
+    candidate_hole_ids : Sequence[Any], optional
+        Drillhole trace IDs for candidates.
+    variogram_model : str, default "spherical"
+        Variogram model name.
+    nugget : float, default 0.0
+        Nugget variance c0.
+    sill : float, default 1.0
+        Partial sill variance c.
+    range_param : float, default 100.0
+        Practical range a.
+    c_vv : float, default 1.0
+        Within-block covariance C_bar(V, V).
+    k_neighbors : int, default 16
+        Maximum neighbors to select.
+    max_per_sector : int, optional
+        Maximum samples per angular sector.
+    min_sectors : int, default 1
+        Minimum active sectors required.
+    max_per_drillhole : int, optional
+        Maximum samples per drillhole trace.
+    clip_negative_weights : bool, default False
+        Whether to clip negative weights and renormalize.
+    mean : float, default 0.0
+        Known stationary mean.
+    min_samples : int, default 1
+        Minimum samples required to condition the block.
+
+    Returns
+    -------
+    est_val : float
+        Simple Kriging block estimate Z*(V).
+    var_val : float
+        Simple Kriging block variance sigma_SK^2(V).
+    """
+    if len(candidate_coords) < min_samples:
+        return float(mean), float(c_vv)
+
+    has_sector_search = (
+        (max_per_sector is not None)
+        or (max_per_drillhole is not None)
+        or (min_sectors > 1)
+    )
+
+    if has_sector_search:
+        idx_sel, _ = _filter_neighborhood_sectors(
+            candidate_coords=candidate_coords,
+            candidate_indices=np.arange(len(candidate_coords)),
+            candidate_distances=candidate_distances,
+            target_coord=block_centroid,
+            k_neighbors=k_neighbors,
+            max_per_sector=max_per_sector,
+            min_sectors=min_sectors,
+            max_per_drillhole=max_per_drillhole,
+            sample_hole_ids=candidate_hole_ids,
+        )
+        if len(idx_sel) < min_samples:
+            return float(mean), float(c_vv)
+        c_coords = candidate_coords[idx_sel]
+        c_vals = candidate_values[idx_sel]
+    else:
+        take = min(k_neighbors, len(candidate_coords))
+        c_coords = candidate_coords[:take]
+        c_vals = candidate_values[:take]
+
+    # Deduplicate collocated samples (e.g., duplicate drillholes or twin assays)
+    coords_m, vals_m, h_matrix, _ = _deduplicate_collocated_samples(
+        c_coords, c_vals, target_point=block_centroid
+    )
+    k_m = len(coords_m)
+    if k_m < min_samples:
+        return float(mean), float(c_vv)
+
+    # Compute Sample-to-Block covariance vector k0_m of shape (k_m,)
+    block_points = block_centroid + disc_offsets  # shape (M, 3)
+    sample_to_disc_diffs = coords_m[:, None, :] - block_points[None, :, :]
+    sample_to_disc_dists = np.linalg.norm(sample_to_disc_diffs, axis=2)
+    sample_to_disc_covs = _theoretical_covariance(
+        sample_to_disc_dists, variogram_model, nugget, sill, range_param
+    )
+    k0_block = np.mean(sample_to_disc_covs, axis=1)
+
+    # Build Sample-to-Sample covariance matrix K_m of shape (k_m, k_m)
+    K_m = _theoretical_covariance(h_matrix, variogram_model, nugget, sill, range_param)
+    K_m[np.diag_indices(k_m)] += 1e-9
+
+    # Solve linear system K_m * lambda = k0_block
+    try:
+        weights_m = np.linalg.solve(K_m, k0_block)
+    except np.linalg.LinAlgError:
+        warnings.warn(
+            "Singular covariance matrix encountered during Block Simple Kriging; "
+            "falling back to stationary prior mean and within-block variance.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return float(mean), float(c_vv)
+
+    if clip_negative_weights:
+        weights_m, _ = _clip_and_renormalize_weights(weights_m, preserve_sum=True)
+        raw_variance = _compute_quadratic_estimation_variance(
+            c_vv, weights_m, K_m, k0_block
+        )
+    else:
+        raw_variance = c_vv - np.sum(weights_m * k0_block)
+
+    residual = vals_m - mean
+    est_val = mean + np.sum(weights_m * residual)
+    var_val = max(0.0, float(raw_variance))
+
+    return float(est_val), float(var_val)
 
 
 def simple_kriging_grid_estimation(
@@ -2070,78 +2710,39 @@ def simple_kriging_grid_estimation(
         distances = distances[:, None]
         indices = indices[:, None]
 
-    # 2. Solve Simple Kriging system for each target point
+    # 2. Solve Simple Kriging system for each target point via shared kernel
     for m in range(n_targets):
-        # Filter to valid neighbors within upper_bound (excluding inf)
         valid_mask = np.isfinite(distances[m]) & (distances[m] <= upper_bound)
         if not np.any(valid_mask):
             continue  # No samples within range: remains prior mean and total sill
 
-        if has_sector_search:
-            idx_m, d_m = _filter_neighborhood_sectors(
-                candidate_coords=samples_t[indices[m][valid_mask]],
-                candidate_indices=indices[m][valid_mask],
-                candidate_distances=distances[m][valid_mask],
-                target_coord=grid_t[m],
-                k_neighbors=k_neighbors,
-                max_per_sector=sec_max,
-                min_sectors=min_sectors,
-                max_per_drillhole=max_per_drillhole,
-                sample_hole_ids=sample_hole_ids,
-            )
-            if len(idx_m) == 0:
-                continue
-        else:
-            d_m = distances[m][valid_mask]
-            idx_m = indices[m][valid_mask]
-        k_m = len(idx_m)
-
-        # Exact collocation: if target lies directly on a sample point
-        if d_m[0] < 1e-6:
-            estimates[m] = sample_grades[idx_m[0]]
-            variances[m] = 0.0
-            continue
-
-        # Build sample-to-sample covariance matrix K_m of shape (k_m, k_m)
-        coords_m = samples_t[idx_m]
-        grades_m = sample_grades[idx_m]
-
-        # Deduplicate identical sample coordinates (e.g. twin drillholes or duplicate assays)
-        coords_m, grades_m, h_matrix, d_m_new = _deduplicate_collocated_samples(
-            coords_m, grades_m, target_point=grid_t[m]
-        )
-        if d_m_new is not None:
-            d_m = d_m_new
-        k_m = len(coords_m)
-
-        K_m = _theoretical_covariance(
-            h_matrix, variogram_model, base_nugget, base_sill, eff_range
-        )
-        # Regularize diagonal to prevent singular matrices from collinear samples
-        K_m[np.diag_indices(k_m)] += 1e-9
-
-        # Build sample-to-target covariance vector k_0_m of shape (k_m,)
-        k0_m = _theoretical_covariance(
-            d_m, variogram_model, base_nugget, base_sill, eff_range
+        c_idx = indices[m][valid_mask]
+        c_dist = distances[m][valid_mask]
+        c_coords = samples_t[c_idx]
+        c_vals = sample_grades[c_idx]
+        c_holes = (
+            [sample_hole_ids[i] for i in c_idx] if sample_hole_ids is not None else None
         )
 
-        # Solve linear system K_m * lambda_m = k0_m
-        weights_m = np.linalg.solve(K_m, k0_m)
-        if clip_negative_weights:
-            weights_m, _ = _clip_and_renormalize_weights(weights_m, preserve_sum=True)
-
-        # Simple Kriging estimate: Z*_SK = mean + sum_i lambda_i * (Z_i - mean)
-        estimates[m] = base_mean + np.sum(weights_m * (grades_m - base_mean))
-
-        # Simple Kriging variance:
-        if clip_negative_weights:
-            var_val = _compute_quadratic_estimation_variance(
-                total_sill, weights_m, K_m, k0_m
-            )
-        else:
-            # Simple Kriging variance: sigma_SK^2 = C(0) - sum_i lambda_i * k0_i
-            var_val = total_sill - np.sum(weights_m * k0_m)
-        variances[m] = max(0.0, float(var_val))
+        est_val, var_val = _solve_local_simple_kriging_grid(
+            target_coord=grid_t[m],
+            candidate_coords=c_coords,
+            candidate_values=c_vals,
+            candidate_distances=c_dist,
+            candidate_hole_ids=c_holes,
+            variogram_model=variogram_model,
+            nugget=base_nugget,
+            sill=base_sill,
+            range_param=eff_range,
+            k_neighbors=k_neighbors,
+            max_per_sector=sec_max,
+            min_sectors=min_sectors,
+            max_per_drillhole=max_per_drillhole,
+            clip_negative_weights=clip_negative_weights,
+            mean=base_mean,
+        )
+        estimates[m] = est_val
+        variances[m] = var_val
 
     # 3. Handle extrapolation masking
     if mask_extrapolation:
@@ -2890,7 +3491,16 @@ def ordinary_kriging_block_estimation(
             active_indices = indices[b][valid_mask]
         coords_active = samples_xyz_t[active_indices]  # shape (k, 3)
         grades_active = sample_grades[active_indices]  # shape (k,)
-        k_active = len(active_indices)
+
+        # Deduplicate identical sample coordinates (e.g. twin drillholes or duplicate assays)
+        coords_active, grades_active, h_sample_matrix, _ = (
+            _deduplicate_collocated_samples(
+                coords_active, grades_active, target_point=block_coords_t[b]
+            )
+        )
+        k_active = len(coords_active)
+        if k_active < min_samples:
+            continue
 
         # b. Get absolute coordinates of the M discretization points for block b in transformed space
         block_points = block_coords_t[b] + disc_offsets_t  # shape (M, 3)
@@ -2907,10 +3517,8 @@ def ordinary_kriging_block_estimation(
         k0_block = np.mean(sample_to_disc_covs, axis=1)  # shape (k,)
 
         # d. Build Sample-to-Sample covariance matrix K of shape (k, k)
-        sample_diffs = coords_active[:, None, :] - coords_active[None, :, :]
-        sample_dists = np.linalg.norm(sample_diffs, axis=2)
         K_mat = _theoretical_covariance(
-            sample_dists, variogram_model, base_nugget, base_sill, eff_range
+            h_sample_matrix, variogram_model, base_nugget, base_sill, eff_range
         )
         # Regularize diagonal to avoid singularity from collocated/close samples
         K_mat[np.diag_indices(k_active)] += 1e-9
@@ -3236,59 +3844,36 @@ def simple_kriging_block_estimation(
         if not np.any(valid_mask) or np.sum(valid_mask) < min_samples:
             continue
 
-        if has_sector_search:
-            active_indices, _ = _filter_neighborhood_sectors(
-                candidate_coords=samples_xyz_t[indices[b][valid_mask]],
-                candidate_indices=indices[b][valid_mask],
-                candidate_distances=distances[b][valid_mask],
-                target_coord=block_coords_t[b],
-                k_neighbors=k_neighbors,
-                max_per_sector=sec_max,
-                min_sectors=min_sectors,
-                max_per_drillhole=max_per_drillhole,
-                sample_hole_ids=sample_hole_ids,
-            )
-            if len(active_indices) < min_samples:
-                continue
-        else:
-            active_indices = indices[b][valid_mask]
-        coords_active = samples_xyz_t[active_indices]
-        grades_active = sample_grades[active_indices]
-        k_active = len(active_indices)
-
-        block_points = block_coords_t[b] + disc_offsets_t
-
-        sample_to_disc_diffs = coords_active[:, None, :] - block_points[None, :, :]
-        sample_to_disc_dists = np.linalg.norm(sample_to_disc_diffs, axis=2)
-        sample_to_disc_covs = _theoretical_covariance(
-            sample_to_disc_dists, variogram_model, base_nugget, base_sill, eff_range
+        c_idx = indices[b][valid_mask]
+        c_dist = distances[b][valid_mask]
+        c_coords = samples_xyz_t[c_idx]
+        c_vals = sample_grades[c_idx]
+        c_holes = (
+            [sample_hole_ids[i] for i in c_idx] if sample_hole_ids is not None else None
         )
-        k0_block = np.mean(sample_to_disc_covs, axis=1)
 
-        sample_diffs = coords_active[:, None, :] - coords_active[None, :, :]
-        sample_dists = np.linalg.norm(sample_diffs, axis=2)
-        K_mat = _theoretical_covariance(
-            sample_dists, variogram_model, base_nugget, base_sill, eff_range
+        est_val, var_val = _solve_local_simple_kriging_block(
+            block_centroid=block_coords_t[b],
+            disc_offsets=disc_offsets_t,
+            candidate_coords=c_coords,
+            candidate_values=c_vals,
+            candidate_distances=c_dist,
+            candidate_hole_ids=c_holes,
+            variogram_model=variogram_model,
+            nugget=base_nugget,
+            sill=base_sill,
+            range_param=eff_range,
+            c_vv=c_vv,
+            k_neighbors=k_neighbors,
+            max_per_sector=sec_max,
+            min_sectors=min_sectors,
+            max_per_drillhole=max_per_drillhole,
+            clip_negative_weights=clip_negative_weights,
+            mean=base_mean,
+            min_samples=min_samples,
         )
-        K_mat[np.diag_indices(k_active)] += 1e-9
-
-        try:
-            weights = np.linalg.solve(K_mat, k0_block)
-            if clip_negative_weights:
-                weights, _ = _clip_and_renormalize_weights(weights, preserve_sum=True)
-                raw_variance = _compute_quadratic_estimation_variance(
-                    c_vv, weights, K_mat, k0_block
-                )
-            else:
-                # SK block variance: C_bar(V, V) - sum(lambda_i * C_bar(x_i, V))
-                raw_variance = c_vv - np.sum(weights * k0_block)
-
-            # SK estimate: m + sum(lambda_i * (Z_i - m))
-            residual = grades_active - base_mean
-            block_estimates[b] = float(base_mean + np.sum(weights * residual))
-            block_variances[b] = max(0.0, float(raw_variance))
-        except np.linalg.LinAlgError:
-            continue
+        block_estimates[b] = est_val
+        block_variances[b] = var_val
 
     return block_estimates, block_variances, block_dispersion_var
 
@@ -3301,6 +3886,7 @@ def plot_grade_tonnage_curve(
     ax: Optional[plt.Axes] = None,
     figsize: Tuple[float, float] = (8.5, 5.0),
     show_metal: bool = False,
+    realization_tables: Optional[Sequence[pd.DataFrame]] = None,
 ) -> Union[Tuple[plt.Figure, plt.Axes], Dict[str, Tuple[plt.Figure, plt.Axes]]]:
     """Plots standard dual-axis Grade–Tonnage sensitivity curves.
 
@@ -3309,6 +3895,8 @@ def plot_grade_tonnage_curve(
     - Secondary Y-axis (right): Average Grade above cutoff (monotonically increasing).
     - If a dictionary of models is provided, generates an individual, clean dual-axis
       plot for each model (avoiding multi-line overlapping clutter).
+    - If `realization_tables` is provided, plots individual simulation realization trajectories
+      and shaded P10–P90 uncertainty envelopes for both tonnage and grade.
 
     Parameters
     ----------
@@ -3327,6 +3915,9 @@ def plot_grade_tonnage_curve(
         Figure dimensions if created.
     show_metal : bool, default False
         If True, plots metal recovery percentage.
+    realization_tables : Sequence[pd.DataFrame], optional
+        List of Grade-Tonnage DataFrames for individual conditional realizations,
+        used to visualize joint grade-tonnage uncertainty.
 
     Returns
     -------
@@ -3345,6 +3936,7 @@ def plot_grade_tonnage_curve(
                 title=f"{title} - {model_name}",
                 figsize=figsize,
                 show_metal=show_metal,
+                realization_tables=realization_tables,
             )
             figures[model_name] = (fig_m, ax_m)
         return figures
@@ -3365,6 +3957,56 @@ def plot_grade_tonnage_curve(
     tonnes = gt_data["ore_tonnes"].to_numpy() / t_divisor
     grades = gt_data["ore_grade"].to_numpy()
 
+    has_realizations = realization_tables is not None and len(realization_tables) > 0
+    extra_handles = []
+    extra_labels = []
+
+    if has_realizations:
+        r_tonnes = []
+        r_grades = []
+        for df_r in realization_tables:
+            r_t = df_r.loc[cutoffs, "ore_tonnes"].to_numpy() / t_divisor
+            r_g = df_r.loc[cutoffs, "ore_grade"].to_numpy()
+            r_tonnes.append(r_t)
+            r_grades.append(r_g)
+            ax1.plot(cutoffs, r_t, color="#1f77b4", alpha=0.15, linewidth=0.8)
+            ax2.plot(cutoffs, r_g, color="#d62728", alpha=0.15, linewidth=0.8)
+
+        t_p10 = np.percentile(r_tonnes, 10, axis=0)
+        t_p90 = np.percentile(r_tonnes, 90, axis=0)
+        g_p10 = np.percentile(r_grades, 10, axis=0)
+        g_p90 = np.percentile(r_grades, 90, axis=0)
+
+        poly_t = ax1.fill_between(
+            cutoffs,
+            t_p10,
+            t_p90,
+            color="#1f77b4",
+            alpha=0.20,
+            label="Tonnage P10–P90 Range",
+        )
+        poly_g = ax2.fill_between(
+            cutoffs,
+            g_p10,
+            g_p90,
+            color="#d62728",
+            alpha=0.20,
+            label="Grade P10–P90 Range",
+        )
+        extra_handles.extend([poly_t, poly_g])
+        extra_labels.extend(["Tonnage P10–P90 Range", "Grade P10–P90 Range"])
+
+    t_label = (
+        f"Expected Ore Tonnage ({tonnage_unit})"
+        if has_realizations
+        else f"Ore Tonnage ({tonnage_unit})"
+    )
+    g_label = (
+        f"Expected Average Grade ({grade_unit})"
+        if has_realizations
+        else f"Average Grade ({grade_unit})"
+    )
+
     line1 = ax1.plot(
         cutoffs,
         tonnes,
@@ -3372,7 +4014,7 @@ def plot_grade_tonnage_curve(
         linewidth=2.5,
         marker="o",
         markersize=5,
-        label=f"Ore Tonnage ({tonnage_unit})",
+        label=t_label,
     )
     line2 = ax2.plot(
         cutoffs,
@@ -3381,11 +4023,15 @@ def plot_grade_tonnage_curve(
         linewidth=2.5,
         marker="s",
         markersize=5,
-        label=f"Average Grade ({grade_unit})",
+        label=g_label,
     )
 
-    lines = line1 + line2
-    labels = [l.get_label() for l in lines]
+    if has_realizations:
+        lines = [line1[0], extra_handles[0], line2[0], extra_handles[1]]
+        labels = [t_label, extra_labels[0], g_label, extra_labels[1]]
+    else:
+        lines = line1 + line2
+        labels = [l.get_label() for l in lines]
 
     if show_metal and "metal_recovery_pct" in gt_data.columns:
         metal_rec = gt_data["metal_recovery_pct"].to_numpy()
@@ -3397,7 +4043,7 @@ def plot_grade_tonnage_curve(
             linestyle="--",
             label="Metal Recovery (%)",
         )
-        lines += line3
+        lines.append(line3[0])
         labels.append("Metal Recovery (%)")
 
     ax1.set_xlabel(f"Cutoff Grade ({grade_unit})", fontsize=11, fontweight="bold")
@@ -4341,7 +4987,10 @@ def classify_resources_by_sor(
 
     if max_slope_measured is not None:
         is_meas = (
-            valid_sor & (sor >= threshold_measured) & (sor <= max_slope_measured) & ke_ok
+            valid_sor
+            & (sor >= threshold_measured)
+            & (sor <= max_slope_measured)
+            & ke_ok
         )
     else:
         is_meas = valid_sor & (sor >= threshold_measured) & ke_ok
@@ -10202,49 +10851,870 @@ def plot_production_reconciliation(
 # =============================================================================
 
 
-# TODO (3D Block Model Extension - CONTRIBUTING.md Standards):
-# Current status: 2D conditioning data and 2D grid nodes.
+# TODO (3D Block Model Extension & LU Simulation Engine - CONTRIBUTING.md Standards):
+# Implementation Engine Specification:
+# - SGS should be implemented using the LU decomposition (Cholesky factorization) method
+#   (Alabert 1987; Davis 1987; Journel & Huijbregts 1978; Goovaerts 1997) (TODO: Manually Verify).
+# - Rationale for LU Decomposition over sequential path kriging:
+#   1. Exact Covariance Reproduction: Avoids moving-neighborhood screening artifacts,
+#      search radius truncations, and sequential random path order dependencies.
+#   2. Vectorized Ensemble Generation: Once the lower-triangular Cholesky factor L of the
+#      conditional covariance matrix C_cond is computed, generating L realizations requires only
+#      drawing standard normal variates W ~ N(0, I) and evaluating Y = y_sk + L @ W via fast
+#      matrix-matrix multiplication (BLAS gemm).
+#   3. Deterministic & Vectorized: Eliminates Python loop overhead over M grid nodes and
+#      dynamic KD-tree conditioning updates.
 # Guidelines from CONTRIBUTING.md to adhere to:
 # - Respect Domain Boundaries: conditional simulation must be executed independently per domain.
 # - Explicit Extrapolation Control: confine simulation paths and conditioning to data envelopes.
 # - 3D Anisotropic Covariance: support 3D variogram structures (major, semi-major, minor ranges).
+# - Numerical Stability: Add diagonal nugget/jitter regularization (epsilon ~ 1e-6 to 1e-4) to
+#   guarantee positive-definiteness of C_cond during Cholesky factorization.
+# - Large Grid Scalability: For very large grids where dense M x M factorization exceeds memory,
+#   partition into geological domains or moving super-blocks.
 # - Functional approach: transparent NumPy arrays/DataFrames without dataclass configuration wrappers.
 # - Following codebase conventions, 3D visualizations are implemented as separate functions:
 #   1. `plot_simulation_3d_isometric`: dedicated 3D isometric view of simulation realizations / exceedance.
 #   2. `plot_simulation_3d_interactive`: dedicated interactive 3D realization explorer.
-def sequential_gaussian_simulation(
+
+
+def normal_score_transform(
+    grades: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Transforms raw grades into standard normal Gaussian scores Y ~ N(0, 1).
+
+    Supports declustering sample weights (Ortiz 2019; Journel 1983; Deutsch 1998)
+    (TODO: Manually Verify) to ensure the representative distribution is preserved.
+
+    Parameters
+    ----------
+    grades : np.ndarray
+        Raw grade assays of shape (N,).
+    weights : np.ndarray, optional
+        Declustering weights of shape (N,). If None, uniform weights (1/N) are used.
+
+    Returns
+    -------
+    y : np.ndarray
+        Standard normal scores matching the original input order of grades.
+    sorted_z : np.ndarray
+        Sorted raw grades for empirical CDF interpolation during back-transformation.
+    sorted_y : np.ndarray
+        Corresponding Gaussian quantiles matching sorted_z.
+    """
+    z = np.asarray(grades, dtype=float)
+    n = len(z)
+    if n == 0:
+        raise ValueError("Cannot perform normal score transform on empty grades array.")
+
+    # 1. Normalize declustering weights
+    if weights is not None:
+        w = np.asarray(weights, dtype=float)
+        if len(w) != n:
+            raise ValueError(f"weights length ({len(w)}) must match grades ({n}).")
+        if np.any(w < 0):
+            raise ValueError("Declustering weights must be non-negative.")
+        w_sum = float(np.sum(w))
+        if w_sum <= 0:
+            raise ValueError("Sum of declustering weights must be positive.")
+        w = w / w_sum
+    else:
+        w = np.full(n, 1.0 / n, dtype=float)
+
+    # 2. Sort grades and weights in ascending order
+    sort_idx = np.argsort(z)
+    sorted_z = z[sort_idx]
+    sorted_w = w[sort_idx]
+
+    # 3. Compute mid-point cumulative plotting positions p
+    cum_w = np.cumsum(sorted_w)
+    p = cum_w - 0.5 * sorted_w
+
+    # 4. Handle identical grades (ties): assign average cumulative probability
+    unique_z, inv_indices = np.unique(sorted_z, return_inverse=True)
+    if len(unique_z) < n:
+        avg_p = np.zeros_like(p)
+        for u_idx in range(len(unique_z)):
+            mask = inv_indices == u_idx
+            avg_p[mask] = np.mean(p[mask])
+        p = avg_p
+
+    # Strictly bound probabilities to prevent +/- inf
+    p = np.clip(p, 1e-7, 1.0 - 1e-7)
+
+    # 5. Convert probabilities to standard normal scores
+    sorted_y = stats.norm.ppf(p)
+
+    # 6. Reconstruct y in original sample order
+    inv_sort_idx = np.empty_like(sort_idx)
+    inv_sort_idx[sort_idx] = np.arange(n)
+    y = sorted_y[inv_sort_idx]
+
+    return y, sorted_z, sorted_y
+
+
+def normal_score_back_transform(
+    y_sim: np.ndarray,
+    sorted_z: np.ndarray,
+    gaussian_quantiles: np.ndarray,
+    lower_tail_min: Optional[float] = None,
+    upper_tail_max: Optional[float] = None,
+) -> np.ndarray:
+    """Transforms simulated Gaussian values back to raw grade distribution.
+
+    Uses empirical quantile interpolation (Deutsch & Journel 1998; Goovaerts 1997)
+    (TODO: Manually Verify).
+
+    Parameters
+    ----------
+    y_sim : np.ndarray
+        Array of simulated Gaussian values (any shape, e.g. (M, L)).
+    sorted_z : np.ndarray
+        Sorted reference assay grades from the forward transform.
+    gaussian_quantiles : np.ndarray
+        Sorted standard normal quantiles matching sorted_z.
+    lower_tail_min : float, optional
+        Minimum grade floor for values below the lowest sample quantile (default sorted_z[0]).
+    upper_tail_max : float, optional
+        Maximum grade ceiling for values above the highest sample quantile (default sorted_z[-1]).
+
+    Returns
+    -------
+    np.ndarray
+        Back-transformed grades with identical shape to y_sim.
+    """
+    y_arr = np.asarray(y_sim, dtype=float)
+    left_val = sorted_z[0] if lower_tail_min is None else lower_tail_min
+    right_val = sorted_z[-1] if upper_tail_max is None else upper_tail_max
+
+    z_sim = np.interp(
+        y_arr,
+        gaussian_quantiles,
+        sorted_z,
+        left=left_val,
+        right=right_val,
+    )
+    return z_sim
+
+
+# =============================================================================
+# MULTIGAUSSIAN ASSUMPTION VERIFICATION (ORDER RATIOS, INDICATORS, H-SCATTER)
+# =============================================================================
+
+
+def _extract_spatial_lag_pairs(
+    coords: np.ndarray,
+    values: np.ndarray,
+    lag_center: float,
+    lag_tolerance: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Extracts pairs of spatial values separated by a distance lag_center +/- lag_tolerance."""
+    n = len(coords)
+    if n < 2:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty
+
+    dists = pdist(coords)
+    i_idx, j_idx = np.triu_indices(n, k=1)
+    mask = (dists >= (lag_center - lag_tolerance)) & (
+        dists <= (lag_center + lag_tolerance)
+    )
+    if not np.any(mask):
+        empty = np.array([], dtype=float)
+        return empty, empty, empty
+
+    return dists[mask], values[i_idx[mask]], values[j_idx[mask]]
+
+
+def check_multigaussian_order_ratios(
+    coords: np.ndarray,
+    normal_scores: np.ndarray,
+    lag_distance: float,
+    n_lags: int,
+    lag_tolerance: Optional[float] = None,
+) -> pd.DataFrame:
+    """Verifies the multiGaussian assumption using variograms of order 1 and order 2.
+
+    Mathematical Formulation:
+    -------------------------
+    Under a bivariate multiGaussian random field, the ratio between the squared
+    rodogram gamma_1(h) (order 1) and the standard semivariogram gamma_2(h) (order 2)
+    is an analytical constant for all separation lags h (Ortiz 2019; Goovaerts 1997;
+    Deutsch & Journel 1998) (TODO: Manually Verify):
+        (gamma_1(h))^2 / gamma_2(h) = 1 / pi ≈ 0.31831
+
+    Significant deviations from 1/pi indicate non-Gaussian spatial connectivity,
+    heteroscedasticity, or heavy-tailed extreme continuity.
+
+    Parameters
+    ----------
+    coords : np.ndarray
+        Sample spatial coordinates of shape (N, 2) or (N, 3).
+    normal_scores : np.ndarray
+        Standard normal scores Y ~ N(0, 1) of shape (N,).
+    lag_distance : float
+        Nominal separation lag distance (h).
+    n_lags : int
+        Number of lags to evaluate.
+    lag_tolerance : float, optional
+        Half-window tolerance around each nominal lag (default lag_distance / 2.0).
+
+    Returns
+    -------
+    pd.DataFrame
+        Table with columns:
+        - "lag": Nominal lag distance.
+        - "average_distance": True centroid separation distance of paired samples in bin.
+        - "gamma_1": Rodogram (order 1 variogram).
+        - "gamma_2": Semivariogram (order 2 variogram).
+        - "ratio": Experimental ratio (gamma_1^2 / gamma_2).
+        - "theoretical_ratio": Analytical Gaussian reference value (1 / pi ≈ 0.31831).
+        - "pair_count": Number of valid sample pairs in lag bin.
+        Attributes (.attrs) contain mean absolute percentage error vs. 1/pi.
+    """
+    coords_arr = np.asarray(coords, dtype=float)
+    y_arr = np.asarray(normal_scores, dtype=float)
+
+    if len(coords_arr) != len(y_arr):
+        raise ValueError(
+            f"coords length ({len(coords_arr)}) must match normal_scores ({len(y_arr)})."
+        )
+    if lag_distance <= 0:
+        raise ValueError(f"lag_distance must be positive, got {lag_distance}.")
+    if n_lags < 1:
+        raise ValueError(f"n_lags must be >= 1, got {n_lags}.")
+
+    tol = lag_distance / 2.0 if lag_tolerance is None else float(lag_tolerance)
+    theor_ratio = 1.0 / np.pi
+
+    records = []
+    for k in range(n_lags):
+        nominal_lag = (k + 1) * lag_distance
+        d_sub, y1, y2 = _extract_spatial_lag_pairs(coords_arr, y_arr, nominal_lag, tol)
+        n_pairs = len(d_sub)
+        if n_pairs == 0:
+            records.append(
+                {
+                    "lag": nominal_lag,
+                    "average_distance": np.nan,
+                    "gamma_1": np.nan,
+                    "gamma_2": np.nan,
+                    "ratio": np.nan,
+                    "theoretical_ratio": theor_ratio,
+                    "pair_count": 0,
+                }
+            )
+            continue
+
+        diff = np.abs(y1 - y2)
+        g1 = float(np.mean(diff) / 2.0)
+        g2 = float(np.mean(diff**2) / 2.0)
+        ratio = (g1**2) / g2 if g2 > 0 else np.nan
+
+        records.append(
+            {
+                "lag": nominal_lag,
+                "average_distance": float(np.mean(d_sub)),
+                "gamma_1": g1,
+                "gamma_2": g2,
+                "ratio": ratio,
+                "theoretical_ratio": theor_ratio,
+                "pair_count": n_pairs,
+            }
+        )
+
+    df = pd.DataFrame(records)
+    valid_ratios = df["ratio"].dropna()
+    mae = (
+        float(np.mean(np.abs(valid_ratios - theor_ratio)))
+        if len(valid_ratios) > 0
+        else np.nan
+    )
+    df.attrs["mean_abs_error"] = mae
+    df.attrs["theoretical_ratio"] = theor_ratio
+    return df
+
+
+def check_multigaussian_indicators(
+    coords: np.ndarray,
+    normal_scores: np.ndarray,
+    lag_distance: float,
+    n_lags: int,
+    variogram_model: str = "spherical",
+    sill: float = 1.0,
+    range_param: Union[float, Sequence[float], Mapping[str, float]] = 100.0,
+    nugget: float = 0.0,
+    quantiles: Sequence[float] = (0.1, 0.25, 0.5, 0.75, 0.9),
+    lag_tolerance: Optional[float] = None,
+) -> pd.DataFrame:
+    """Compares experimental indicator variograms against theoretical multiGaussian indicators.
+
+    Mathematical Formulation:
+    -------------------------
+    Under a bivariate multiGaussian distribution with spatial correlation rho(h) = C(h)/C(0),
+    the indicator semivariogram for any quantile p (with standard normal cutoff y_p = Phi^{-1}(p))
+    is given analytically by (Goovaerts 1997 §7.2; Ortiz 2019) (TODO: Manually Verify):
+        gamma_I,theor(h; p) = p - P(Y(u) <= y_p, Y(u+h) <= y_p; rho(h))
+
+    In addition, multiGaussian indicator variograms are strictly symmetric around the median:
+        gamma_I(h; p) = gamma_I(h; 1 - p)
+
+    Parameters
+    ----------
+    coords : np.ndarray
+        Sample spatial coordinates of shape (N, 2) or (N, 3).
+    normal_scores : np.ndarray
+        Standard normal scores Y ~ N(0, 1) of shape (N,).
+    lag_distance : float
+        Nominal separation lag distance.
+    n_lags : int
+        Number of lags to evaluate.
+    variogram_model : str, default "spherical"
+        Fitted Gaussian variogram model ("spherical", "exponential", "gaussian").
+    sill : float, default 1.0
+        Partial sill in Gaussian space.
+    range_param : float, Sequence[float], or Mapping, default 100.0
+        Variogram correlation range.
+    nugget : float, default 0.0
+        Nugget variance in Gaussian space.
+    quantiles : Sequence[float], default (0.1, 0.25, 0.5, 0.75, 0.9)
+        Quantiles to test.
+    lag_tolerance : float, optional
+        Lag half-window tolerance (default lag_distance / 2.0).
+
+    Returns
+    -------
+    pd.DataFrame
+        Table with columns:
+        - "lag": Nominal lag distance.
+        - "average_distance": Mean pair distance in bin.
+        - "quantile": Quantile p.
+        - "cutoff": Normal score cutoff y_p.
+        - "exp_indicator_var": Experimental indicator semivariance.
+        - "theor_indicator_var": Analytical Gaussian indicator semivariance.
+        - "abs_diff": Absolute difference between experimental and theoretical.
+        - "pair_count": Number of pairs in lag bin.
+        Attributes (.attrs) contain mean absolute error and tail symmetry metrics.
+    """
+    coords_arr = np.asarray(coords, dtype=float)
+    y_arr = np.asarray(normal_scores, dtype=float)
+    tol = lag_distance / 2.0 if lag_tolerance is None else float(lag_tolerance)
+
+    tot_sill = float(nugget + sill)
+    if tot_sill <= 0:
+        raise ValueError("Total sill (nugget + sill) must be positive.")
+
+    records = []
+    for k in range(n_lags):
+        nominal_lag = (k + 1) * lag_distance
+        d_sub, y1, y2 = _extract_spatial_lag_pairs(coords_arr, y_arr, nominal_lag, tol)
+        n_pairs = len(d_sub)
+        avg_d = float(np.mean(d_sub)) if n_pairs > 0 else nominal_lag
+
+        # Evaluate theoretical covariance and correlation rho(h)
+        cov_val = float(
+            _theoretical_covariance(
+                avg_d,
+                model=variogram_model,
+                nugget=nugget,
+                sill=sill,
+                range_param=range_param,
+            )
+        )
+        rho = np.clip(cov_val / tot_sill, -0.9999, 0.9999)
+        bvn_cov = np.array([[1.0, rho], [rho, 1.0]])
+
+        for p in quantiles:
+            y_p = float(stats.norm.ppf(p))
+
+            # Theoretical indicator variogram: p - P(Y1 <= y_p, Y2 <= y_p)
+            p_joint = float(
+                multivariate_normal.cdf([y_p, y_p], mean=[0.0, 0.0], cov=bvn_cov)
+            )
+            gamma_theor = max(0.0, p - p_joint)
+
+            # Experimental indicator variogram
+            if n_pairs > 0:
+                i1 = y1 <= y_p
+                i2 = y2 <= y_p
+                gamma_exp = float(
+                    np.mean((i1.astype(float) - i2.astype(float)) ** 2) / 2.0
+                )
+                abs_diff = abs(gamma_exp - gamma_theor)
+            else:
+                gamma_exp = np.nan
+                abs_diff = np.nan
+
+            records.append(
+                {
+                    "lag": nominal_lag,
+                    "average_distance": avg_d,
+                    "quantile": p,
+                    "cutoff": y_p,
+                    "exp_indicator_var": gamma_exp,
+                    "theor_indicator_var": gamma_theor,
+                    "abs_diff": abs_diff,
+                    "pair_count": n_pairs,
+                }
+            )
+
+    df = pd.DataFrame(records)
+    df.attrs["mean_abs_error"] = float(df["abs_diff"].dropna().mean())
+
+    # Compute symmetry error between symmetric quantiles (e.g. 0.1 vs 0.9, 0.25 vs 0.75)
+    sym_errors = []
+    unique_lags = df["lag"].unique()
+    for p in quantiles:
+        comp_p = round(1.0 - p, 4)
+        if comp_p in quantiles and comp_p > p:
+            for lg in unique_lags:
+                sub_p = df[(df["lag"] == lg) & (np.isclose(df["quantile"], p))]
+                sub_c = df[(df["lag"] == lg) & (np.isclose(df["quantile"], comp_p))]
+                if not sub_p.empty and not sub_c.empty:
+                    exp_p = sub_p["exp_indicator_var"].values[0]
+                    exp_c = sub_c["exp_indicator_var"].values[0]
+                    if np.isfinite(exp_p) and np.isfinite(exp_c):
+                        sym_errors.append(abs(exp_p - exp_c))
+
+    df.attrs["symmetry_error"] = (
+        float(np.mean(sym_errors)) if len(sym_errors) > 0 else 0.0
+    )
+    return df
+
+
+def compute_h_scatter_statistics(
+    coords: np.ndarray,
+    normal_scores: np.ndarray,
+    target_lags: Sequence[float],
+    lag_tolerance: float,
+    variogram_model: str = "spherical",
+    sill: float = 1.0,
+    range_param: Union[float, Sequence[float], Mapping[str, float]] = 100.0,
+    nugget: float = 0.0,
+) -> Dict[float, Dict[str, Any]]:
+    """Extracts paired normal score samples (Y(u), Y(u+h)) for h-scatter plot diagnostics.
+
+    Computes correlation and conditional variance homoscedasticity across quantile bins
+    (Deutsch & Journel 1998; Goovaerts 1997) (TODO: Manually Verify).
+
+    Parameters
+    ----------
+    coords : np.ndarray
+        Sample spatial coordinates of shape (N, 2) or (N, 3).
+    normal_scores : np.ndarray
+        Standard normal scores Y ~ N(0, 1) of shape (N,).
+    target_lags : Sequence[float]
+        List of nominal lag distances to extract.
+    lag_tolerance : float
+        Tolerance window around each lag.
+    variogram_model : str, default "spherical"
+        Fitted Gaussian variogram model.
+    sill : float, default 1.0
+        Partial sill.
+    range_param : float, Sequence, or Mapping, default 100.0
+        Correlation range.
+    nugget : float, default 0.0
+        Nugget variance.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping each lag distance to a dict with:
+        - "y_head": Paired values at location u.
+        - "y_tail": Paired values at location u + h.
+        - "dists": True pair separation distances.
+        - "correlation": Pearson correlation r(h).
+        - "theor_correlation": Analytical correlation rho(h).
+        - "n_pairs": Number of sample pairs.
+    """
+    coords_arr = np.asarray(coords, dtype=float)
+    y_arr = np.asarray(normal_scores, dtype=float)
+    tot_sill = float(nugget + sill)
+
+    out = {}
+    for lg in target_lags:
+        d_sub, y1, y2 = _extract_spatial_lag_pairs(coords_arr, y_arr, lg, lag_tolerance)
+        if len(d_sub) >= 2:
+            # Omnidirectional h-scatter contains both directed pairs (u, u+h) and (u+h, u)
+            y_h = np.concatenate([y1, y2])
+            y_t = np.concatenate([y2, y1])
+            d_sym = np.concatenate([d_sub, d_sub])
+            r = float(np.corrcoef(y_h, y_t)[0, 1])
+            avg_d = float(np.mean(d_sym))
+        else:
+            y_h = y1
+            y_t = y2
+            d_sym = d_sub
+            r = np.nan
+            avg_d = lg
+
+        cov_val = float(
+            _theoretical_covariance(
+                avg_d,
+                model=variogram_model,
+                nugget=nugget,
+                sill=sill,
+                range_param=range_param,
+            )
+        )
+        theor_r = np.clip(cov_val / tot_sill, -1.0, 1.0) if tot_sill > 0 else 0.0
+
+        out[lg] = {
+            "y_head": y_h,
+            "y_tail": y_t,
+            "dists": d_sym,
+            "correlation": r,
+            "theor_correlation": theor_r,
+            "n_pairs": len(d_sub),
+        }
+    return out
+
+
+def plot_multigaussian_diagnostics(
+    order_ratios_df: pd.DataFrame,
+    indicators_df: pd.DataFrame,
+    h_scatter_data: Dict[float, Dict[str, Any]],
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (15.0, 12.0),
+) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
+    """Generates a 4-panel diagnostic dashboard to evaluate the multiGaussian assumption.
+
+    Visualizes:
+    1. h-Scatter Plot: Symmetrized pairs at shortest lag with 45° equality line and correlation.
+    2. Order Ratio Curve: (gamma_1^2 / gamma_2) vs. lag with 1/pi theoretical line.
+    3. Indicator Variograms: Experimental vs. Theoretical curves across quantiles,
+       with explicit grouping for multi-Gaussian symmetric tail counterparts (p vs 1-p).
+    4. Tail Symmetry Check: Comparison of indicator curves for p vs. (1 - p).
+
+    Parameters
+    ----------
+    order_ratios_df : pd.DataFrame
+        Result table from check_multigaussian_order_ratios.
+    indicators_df : pd.DataFrame
+        Result table from check_multigaussian_indicators.
+    h_scatter_data : dict
+        Result dict from compute_h_scatter_statistics.
+    title : str, optional
+        Overall figure title.
+    figsize : tuple of float, default (15.0, 12.0)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Sequence[plt.Axes]]
+        Figure and axes sequence.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+
+    # 1. Panel 1: h-Scatter Plot at smallest lag
+    ax1 = axes[0, 0]
+    first_lag = min(h_scatter_data.keys()) if h_scatter_data else None
+    if first_lag is not None and h_scatter_data[first_lag]["n_pairs"] > 0:
+        d = h_scatter_data[first_lag]
+        ax1.scatter(
+            d["y_head"],
+            d["y_tail"],
+            alpha=0.5,
+            color="royalblue",
+            edgecolors="none",
+            s=25,
+        )
+        # 45-degree diagonal reference line
+        min_val = (
+            min(float(np.nanmin(d["y_head"])), float(np.nanmin(d["y_tail"]))) - 0.2
+        )
+        max_val = (
+            max(float(np.nanmax(d["y_head"])), float(np.nanmax(d["y_tail"]))) + 0.2
+        )
+        lims = [min_val, max_val]
+        ax1.plot(lims, lims, "k--", alpha=0.7, label="1:1 Equality Line")
+        ax1.set_xlim(lims)
+        ax1.set_ylim(lims)
+        ax1.set_title(
+            f"h-Scatter Plot (h ≈ {first_lag:.1f} m)\n"
+            f"Exp r = {d['correlation']:.3f} | Theor ρ = {d['theor_correlation']:.3f}"
+        )
+        ax1.set_xlabel("Y(u) [Normal Score]")
+        ax1.set_ylabel("Y(u + h) [Normal Score]")
+        ax1.grid(True, linestyle=":", alpha=0.5)
+        ax1.legend(loc="upper left")
+    else:
+        ax1.text(0.5, 0.5, "No pairs for h-scatter", ha="center", va="center")
+
+    # 2. Panel 2: Order Ratio Curve vs 1/pi
+    ax2 = axes[0, 1]
+    ax2.plot(
+        order_ratios_df["lag"],
+        order_ratios_df["ratio"],
+        "o-",
+        color="crimson",
+        label="Experimental (γ₁² / γ₂)",
+    )
+    theor_val = 1.0 / np.pi
+    ax2.axhline(
+        theor_val,
+        color="black",
+        linestyle="--",
+        linewidth=1.8,
+        label=f"MultiGaussian 1/π ≈ {theor_val:.3f}",
+    )
+    mae = order_ratios_df.attrs.get("mean_abs_error", np.nan)
+    ax2.set_title(f"Order Ratio Test: γ₁² / γ₂ (MAE vs 1/π = {mae:.3f})")
+    ax2.set_xlabel("Lag Distance h (m)")
+    ax2.set_ylabel("Order Ratio")
+    ax2.set_ylim([max(0.0, theor_val - 0.25), theor_val + 0.25])
+    ax2.grid(True, linestyle=":", alpha=0.5)
+    ax2.legend(loc="best")
+
+    # 3. Panel 3: Indicator Variograms (Exp vs Theor)
+    # Note: In multi-Gaussian theory, gamma_I(h; p) == gamma_I(h; 1-p).
+    ax3 = axes[1, 0]
+    unique_quantiles = sorted(indicators_df["quantile"].unique())
+
+    # Map of styles and distinct colors for each quantile
+    q_styles = {
+        0.10: {
+            "color": "tab:blue",
+            "marker": "o",
+            "label_exp": "Exp p=0.10 (Lower Decile)",
+        },
+        0.25: {
+            "color": "forestgreen",
+            "marker": "s",
+            "label_exp": "Exp p=0.25 (Lower Quartile)",
+        },
+        0.50: {"color": "firebrick", "marker": "D", "label_exp": "Exp p=0.50 (Median)"},
+        0.75: {
+            "color": "mediumpurple",
+            "marker": "^",
+            "label_exp": "Exp p=0.75 (Upper Quartile)",
+        },
+        0.90: {
+            "color": "tab:cyan",
+            "marker": "v",
+            "label_exp": "Exp p=0.90 (Upper Decile)",
+        },
+    }
+
+    # Plot theoretical curves for unique symmetric pairs
+    plotted_theor = set()
+    for p in unique_quantiles:
+        comp_p = round(1.0 - p, 4)
+        theor_key = tuple(sorted([p, comp_p]))
+        if theor_key not in plotted_theor:
+            plotted_theor.add(theor_key)
+            sub = indicators_df[np.isclose(indicators_df["quantile"], p)].sort_values(
+                "lag"
+            )
+            if p == 0.5:
+                theor_label = "Theor p=0.50 (Median)"
+                theor_color = "black"
+                theor_lw = 2.0
+            elif p < 0.5:
+                theor_label = f"Theor p={p:.2f} & {comp_p:.2f} (Symmetric)"
+                theor_color = "dimgray" if p == 0.25 else "darkslategray"
+                theor_lw = 1.8
+            else:
+                continue
+
+            ax3.plot(
+                sub["lag"],
+                sub["theor_indicator_var"],
+                "-",
+                color=theor_color,
+                linewidth=theor_lw,
+                label=theor_label,
+            )
+
+    # Plot all experimental curves with distinct markers and colors
+    for p in unique_quantiles:
+        sub = indicators_df[np.isclose(indicators_df["quantile"], p)].sort_values("lag")
+        cfg = q_styles.get(
+            p, {"color": "grey", "marker": "o", "label_exp": f"Exp p={p:.2f}"}
+        )
+        ax3.plot(
+            sub["lag"],
+            sub["exp_indicator_var"],
+            "--",
+            marker=cfg["marker"],
+            color=cfg["color"],
+            alpha=0.85,
+            markersize=5,
+            label=cfg["label_exp"],
+        )
+
+    ax3.set_title("Indicator Semivariograms (Solid: Theor, Markers: Exp)")
+    ax3.set_xlabel("Lag Distance h (m)")
+    ax3.set_ylabel("Indicator Semivariance γ_I(h)")
+    ax3.grid(True, linestyle=":", alpha=0.5)
+    ax3.legend(loc="upper left", bbox_to_anchor=(0.0, 1.0), fontsize=7.5, ncol=2)
+
+    # 4. Panel 4: Tail Symmetry Check (p vs 1-p)
+    ax4 = axes[1, 1]
+    tested_pairs = [(0.1, 0.9), (0.25, 0.75)]
+    pair_palettes = [
+        {
+            "p1_color": "tab:blue",
+            "p2_color": "tab:cyan",
+            "name": "Deciles (p=0.10 vs 0.90)",
+        },
+        {
+            "p1_color": "forestgreen",
+            "p2_color": "mediumpurple",
+            "name": "Quartiles (p=0.25 vs 0.75)",
+        },
+    ]
+
+    for (p1, p2), palette in zip(tested_pairs, pair_palettes):
+        sub1 = indicators_df[np.isclose(indicators_df["quantile"], p1)].sort_values(
+            "lag"
+        )
+        sub2 = indicators_df[np.isclose(indicators_df["quantile"], p2)].sort_values(
+            "lag"
+        )
+        if not sub1.empty and not sub2.empty:
+            ax4.plot(
+                sub1["lag"],
+                sub1["exp_indicator_var"],
+                "s-",
+                color=palette["p1_color"],
+                label=f"Exp p={p1:.2f}",
+            )
+            ax4.plot(
+                sub2["lag"],
+                sub2["exp_indicator_var"],
+                "^--",
+                color=palette["p2_color"],
+                label=f"Exp p={p2:.2f}",
+            )
+
+    sym_err = indicators_df.attrs.get("symmetry_error", np.nan)
+    ax4.set_title(
+        f"Tail Symmetry Check: γ_I(p) vs γ_I(1-p)\n"
+        f"MultiGaussian Symmetry Error = {sym_err:.4f}"
+    )
+    ax4.set_xlabel("Lag Distance h (m)")
+    ax4.set_ylabel("Indicator Semivariance")
+    ax4.grid(True, linestyle=":", alpha=0.5)
+    ax4.legend(loc="upper left", fontsize=8, ncol=2)
+
+    if title:
+        fig.suptitle(title, fontsize=14, fontweight="bold", y=0.995)
+
+    fig.tight_layout()
+    return fig, axes.flatten()
+
+
+def _upscale_realizations_to_blocks(
+    point_realizations: np.ndarray,
+    n_blocks: int,
+    points_per_block: int,
+) -> np.ndarray:
+    """Upscales simulated point realizations to block support via linear arithmetic averaging.
+
+    Parameters
+    ----------
+    point_realizations : np.ndarray
+        Array of simulated point values of shape (n_blocks * points_per_block, n_realizations).
+    n_blocks : int
+        Number of blocks in the target block model.
+    points_per_block : int
+        Number of discretization points per block (M = nx * ny * nz).
+
+    Returns
+    -------
+    block_realizations : np.ndarray
+        Array of upscaled block realizations of shape (n_blocks, n_realizations).
+    """
+    n_points, n_real = point_realizations.shape
+    if n_points != n_blocks * points_per_block:
+        raise ValueError(
+            f"Point realizations count ({n_points}) must match n_blocks ({n_blocks}) * "
+            f"points_per_block ({points_per_block}) = {n_blocks * points_per_block}."
+        )
+    reshaped = point_realizations.reshape(n_blocks, points_per_block, n_real)
+    return np.nanmean(reshaped, axis=1)
+
+
+def lu_gaussian_grid_simulation(
     samples_xy: np.ndarray,
     sample_grades: np.ndarray,
     grid_points: np.ndarray,
     sill: float,
-    range_param: float,
+    range_param: Union[float, Sequence[float], Mapping[str, float]],
     n_realizations: int = 50,
     variogram_model: str = "spherical",
     nugget: float = 0.0,
+    sample_weights: Optional[np.ndarray] = None,
     seed: Optional[int] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
+    mask_extrapolation: bool = False,
+    jitter: float = 1e-6,
 ) -> np.ndarray:
-    """Generates equiprobable conditional realizations via Sequential Gaussian Simulation (SGS).
+    """Generates equiprobable conditional realizations on grid support via LU Gaussian Simulation.
 
-    Sequential Gaussian Simulation (Isaaks 1990; Deutsch & Journel 1998; SME Handbook) (TODO: Manually Verify)
-    models spatial uncertainty by generating multiple stochastic realizations that honor:
-    1. Conditioning sample values at drillhole locations.
-    2. The experimental univariate histogram (via normal-score transformation).
-    3. The spatial covariance / variogram structure (retaining short-range variance).
+    Implementation Strategy:
+    ------------------------
+    Implements conditional Gaussian simulation using the LU decomposition (Cholesky factorization)
+    method (Alabert 1987; Davis 1987; Journel & Huijbregts 1978; Goovaerts 1997; GSLIB lusim;
+    SME Mining Engineering Handbook §4.4/§4.5) (TODO: Manually Verify).
 
-    Unlike linear kriging, each realization reproduces the realistic spatial heterogeneity,
-    nugget variance, and extreme values of the deposit without artificial smoothing.
+    Mathematical Formulation of the LU Method:
+    -------------------------------------------
+    1. Normal-Score Transformation:
+       Conditioning assay grades Z(x) are transformed to standard normal space:
+       Y(x_i) = Phi^{-1}(F^*(Z(x_i))) ~ N(0, 1)
+       Preserves declustered representative distributions (Ortiz 2019; Journel 1983)
+       (TODO: Manually Verify).
+
+    2. Joint Covariance Matrix Partitioning:
+       The spatial covariance matrix between conditioning data points (1) and
+       target simulation grid points (2) is partitioned as:
+       C = [[C_11, C_12],
+            [C_21, C_22]]
+       where:
+       - C_11 is (N, N): sample-to-sample covariance.
+       - C_12 = C_21^T is (N, M): sample-to-grid cross-covariance.
+       - C_22 is (M, M): grid-to-grid covariance.
+
+    3. Simple Kriging Mean Vector:
+       The conditional expectation at grid points in Gaussian space (global mean mu = 0):
+       y_SK = C_21 @ inv(C_11) @ y_1
+
+    4. Conditional Covariance Matrix (Schur Complement):
+       The exact conditional covariance matrix among the grid points given the data is:
+       C_cond = C_22 - C_21 @ inv(C_11) @ C_12
+
+    5. LU / Cholesky Factorization:
+       Factorize the conditional covariance matrix (with numerical jitter eps * I):
+       C_cond + eps * I = L @ L^T
+       where L is an (M, M) lower-triangular matrix.
+
+    6. Simultaneous Vectorized Ensemble Generation:
+       For L equiprobable realizations, draw an (M, L) matrix of independent standard
+       normal variates W ~ N(0, I):
+       Y_sim = y_SK[:, None] + L @ W
+       Generates all realizations in a single BLAS matrix-matrix multiplication (gemm).
+
+    7. Back-Transformation:
+       Simulated values in Gaussian space are transformed back to original grade support:
+       Z_sim = F^{*-1}(Phi(Y_sim))
 
     Parameters
     ----------
     samples_xy : np.ndarray
-        Array of shape (N, 2) with conditioning sample coordinates.
+        Array of shape (N, 2) or (N, 3) with conditioning sample coordinates.
     sample_grades : np.ndarray
         Array of shape (N,) with conditioning assay grades.
     grid_points : np.ndarray
-        Array of shape (M, 2) with target simulation grid coordinates.
+        Array of shape (M, 2) or (M, 3) with target simulation grid coordinates.
     sill : float
-        Variogram sill (C) in Gaussian space.
-    range_param : float
+        Variogram sill (C) in Gaussian space (or data space).
+    range_param : float, Sequence[float], or Mapping
         Variogram range (a).
     n_realizations : int, default 50
         Number of equiprobable stochastic realizations to generate.
@@ -10252,20 +11722,817 @@ def sequential_gaussian_simulation(
         Spatial correlation structure ("spherical", "exponential", "gaussian").
     nugget : float, default 0.0
         Nugget variance (C0).
+    sample_weights : np.ndarray, optional
+        Declustering weights of shape (N,) to honor representative distribution.
     seed : int, optional
         Random number generator seed for reproducible simulations.
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional ranges (major, minor) in 2D or (major, semi-major, minor) in 3D.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles: azimuth in 2D or (azimuth, dip, plunge) in 3D.
+    mask_extrapolation : bool, default False
+        If True, masks grid nodes outside the sample convex hull to NaN.
+    jitter : float, default 1e-6
+        Diagonal regularization added to C_cond to guarantee numerical positive-definiteness.
 
     Returns
     -------
     np.ndarray
-        Array of shape (M, n_realizations) containing the simulated realizations.
+        Array of shape (M, n_realizations) containing the back-transformed simulated realizations.
     """
-    raise NotImplementedError(
-        "Sequential Gaussian Simulation (SGS) engine is planned. "
-        "Use compute_etype_mtype_maps() on pre-computed realization arrays."
+    samples = np.asarray(samples_xy, dtype=float)
+    grades = np.asarray(sample_grades, dtype=float)
+    grid = np.asarray(grid_points, dtype=float)
+
+    if len(samples) != len(grades):
+        raise ValueError(
+            f"samples_xy length ({len(samples)}) must match sample_grades ({len(grades)})."
+        )
+    if grid.ndim != 2:
+        raise ValueError(f"grid_points must be a 2D array, got shape {grid.shape}.")
+    if samples.ndim != 2 or samples.shape[1] != grid.shape[1]:
+        raise ValueError(
+            f"Spatial dimensions must match: samples {samples.shape}, grid {grid.shape}."
+        )
+    if n_realizations < 1:
+        raise ValueError(f"n_realizations must be >= 1, got {n_realizations}.")
+    if len(samples) == 0:
+        raise ValueError("Cannot perform conditional simulation with 0 samples.")
+    if len(grid) == 0:
+        return np.zeros((0, n_realizations), dtype=float)
+
+    # 1. Transform raw grades into standard normal space Y ~ N(0, 1)
+    y_samples, sorted_z, sorted_y = normal_score_transform(
+        grades, weights=sample_weights
+    )
+
+    # 2. Transform spatial coordinates to isotropic equivalent space if anisotropic
+    eff_ranges = (
+        anisotropy_ranges
+        if anisotropy_ranges is not None
+        else (
+            range_param if isinstance(range_param, (Sequence, Mapping)) else range_param
+        )
+    )
+    samples_t, eff_range = transform_anisotropic_coordinates(
+        samples, ranges=eff_ranges, angles=anisotropy_angles
+    )
+    samples_t, y_samples, _, _ = _deduplicate_collocated_samples(samples_t, y_samples)
+    grid_t, _ = transform_anisotropic_coordinates(
+        grid, ranges=eff_ranges, angles=anisotropy_angles
+    )
+
+    # 3. Covariance parameters in Gaussian space (total sill = 1.0)
+    tot_sill = float(nugget + sill)
+    if tot_sill <= 0:
+        raise ValueError(
+            f"Total sill (nugget + sill) must be positive, got {tot_sill}."
+        )
+    g_nugget = float(nugget) / tot_sill
+    g_sill = 1.0 - g_nugget
+
+    # 4. Assembling joint covariance blocks C11, C12, C22
+    d11 = cdist(samples_t, samples_t)
+    C11 = _theoretical_covariance(
+        d11,
+        model=variogram_model,
+        nugget=g_nugget,
+        sill=g_sill,
+        range_param=eff_range,
+    )
+    np.fill_diagonal(C11, C11.diagonal() + 1e-9)
+
+    d12 = cdist(samples_t, grid_t)
+    C12 = _theoretical_covariance(
+        d12,
+        model=variogram_model,
+        nugget=g_nugget,
+        sill=g_sill,
+        range_param=eff_range,
+    )
+
+    d22 = cdist(grid_t, grid_t)
+    C22 = _theoretical_covariance(
+        d22,
+        model=variogram_model,
+        nugget=g_nugget,
+        sill=g_sill,
+        range_param=eff_range,
+    )
+
+    # 5. Simple Kriging Mean: y_sk = C21 @ inv(C11) @ y_samples
+    weights = np.linalg.solve(C11, C12)  # shape (N, M)
+    y_sk = weights.T @ y_samples  # shape (M,)
+
+    # 6. Exact Conditional Covariance (Schur Complement): C_cond = C22 - C21 @ weights
+    C_cond = C22 - C12.T @ weights
+    # Symmetrize
+    C_cond = 0.5 * (C_cond + C_cond.T)
+    # Diagonal regularization for Cholesky positive-definiteness
+    np.fill_diagonal(C_cond, np.maximum(0.0, C_cond.diagonal()) + jitter)
+
+    # 7. Cholesky Factorization
+    L = np.linalg.cholesky(C_cond)
+
+    # 8. Vectorized Realization Ensemble Generation: Y_sim = y_sk + L @ W
+    rng = np.random.default_rng(seed)
+    w = rng.standard_normal(size=(len(grid), n_realizations))
+    Y_sim = y_sk[:, None] + L @ w
+
+    # 9. Normal Score Back-Transformation
+    Z_sim = normal_score_back_transform(Y_sim, sorted_z, sorted_y)
+
+    # 10. Extrapolation Masking
+    if mask_extrapolation:
+        inside = is_within_convex_hull(samples, grid)
+        Z_sim[~inside, :] = np.nan
+
+    return Z_sim
+
+
+def lu_gaussian_block_simulation(
+    samples_xyz: np.ndarray,
+    sample_grades: np.ndarray,
+    block_model: pd.DataFrame,
+    sill: float,
+    range_param: Union[float, Sequence[float], Mapping[str, float]],
+    n_realizations: int = 50,
+    variogram_model: str = "spherical",
+    nugget: float = 0.0,
+    discretization: Tuple[int, int, int] = (4, 4, 2),
+    sample_weights: Optional[np.ndarray] = None,
+    seed: Optional[int] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
+    jitter: float = 1e-6,
+) -> np.ndarray:
+    """Generates equiprobable conditional realizations on 3D block support via LU Gaussian Simulation.
+
+    Simulates at quasi-point support on discretization sub-points within each block,
+    and linearly averages the simulated point grades within each block to preserve
+    mass balance and correct block dispersion variance (Goovaerts 1997; Ortiz 2019).
+
+    Parameters
+    ----------
+    samples_xyz : np.ndarray
+        Array of shape (N, 3) with drillhole sample coordinates.
+    sample_grades : np.ndarray
+        Array of shape (N,) with continuous raw assay grades.
+    block_model : pd.DataFrame
+        DataFrame with mining block centroids ('x', 'y', 'z') and block dimensions ('dx', 'dy', 'dz').
+    sill : float
+        Variogram partial sill variance c.
+    range_param : float, Sequence[float], or Mapping
+        Variogram practical range a.
+    n_realizations : int, default 50
+        Number of stochastic realizations L to simulate.
+    variogram_model : str, default "spherical"
+        Analytical variogram model type ('spherical', 'exponential', 'gaussian', 'cubic').
+    nugget : float, default 0.0
+        Variogram nugget effect c0.
+    discretization : Tuple[int, int, int], default (4, 4, 2)
+        Discretization resolution (nx, ny, nz) along each axis per block.
+    sample_weights : np.ndarray, optional
+        Declustering weights of shape (N,) for normal score transformation.
+    seed : int, optional
+        Random seed for reproducible Monte Carlo draws.
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Ranges along principal axes for 3D geometric anisotropy.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth, dip, plunge) for 3D geometric anisotropy.
+    jitter : float, default 1e-6
+        Diagonal regularization constant to guarantee positive-definiteness.
+
+    Returns
+    -------
+    block_realizations : np.ndarray
+        Array of shape (n_blocks, n_realizations) containing simulated block grades.
+    """
+    req_cols = {"x", "y", "z", "dx", "dy", "dz"}
+    if not req_cols.issubset(block_model.columns):
+        raise ValueError(
+            f"block_model must contain columns {req_cols}, got {list(block_model.columns)}."
+        )
+
+    n_blocks = len(block_model)
+    if n_blocks == 0:
+        return np.zeros((0, n_realizations), dtype=float)
+
+    nx, ny, nz = discretization
+    dx = float(block_model["dx"].iloc[0])
+    dy = float(block_model["dy"].iloc[0])
+    dz = float(block_model["dz"].iloc[0])
+
+    disc_offsets = _generate_block_discretization_offsets(
+        discretization=discretization, block_size=(dx, dy, dz)
+    )
+    block_coords = block_model[["x", "y", "z"]].to_numpy(dtype=float)
+
+    # Discretization sub-points for all blocks of shape (n_blocks * M, 3)
+    all_disc_points = (block_coords[:, None, :] + disc_offsets[None, :, :]).reshape(
+        -1, 3
+    )
+
+    # Simulate quasi-point values at all discretization locations
+    point_sim = lu_gaussian_grid_simulation(
+        samples_xy=samples_xyz,
+        sample_grades=sample_grades,
+        grid_points=all_disc_points,
+        sill=sill,
+        range_param=range_param,
+        n_realizations=n_realizations,
+        variogram_model=variogram_model,
+        nugget=nugget,
+        sample_weights=sample_weights,
+        seed=seed,
+        anisotropy_ranges=anisotropy_ranges,
+        anisotropy_angles=anisotropy_angles,
+        mask_extrapolation=False,
+        jitter=jitter,
+    )
+
+    # Linearly upscale simulated point grades to block support
+    return _upscale_realizations_to_blocks(
+        point_realizations=point_sim,
+        n_blocks=n_blocks,
+        points_per_block=len(disc_offsets),
     )
 
 
+def _build_multigrid_levels(
+    grid_points: np.ndarray,
+    n_multigrids: int = 1,
+) -> List[np.ndarray]:
+    """Partitions grid node indices into hierarchical nested multigrid levels.
+
+    Parameters
+    ----------
+    grid_points : np.ndarray
+        Array of shape (M, 2) or (M, 3) with target grid coordinates.
+    n_multigrids : int, default 1
+        Number of dyadic multigrid levels (1 = single flat grid, >= 2 = nested grids).
+
+    Returns
+    -------
+    levels : List[np.ndarray]
+        List of 1D integer arrays containing node indices for each multigrid level,
+        ordered from coarsest (Level G) to finest (Level 1).
+    """
+    n_nodes = len(grid_points)
+    if n_nodes == 0 or n_multigrids <= 1:
+        return [np.arange(n_nodes)]
+
+    dim = grid_points.shape[1]
+    int_indices = np.zeros((n_nodes, dim), dtype=int)
+    is_regular = True
+
+    for d in range(dim):
+        coords_d = grid_points[:, d]
+        unique_d = np.unique(np.round(coords_d, decimals=5))
+        if len(unique_d) <= 1:
+            int_indices[:, d] = 0
+            continue
+        diffs = np.diff(unique_d)
+        min_spacing = float(np.min(diffs))
+        if min_spacing <= 1e-6 or not np.allclose(
+            diffs, min_spacing, rtol=1e-2, atol=1e-4
+        ):
+            is_regular = False
+            break
+        int_indices[:, d] = np.round((coords_d - unique_d[0]) / min_spacing).astype(int)
+
+    if not is_regular:
+        warnings.warn(
+            f"Cannot construct {n_multigrids} multigrids: grid_points do not form a regular "
+            "orthogonal grid spacing. Falling back to a single random path (n_multigrids=1).",
+            UserWarning,
+            stacklevel=2,
+        )
+        return [np.arange(n_nodes)]
+
+    # Construct dyadic levels from coarsest (2^(G-1)) down to 1
+    levels = []
+    assigned = np.zeros(n_nodes, dtype=bool)
+
+    for g in range(n_multigrids, 0, -1):
+        stride = 2 ** (g - 1)
+        matches_stride = np.all(int_indices % stride == 0, axis=1)
+        level_nodes = np.where(matches_stride & ~assigned)[0]
+        if len(level_nodes) > 0:
+            levels.append(level_nodes)
+            assigned[level_nodes] = True
+
+    remaining = np.where(~assigned)[0]
+    if len(remaining) > 0:
+        levels.append(remaining)
+
+    return levels
+
+
+def sequential_gaussian_grid_simulation(
+    samples_xy: np.ndarray,
+    sample_grades: np.ndarray,
+    grid_points: np.ndarray,
+    sill: float,
+    range_param: Union[float, Sequence[float], Mapping[str, float]],
+    n_realizations: int = 50,
+    variogram_model: str = "spherical",
+    nugget: float = 0.0,
+    sample_weights: Optional[np.ndarray] = None,
+    seed: Optional[int] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
+    search_radius: Optional[float] = None,
+    max_hard_samples: int = 12,
+    max_simulated_nodes: int = 12,
+    max_per_sector: Optional[int] = None,
+    max_per_drillhole: Optional[int] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+    assign_data_to_nodes: bool = False,
+    n_multigrids: int = 1,
+    mask_extrapolation: bool = False,
+) -> np.ndarray:
+    """Generates equiprobable conditional realizations via Sequential Gaussian Simulation (SGS).
+
+    Implementation Strategy:
+    ------------------------
+    Implements Sequential Gaussian Simulation (Gómez-Hernández & Journel 1993; Deutsch &
+    Journel 1998, GSLIB sgsim; Rossi & Deutsch 2014) (TODO: Manually Verify).
+
+    Algorithm Workflow:
+    -------------------
+    1. Transform raw conditioning assay grades Z(x) into standard normal space Y ~ N(0, 1)
+       preserving declustered representative distributions (Ortiz 2019; Journel 1983).
+    2. Transform coordinates to isotropic equivalent space if 2D/3D anisotropy is specified.
+    3. Standardize Gaussian variogram parameters (total sill = 1.0).
+    4. Build static spatial search trees for drillhole samples and target grid coordinates.
+    5. For each realization l in 1, ..., L:
+       (a) Generate a structured multigrid random path visiting unsimulated grid nodes from
+           coarsest level to finest level without repetition (Gómez-Hernández & Srivastava 1990; Tran 1994).
+       (b) Search for conditioning data: either dual search (original drillholes + previously simulated
+           nodes) or single grid search if `assign_data_to_nodes=True`.
+       (c) Solve the local Simple Kriging system via the shared `_solve_local_simple_kriging_grid`
+           kernel to determine conditional mean y_SK(u) and kriging variance sigma^2_SK(u).
+       (d) Draw a simulated Gaussian value Y(u) ~ N(y_SK(u), sigma^2_SK(u)) and record it
+           as a simulated conditioning node for subsequent nodes on the path.
+    6. Back-transform all simulated values to original grade support.
+    7. Mask extrapolation nodes outside the convex hull if requested.
+
+    Parameters
+    ----------
+    samples_xy : np.ndarray
+        Array of shape (N, 2) or (N, 3) with conditioning sample coordinates.
+    sample_grades : np.ndarray
+        Array of shape (N,) with conditioning assay grades.
+    grid_points : np.ndarray
+        Array of shape (M, 2) or (M, 3) with target simulation grid coordinates.
+    sill : float
+        Variogram sill (C) in Gaussian space.
+    range_param : float, Sequence[float], or Mapping
+        Variogram range (a).
+    n_realizations : int, default 50
+        Number of equiprobable stochastic realizations to generate.
+    variogram_model : str, default "spherical"
+        Spatial correlation structure ("spherical", "exponential", "gaussian").
+    nugget : float, default 0.0
+        Nugget variance (C0).
+    sample_weights : np.ndarray, optional
+        Declustering weights of shape (N,) to honor representative distribution.
+    seed : int, optional
+        Random number generator seed for reproducible simulations.
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Directional ranges (major, minor) in 2D or (major, semi-major, minor) in 3D.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles: azimuth in 2D or (azimuth, dip, plunge) in 3D.
+    search_radius : float, optional
+        Maximum search distance for conditioning data. If None, uses 1.5 * effective range.
+    max_hard_samples : int, default 12
+        Maximum number of original drillhole samples to condition upon at each node.
+    max_simulated_nodes : int, default 12
+        Maximum number of previously simulated nodes to condition upon at each node.
+    max_per_sector : int, optional
+        Maximum samples per angular sector (quadrant in 2D, octant in 3D).
+    max_per_drillhole : int, optional
+        Maximum samples allowed per drillhole trace.
+    sample_hole_ids : Sequence[Any], optional
+        Drillhole trace identifiers for conditioning samples.
+    assign_data_to_nodes : bool, default False
+        If True, pre-assigns drillhole samples to their closest grid nodes, treating them as
+        pre-conditioned nodes and removing them from the simulation path. Replaces the dual
+        search with a single grid search, accelerating execution on dense grids (GSLIB sgsim).
+    n_multigrids : int, default 1
+        Number of dyadic multiple grid levels (Gómez-Hernández & Srivastava 1990; Tran 1994;
+        GSLIB nmult). If > 1, simulates coarse sub-grids first to lock in long-range spatial
+        correlation structures before progressively refining to finer grids.
+    mask_extrapolation : bool, default False
+        If True, masks grid nodes outside the sample convex hull to NaN.
+
+    Returns
+    -------
+    np.ndarray
+        Array of shape (M, n_realizations) containing the back-transformed simulated realizations.
+    """
+    samples = np.asarray(samples_xy, dtype=float)
+    grades = np.asarray(sample_grades, dtype=float)
+    grid = np.asarray(grid_points, dtype=float)
+
+    if len(samples) != len(grades):
+        raise ValueError(
+            f"samples_xy length ({len(samples)}) must match sample_grades ({len(grades)})."
+        )
+    if grid.ndim != 2:
+        raise ValueError(f"grid_points must be a 2D array, got shape {grid.shape}.")
+    if samples.ndim != 2 or samples.shape[1] != grid.shape[1]:
+        raise ValueError(
+            f"Spatial dimensions must match: samples {samples.shape}, grid {grid.shape}."
+        )
+    if n_realizations < 1:
+        raise ValueError(f"n_realizations must be >= 1, got {n_realizations}.")
+    if len(samples) == 0:
+        raise ValueError("Cannot perform conditional simulation with 0 samples.")
+    if len(grid) == 0:
+        return np.zeros((0, n_realizations), dtype=float)
+    if max_hard_samples < 1:
+        raise ValueError(f"max_hard_samples must be >= 1, got {max_hard_samples}.")
+    if max_simulated_nodes < 0:
+        raise ValueError(
+            f"max_simulated_nodes must be >= 0, got {max_simulated_nodes}."
+        )
+    if search_radius is not None and search_radius <= 0:
+        raise ValueError(f"search_radius must be positive, got {search_radius}.")
+
+    # 1. Transform raw grades into standard normal space Y ~ N(0, 1)
+    y_samples, sorted_z, sorted_y = normal_score_transform(
+        grades, weights=sample_weights
+    )
+
+    # 2. Transform spatial coordinates to isotropic equivalent space if anisotropic
+    eff_ranges = (
+        anisotropy_ranges
+        if anisotropy_ranges is not None
+        else (
+            range_param if isinstance(range_param, (Sequence, Mapping)) else range_param
+        )
+    )
+    samples_t, eff_range = transform_anisotropic_coordinates(
+        samples, ranges=eff_ranges, angles=anisotropy_angles
+    )
+    grid_t, _ = transform_anisotropic_coordinates(
+        grid, ranges=eff_ranges, angles=anisotropy_angles
+    )
+
+    # 3. Covariance parameters in Gaussian space (total sill = 1.0)
+    tot_sill = float(nugget + sill)
+    if tot_sill <= 0:
+        raise ValueError(
+            f"Total sill (nugget + sill) must be positive, got {tot_sill}."
+        )
+    g_nugget = float(nugget) / tot_sill
+    g_sill = 1.0 - g_nugget
+
+    radius = search_radius if search_radius is not None else 1.5 * eff_range
+
+    # 4. Spatial Indexing
+    tree_hard = cKDTree(samples_t)
+    tree_grid = cKDTree(grid_t)
+
+    k_h_query = min(len(samples_t), max_hard_samples * 4)
+    k_s_query = min(len(grid_t), max(max_simulated_nodes * 8, 32))
+    hole_ids_arr = list(sample_hole_ids) if sample_hole_ids is not None else None
+
+    # Step 4(b) - Pre-assign sample data to closest grid nodes if requested (single grid search mode)
+    if assign_data_to_nodes:
+        _, snap_nodes = tree_grid.query(samples_t, k=1)
+        unique_nodes, inverse_idx = np.unique(snap_nodes, return_inverse=True)
+        assigned_values = np.zeros(len(unique_nodes), dtype=float)
+        for u_i in range(len(unique_nodes)):
+            assigned_values[u_i] = float(np.mean(y_samples[inverse_idx == u_i]))
+
+        pre_simulated_mask = np.zeros(len(grid_t), dtype=bool)
+        pre_simulated_mask[unique_nodes] = True
+        base_y_sim = np.zeros(len(grid_t), dtype=float)
+        base_y_sim[unique_nodes] = assigned_values
+        unsimulated_indices = np.where(~pre_simulated_mask)[0]
+
+    rng = np.random.default_rng(seed)
+    Y_sim = np.zeros((len(grid), n_realizations), dtype=float)
+
+    # Pre-partition multigrid levels
+    multigrid_levels = _build_multigrid_levels(grid, n_multigrids=n_multigrids)
+
+    # 5. Sequential Simulation Loop across Realizations
+    for r in range(n_realizations):
+        if assign_data_to_nodes:
+            # Within each multigrid level, visit unsimulated nodes in randomized order
+            path_segments = []
+            for lvl in multigrid_levels:
+                unsim_lvl = lvl[~pre_simulated_mask[lvl]]
+                if len(unsim_lvl) > 0:
+                    path_segments.append(rng.permutation(unsim_lvl))
+            path = (
+                np.concatenate(path_segments)
+                if len(path_segments) > 0
+                else np.empty(0, dtype=int)
+            )
+            y_sim_current = base_y_sim.copy()
+            is_simulated = pre_simulated_mask.copy()
+        else:
+            path_segments = [
+                rng.permutation(lvl) for lvl in multigrid_levels if len(lvl) > 0
+            ]
+            path = (
+                np.concatenate(path_segments)
+                if len(path_segments) > 0
+                else np.empty(0, dtype=int)
+            )
+            y_sim_current = np.zeros(len(grid_t), dtype=float)
+            is_simulated = np.zeros(len(grid_t), dtype=bool)
+
+        for node_idx in path:
+            u_0 = grid_t[node_idx]
+
+            if assign_data_to_nodes:
+                # Single Search: Query already assigned/simulated grid nodes only
+                k_s_query_eff = min(
+                    len(grid_t), max((max_hard_samples + max_simulated_nodes) * 4, 32)
+                )
+                d_s, idx_s = tree_grid.query(
+                    u_0, k=k_s_query_eff, distance_upper_bound=radius
+                )
+                if k_s_query_eff == 1:
+                    d_s = np.atleast_1d(d_s)
+                    idx_s = np.atleast_1d(idx_s)
+                in_bounds_s = idx_s < len(grid_t)
+                valid_s = np.zeros(len(idx_s), dtype=bool)
+                valid_s[in_bounds_s] = (
+                    (idx_s[in_bounds_s] != node_idx)
+                    & np.isfinite(d_s[in_bounds_s])
+                    & is_simulated[idx_s[in_bounds_s]]
+                )
+                k_total_cap = max_hard_samples + max_simulated_nodes
+                idx_s = idx_s[valid_s][:k_total_cap]
+                cand_dist = d_s[valid_s][:k_total_cap]
+                cand_coords = grid_t[idx_s]
+                cand_vals = y_sim_current[idx_s]
+                cand_holes = None
+            else:
+                # Step 5(b) - Query hard samples
+                d_h, idx_h = tree_hard.query(
+                    u_0, k=k_h_query, distance_upper_bound=radius
+                )
+                if k_h_query == 1:
+                    d_h = np.atleast_1d(d_h)
+                    idx_h = np.atleast_1d(idx_h)
+                in_bounds_h = idx_h < len(samples_t)
+                valid_h = np.zeros(len(idx_h), dtype=bool)
+                valid_h[in_bounds_h] = np.isfinite(d_h[in_bounds_h])
+                idx_h = idx_h[valid_h][:max_hard_samples]
+                d_h = d_h[valid_h][:max_hard_samples]
+                coords_h = samples_t[idx_h]
+                vals_h = y_samples[idx_h]
+                holes_h = (
+                    [hole_ids_arr[i] for i in idx_h]
+                    if hole_ids_arr is not None
+                    else None
+                )
+
+                # Query previously simulated nodes
+                d_s, idx_s = tree_grid.query(
+                    u_0, k=k_s_query, distance_upper_bound=radius
+                )
+                if k_s_query == 1:
+                    d_s = np.atleast_1d(d_s)
+                    idx_s = np.atleast_1d(idx_s)
+                in_bounds_s = idx_s < len(grid_t)
+                valid_s = np.zeros(len(idx_s), dtype=bool)
+                valid_s[in_bounds_s] = (
+                    (idx_s[in_bounds_s] != node_idx)
+                    & np.isfinite(d_s[in_bounds_s])
+                    & is_simulated[idx_s[in_bounds_s]]
+                )
+                idx_s = idx_s[valid_s][:max_simulated_nodes]
+                d_s = d_s[valid_s][:max_simulated_nodes]
+                coords_s = grid_t[idx_s]
+                vals_s = y_sim_current[idx_s]
+                holes_s = (
+                    [f"sim_{j}" for j in idx_s] if hole_ids_arr is not None else None
+                )
+
+                # Combine candidate conditioning data
+                if len(coords_h) > 0 and len(coords_s) > 0:
+                    cand_coords = np.vstack([coords_h, coords_s])
+                    cand_vals = np.concatenate([vals_h, vals_s])
+                    cand_dist = np.concatenate([d_h, d_s])
+                    s_order = np.argsort(cand_dist)
+                    cand_coords = cand_coords[s_order]
+                    cand_vals = cand_vals[s_order]
+                    cand_dist = cand_dist[s_order]
+                    if hole_ids_arr is not None:
+                        all_holes = list(holes_h) + list(holes_s)
+                        cand_holes = [all_holes[idx] for idx in s_order]
+                    else:
+                        cand_holes = None
+                elif len(coords_h) > 0:
+                    cand_coords = coords_h
+                    cand_vals = vals_h
+                    cand_dist = d_h
+                    cand_holes = holes_h
+                elif len(coords_s) > 0:
+                    cand_coords = coords_s
+                    cand_vals = vals_s
+                    cand_dist = d_s
+                    cand_holes = holes_s
+                else:
+                    cand_coords = np.empty((0, u_0.shape[0]))
+                    cand_vals = np.empty(0)
+                    cand_dist = np.empty(0)
+                    cand_holes = None
+
+            # Step 5(c) - Solve Local Simple Kriging via shared kernel
+            mu_sk, var_sk = _solve_local_simple_kriging_grid(
+                target_coord=u_0,
+                candidate_coords=cand_coords,
+                candidate_values=cand_vals,
+                candidate_distances=cand_dist,
+                candidate_hole_ids=cand_holes,
+                variogram_model=variogram_model,
+                nugget=g_nugget,
+                sill=g_sill,
+                range_param=eff_range,
+                k_neighbors=max_hard_samples + max_simulated_nodes,
+                max_per_sector=max_per_sector,
+                min_sectors=1,
+                max_per_drillhole=max_per_drillhole,
+                mean=0.0,
+            )
+
+            # Step 5(d) - Conditional Gaussian Draw
+            std_sk = np.sqrt(max(0.0, var_sk))
+            sim_val = mu_sk + std_sk * float(rng.standard_normal())
+            y_sim_current[node_idx] = sim_val
+            is_simulated[node_idx] = True
+
+        Y_sim[:, r] = y_sim_current
+
+    # 6. Normal Score Back-Transformation
+    Z_sim = normal_score_back_transform(Y_sim, sorted_z, sorted_y)
+
+    # 7. Extrapolation Masking
+    if mask_extrapolation:
+        inside = is_within_convex_hull(samples, grid)
+        Z_sim[~inside, :] = np.nan
+
+    return Z_sim
+
+
+def sequential_gaussian_block_simulation(
+    samples_xyz: np.ndarray,
+    sample_grades: np.ndarray,
+    block_model: pd.DataFrame,
+    sill: float,
+    range_param: Union[float, Sequence[float], Mapping[str, float]],
+    n_realizations: int = 50,
+    variogram_model: str = "spherical",
+    nugget: float = 0.0,
+    discretization: Tuple[int, int, int] = (4, 4, 2),
+    sample_weights: Optional[np.ndarray] = None,
+    seed: Optional[int] = None,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
+    search_radius: Optional[float] = None,
+    max_hard_samples: int = 12,
+    max_simulated_nodes: int = 12,
+    max_per_sector: Optional[int] = None,
+    max_per_drillhole: Optional[int] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+    assign_data_to_nodes: bool = False,
+    n_multigrids: int = 1,
+) -> np.ndarray:
+    """Generates equiprobable conditional realizations on 3D block support via Sequential Gaussian Simulation.
+
+    Simulates at quasi-point support on discretization sub-points within each block,
+    and linearly averages the simulated point grades within each block to preserve
+    mass balance and correct block dispersion variance (Goovaerts 1997; Ortiz 2019).
+
+    Parameters
+    ----------
+    samples_xyz : np.ndarray
+        Array of shape (N, 3) with drillhole sample coordinates.
+    sample_grades : np.ndarray
+        Array of shape (N,) with continuous raw assay grades.
+    block_model : pd.DataFrame
+        DataFrame with mining block centroids ('x', 'y', 'z') and block dimensions ('dx', 'dy', 'dz').
+    sill : float
+        Variogram partial sill variance c.
+    range_param : float, Sequence[float], or Mapping
+        Variogram practical range a.
+    n_realizations : int, default 50
+        Number of stochastic realizations L to simulate.
+    variogram_model : str, default "spherical"
+        Analytical variogram model type ('spherical', 'exponential', 'gaussian', 'cubic').
+    nugget : float, default 0.0
+        Variogram nugget effect c0.
+    discretization : Tuple[int, int, int], default (4, 4, 2)
+        Discretization resolution (nx, ny, nz) along each axis per block.
+    sample_weights : np.ndarray, optional
+        Declustering weights of shape (N,) for normal score transformation.
+    seed : int, optional
+        Random seed for reproducible Monte Carlo draws.
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Ranges along principal axes for 3D geometric anisotropy.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles (azimuth, dip, plunge) for 3D geometric anisotropy.
+    search_radius : float, optional
+        Maximum spatial search radius for conditioning data.
+    max_hard_samples : int, default 12
+        Maximum number of original drillhole samples to condition each node.
+    max_simulated_nodes : int, default 12
+        Maximum number of previously simulated grid nodes to condition each node.
+    max_per_sector : int, optional
+        Maximum samples per angular sector.
+    max_per_drillhole : int, optional
+        Maximum samples per drillhole trace.
+    sample_hole_ids : Sequence[Any], optional
+        Drillhole trace identifiers for conditioning samples.
+    assign_data_to_nodes : bool, default False
+        If True, pre-assigns drillhole samples to their closest grid nodes, treating them as
+        pre-conditioned nodes and removing them from the simulation path. Replaces the dual
+        search with a single grid search, accelerating execution on dense grids (GSLIB sgsim).
+    n_multigrids : int, default 1
+        Number of dyadic multiple grid levels (Gómez-Hernández & Srivastava 1990; Tran 1994;
+        GSLIB nmult). If > 1, simulates coarse sub-grids first to lock in long-range spatial
+        correlation structures before progressively refining to finer grids.
+
+    Returns
+    -------
+    block_realizations : np.ndarray
+        Array of shape (n_blocks, n_realizations) containing simulated block grades.
+    """
+    req_cols = {"x", "y", "z", "dx", "dy", "dz"}
+    if not req_cols.issubset(block_model.columns):
+        raise ValueError(
+            f"block_model must contain columns {req_cols}, got {list(block_model.columns)}."
+        )
+
+    n_blocks = len(block_model)
+    if n_blocks == 0:
+        return np.zeros((0, n_realizations), dtype=float)
+
+    nx, ny, nz = discretization
+    dx = float(block_model["dx"].iloc[0])
+    dy = float(block_model["dy"].iloc[0])
+    dz = float(block_model["dz"].iloc[0])
+
+    disc_offsets = _generate_block_discretization_offsets(
+        discretization=discretization, block_size=(dx, dy, dz)
+    )
+    block_coords = block_model[["x", "y", "z"]].to_numpy(dtype=float)
+
+    # Discretization sub-points for all blocks of shape (n_blocks * M, 3)
+    all_disc_points = (block_coords[:, None, :] + disc_offsets[None, :, :]).reshape(
+        -1, 3
+    )
+
+    # Simulate quasi-point values at all discretization locations
+    point_sim = sequential_gaussian_grid_simulation(
+        samples_xy=samples_xyz,
+        sample_grades=sample_grades,
+        grid_points=all_disc_points,
+        sill=sill,
+        range_param=range_param,
+        n_realizations=n_realizations,
+        variogram_model=variogram_model,
+        nugget=nugget,
+        sample_weights=sample_weights,
+        seed=seed,
+        anisotropy_ranges=anisotropy_ranges,
+        anisotropy_angles=anisotropy_angles,
+        search_radius=search_radius,
+        max_hard_samples=max_hard_samples,
+        max_simulated_nodes=max_simulated_nodes,
+        max_per_sector=max_per_sector,
+        max_per_drillhole=max_per_drillhole,
+        sample_hole_ids=sample_hole_ids,
+        assign_data_to_nodes=assign_data_to_nodes,
+        n_multigrids=n_multigrids,
+        mask_extrapolation=False,
+    )
+
+    # Linearly upscale simulated point grades to block support
+    return _upscale_realizations_to_blocks(
+        point_realizations=point_sim,
+        n_blocks=n_blocks,
+        points_per_block=len(disc_offsets),
+    )
+
+
+# TODO: is the notion of hardcoding a cutoff grade to rigid? What if we wanted other transform functions? Should we create or use existing functions for the percentiles and stuff? I feel like those could be generally reusable? Are there other places where we kind of hardcode logic like this into it, when maybe we shouldn't? ss
 def compute_etype_mtype_maps(
     realizations: np.ndarray,
     cutoff_grade: Optional[float] = None,
@@ -10384,7 +12651,11 @@ def plot_simulation_realizations_dashboard(
     cutoff_grade: Optional[float] = None,
     grade_unit: str = "% Cu",
     title: Optional[str] = None,
-    figsize: Tuple[float, float] = (14.0, 10.0),
+    figsize: Tuple[float, float] = (14.0, 11.0),
+    sample_coords: Optional[np.ndarray] = None,
+    sample_grades: Optional[np.ndarray] = None,
+    cmap: str = "viridis",
+    uncertainty_cmap: str = "magma",
 ) -> Tuple[plt.Figure, Sequence[plt.Axes]]:
     """Generates a 4-panel comparison dashboard of simulation realizations vs. E-type map.
 
@@ -10392,7 +12663,8 @@ def plot_simulation_realizations_dashboard(
     1. Realization 1 (showing full spatial variance, texture, and extreme values).
     2. Realization 2 (an alternative equiprobable stochastic outcome).
     3. E-Type Map (the smoothed conditional expectation).
-    4. Conditional Uncertainty / Probability of Exceedance Map.
+    4. Conditional Uncertainty: Probability of Exceedance if cutoff_grade is given,
+       or conditional standard deviation.
 
     Parameters
     ----------
@@ -10401,23 +12673,189 @@ def plot_simulation_realizations_dashboard(
     grid_xy : np.ndarray
         Array of shape (M, 2) with spatial coordinates.
     cutoff_grade : float, optional
-        Cut-off grade for probability of exceedance map.
+        Cut-off grade for probability of exceedance map. If None, plots conditional std dev.
     grade_unit : str, default "% Cu"
         Grade unit label.
     title : str, optional
-        Dashboard title.
-    figsize : tuple of float, default (14.0, 10.0)
+        Dashboard super-title.
+    figsize : tuple of float, default (14.0, 11.0)
         Matplotlib figure dimensions.
+    sample_coords : np.ndarray, optional
+        Sample spatial coordinates of shape (N, 2) to overlay.
+    sample_grades : np.ndarray, optional
+        Sample grade values of shape (N,) to color sample points.
+    cmap : str, default "viridis"
+        Colormap for grade panels (1, 2, and 3).
+    uncertainty_cmap : str, default "magma"
+        Colormap for uncertainty panel (4).
 
     Returns
     -------
     Tuple[plt.Figure, Sequence[plt.Axes]]
-        Figure and axes sequence.
+        Figure and axes sequence of 4 subplots.
     """
-    raise NotImplementedError(
-        "Simulation realizations dashboard plotting stub. "
-        "Will visualize realizations vs. smoothed E-type map."
+    real_arr = np.asarray(realizations, dtype=float)
+    grid_arr = np.asarray(grid_xy, dtype=float)
+
+    if real_arr.ndim != 2:
+        raise ValueError(
+            f"realizations must be a 2D array of shape (M, L), got shape {real_arr.shape}"
+        )
+    if grid_arr.ndim != 2 or grid_arr.shape[1] != 2:
+        raise ValueError(
+            f"grid_xy must be a 2D array of shape (M, 2), got shape {grid_arr.shape}"
+        )
+    if real_arr.shape[0] != grid_arr.shape[0]:
+        raise ValueError(
+            f"Point count mismatch: realizations has {real_arr.shape[0]} rows, "
+            f"grid_xy has {grid_arr.shape[0]} rows"
+        )
+
+    n_points, n_real = real_arr.shape
+    r1 = real_arr[:, 0]
+    r2 = real_arr[:, 1] if n_real > 1 else real_arr[:, 0]
+    e_type = np.mean(real_arr, axis=1)
+
+    # Identical scale norm across grade panels (CONTRIBUTING.md Part 1 §5)
+    grade_min = min(
+        float(np.nanmin(r1)), float(np.nanmin(r2)), float(np.nanmin(e_type))
     )
+    grade_max = max(
+        float(np.nanmax(r1)), float(np.nanmax(r2)), float(np.nanmax(e_type))
+    )
+    if sample_grades is not None:
+        sg_arr = np.asarray(sample_grades, dtype=float)
+        grade_min = min(grade_min, float(np.nanmin(sg_arr)))
+        grade_max = max(grade_max, float(np.nanmax(sg_arr)))
+
+    norm_grade = mcolors.Normalize(vmin=grade_min, vmax=grade_max)
+
+    # Uncertainty data
+    if cutoff_grade is not None:
+        uncertainty_vals = np.mean(real_arr >= cutoff_grade, axis=1)
+        norm_unc = mcolors.Normalize(vmin=0.0, vmax=1.0)
+        unc_label = "Probability [0, 1]"
+        unc_title = (
+            f"Probability of Exceedance: P(Grade >= {cutoff_grade:.2f} {grade_unit})"
+        )
+    else:
+        uncertainty_vals = (
+            np.std(real_arr, axis=1, ddof=1) if n_real > 1 else np.zeros(n_points)
+        )
+        norm_unc = mcolors.Normalize(
+            vmin=float(np.nanmin(uncertainty_vals)),
+            vmax=float(np.nanmax(uncertainty_vals)),
+        )
+        unc_label = f"Std Dev ({grade_unit})"
+        unc_title = f"Conditional Uncertainty: Std Dev ({grade_unit})"
+
+    # Check for regular rectangular grid
+    ux = np.unique(grid_arr[:, 0])
+    uy = np.unique(grid_arr[:, 1])
+    is_regular_grid = len(ux) * len(uy) == n_points
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    ax_list = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]]
+
+    def _render_layer(
+        ax: plt.Axes,
+        values: np.ndarray,
+        norm: mcolors.Normalize,
+        cmap_name: str,
+        cbar_label: str,
+    ):
+        if is_regular_grid:
+            idx_x = np.searchsorted(ux, grid_arr[:, 0])
+            idx_y = np.searchsorted(uy, grid_arr[:, 1])
+            grid_2d = np.full((len(uy), len(ux)), np.nan)
+            grid_2d[idx_y, idx_x] = values
+            im = ax.pcolormesh(
+                ux, uy, grid_2d, shading="auto", cmap=cmap_name, norm=norm
+            )
+        else:
+            im = ax.scatter(
+                grid_arr[:, 0],
+                grid_arr[:, 1],
+                c=values,
+                cmap=cmap_name,
+                norm=norm,
+                s=25,
+            )
+        fig.colorbar(im, ax=ax, label=cbar_label)
+        return im
+
+    # Panel 1: Realization 1
+    _render_layer(ax_list[0], r1, norm_grade, cmap, grade_unit)
+    ax_list[0].set_title("Realization 1 (Stochastic Outcome #1)")
+
+    # Panel 2: Realization 2
+    r2_label = (
+        "Realization 2 (Stochastic Outcome #2)"
+        if n_real > 1
+        else "Realization 1 (Single Realization)"
+    )
+    _render_layer(ax_list[1], r2, norm_grade, cmap, grade_unit)
+    ax_list[1].set_title(r2_label)
+
+    # Panel 3: E-Type Map
+    _render_layer(ax_list[2], e_type, norm_grade, cmap, grade_unit)
+    real_vars = np.var(real_arr, axis=0, ddof=1)
+    mean_var = float(np.mean(real_vars)) if len(real_vars) > 0 else 1.0
+    smooth_ratio = float(np.var(e_type, ddof=1)) / mean_var if mean_var > 0 else 1.0
+    ax_list[2].set_title(f"E-Type Map (Conditional Mean, Smoothing={smooth_ratio:.2f})")
+
+    # Panel 4: Uncertainty / Exceedance
+    _render_layer(ax_list[3], uncertainty_vals, norm_unc, uncertainty_cmap, unc_label)
+    ax_list[3].set_title(unc_title)
+
+    # Overlay sample drillholes if supplied
+    if sample_coords is not None:
+        sc = np.asarray(sample_coords, dtype=float)
+        for i in range(3):
+            if sample_grades is not None:
+                ax_list[i].scatter(
+                    sc[:, 0],
+                    sc[:, 1],
+                    c=np.asarray(sample_grades, dtype=float),
+                    norm=norm_grade,
+                    cmap=cmap,
+                    edgecolors="black",
+                    linewidths=0.5,
+                    s=30,
+                    label="Samples",
+                )
+            else:
+                ax_list[i].scatter(
+                    sc[:, 0],
+                    sc[:, 1],
+                    c="red",
+                    edgecolors="black",
+                    linewidths=0.5,
+                    s=25,
+                    label="Samples",
+                )
+            ax_list[i].legend(loc="upper right")
+
+        ax_list[3].scatter(
+            sc[:, 0],
+            sc[:, 1],
+            c="cyan",
+            edgecolors="black",
+            linewidths=0.5,
+            s=25,
+            label="Samples",
+        )
+        ax_list[3].legend(loc="upper right")
+
+    for ax in ax_list:
+        ax.set_xlabel("Easting (m)")
+        ax.set_ylabel("Northing (m)")
+
+    if title is not None:
+        fig.suptitle(title, fontsize=14, y=0.995)
+
+    fig.tight_layout()
+    return fig, ax_list
 
 
 # =============================================================================
@@ -12009,3 +14447,3171 @@ def plot_block_model_grade_uncertainty(
     )
     fig.suptitle(fig_title, fontsize=13, fontweight="bold")
     return fig, axes
+
+
+# =============================================================================
+# PART 1: KRIGING MODEL VALIDATION & CROSS-VALIDATION (CIM MRMR §6.10, SME CH. 4.5)
+# =============================================================================
+
+
+def kriging_cross_validation(
+    samples_xy: np.ndarray,
+    sample_grades: np.ndarray,
+    variogram_model: str,
+    sill: float,
+    range_param: Union[float, Sequence[float], Mapping[str, float]],
+    nugget: float = 0.0,
+    method: Literal["ordinary", "simple"] = "ordinary",
+    simple_kriging_mean: float = 0.0,
+    anisotropy_ranges: Optional[Union[Sequence[float], Mapping[Any, Any]]] = None,
+    anisotropy_angles: Optional[
+        Union[float, Sequence[float], Mapping[Any, Any]]
+    ] = None,
+    search_radius: Optional[float] = None,
+    min_neighbors: int = 1,
+    max_neighbors: int = 16,
+    max_per_sector: Optional[int] = None,
+    max_per_drillhole: Optional[int] = None,
+    sample_hole_ids: Optional[Sequence[Any]] = None,
+) -> pd.DataFrame:
+    """Performs Leave-One-Out (jackknife) cross-validation for Kriging models.
+
+    In accordance with CIM MRMR Best Practice Guidelines (§6.10) and SME Mining Engineering
+    Handbook (§4.5; Rossi & Deutsch 2014, Ch. 8) (TODO: Manually Verify), point cross-validation
+    is the mandatory third pillar of model validation (alongside global bias checks and swath plots).
+    It tests each conditioning sample against its neighbors to validate the spatial continuity model
+    (variogram sill, nugget, range, anisotropy) and neighborhood search parameters.
+
+    Mathematical Formulation:
+    -------------------------
+    For each sample u_alpha in 1, ..., N:
+      1. Remove sample u_alpha from the conditioning dataset.
+      2. Estimate grade Z*(u_alpha) and kriging variance sigma^2_K(u_alpha) using surrounding samples.
+      3. Compute estimation error: e_alpha = Z(u_alpha) - Z*(u_alpha).
+      4. Compute standardized residual: z_alpha = (Z(u_alpha) - Z*(u_alpha)) / sigma_K(u_alpha).
+
+    Regulatory Acceptance Criteria (CIM MRMR §6.10) (TODO: Manually Verify):
+    ------------------------------------------------------------------------
+    - Mean Error (ME): Close to 0.0 (indicates absence of global systematic bias).
+    - Mean Standardized Error (MSE): Close to 0.0.
+    - Variance of Standardized Residuals: Approximately 1.0 (confirms sill and nugget are properly scaled).
+    - Slope of Regression (Actual vs. Estimated): Close to 1.0 (confirms conditional unbiasedness).
+
+    Parameters
+    ----------
+    samples_xy : np.ndarray
+        Array of shape (N, 2) or (N, 3) containing sample spatial coordinates.
+    sample_grades : np.ndarray
+        Array of shape (N,) containing raw or transformed continuous assay grades.
+    variogram_model : str
+        Analytical variogram model ('spherical', 'exponential', 'gaussian', 'cubic').
+    sill : float
+        Variogram partial sill variance C.
+    range_param : float, Sequence[float], or Mapping
+        Variogram practical range a.
+    nugget : float, default 0.0
+        Variogram nugget effect C0.
+    method : {"ordinary", "simple"}, default "ordinary"
+        Kriging estimation method to validate.
+    simple_kriging_mean : float, default 0.0
+        Stationary prior mean m if method="simple".
+    anisotropy_ranges : Sequence[float] or Mapping, optional
+        Ranges along principal axes for geometric anisotropy.
+    anisotropy_angles : float, Sequence[float], or Mapping, optional
+        Rotation angles for geometric anisotropy.
+    search_radius : float, optional
+        Maximum search distance. If None, defaults to 1.5 * effective range.
+    min_neighbors : int, default 1
+        Minimum samples required to compute an estimate.
+    max_neighbors : int, default 16
+        Maximum conditioning samples used for each local system.
+    max_per_sector : int, optional
+        Maximum samples allowed per angular sector.
+    max_per_drillhole : int, optional
+        Maximum samples allowed per drillhole trace.
+    sample_hole_ids : Sequence[Any], optional
+        Drillhole identifiers corresponding to each sample.
+
+    Returns
+    -------
+    pd.DataFrame
+        Cross-validation audit table containing:
+        - 'x', 'y' (and 'z'): Coordinates of the cross-validated sample.
+        - 'actual': True measured grade Z(u_alpha).
+        - 'estimated': Kriging estimate Z*(u_alpha).
+        - 'error': Estimation error e = actual - estimated.
+        - 'kriging_variance': Kriging estimation variance sigma^2_K.
+        - 'kriging_std': Estimation standard deviation sigma_K.
+        - 'standardized_error': Standardized residual z = error / sigma_K.
+        - 'num_neighbors': Number of conditioning samples used.
+        Attached in `.attrs`:
+        - 'mean_error': Global bias metric.
+        - 'mean_absolute_error': MAE.
+        - 'root_mean_square_error': RMSE.
+        - 'mean_standardized_error': MSE.
+        - 'variance_standardized_error': Variance of standardized error (target ~ 1.0).
+        - 'pearson_correlation': Correlation r between actual and estimated.
+        - 'slope_of_regression': Linear regression slope (actual on estimated).
+    """
+    coords = np.asarray(samples_xy, dtype=float)
+    if coords.ndim != 2 or coords.shape[1] not in (2, 3):
+        raise ValueError(
+            f"samples_xy must be a 2D array of shape (N, 2) or (N, 3), got shape {coords.shape}"
+        )
+    grades = np.asarray(sample_grades, dtype=float)
+    if grades.ndim != 1 or len(grades) != len(coords):
+        raise ValueError(
+            f"sample_grades must be a 1D array with length matching samples_xy ({len(coords)}), got {grades.shape}"
+        )
+
+    n_samples = len(coords)
+    if n_samples < 2:
+        raise ValueError(
+            f"At least 2 samples are required for leave-one-out cross-validation, got {n_samples}"
+        )
+
+    if method not in ("ordinary", "simple"):
+        raise ValueError(f"method must be 'ordinary' or 'simple', got '{method}'")
+
+    if min_neighbors < 1:
+        raise ValueError(f"min_neighbors must be >= 1, got {min_neighbors}")
+    if max_neighbors < min_neighbors:
+        raise ValueError(
+            f"max_neighbors ({max_neighbors}) must be >= min_neighbors ({min_neighbors})"
+        )
+    if max_per_sector is not None and max_per_sector <= 0:
+        raise ValueError(f"max_per_sector must be positive, got {max_per_sector}")
+    if max_per_drillhole is not None and max_per_drillhole <= 0:
+        raise ValueError(f"max_per_drillhole must be positive, got {max_per_drillhole}")
+    if search_radius is not None and search_radius <= 0:
+        raise ValueError(f"search_radius must be positive, got {search_radius}")
+
+    if sample_hole_ids is not None and len(sample_hole_ids) != n_samples:
+        raise ValueError(
+            f"sample_hole_ids length ({len(sample_hole_ids)}) must match samples_xy ({n_samples})"
+        )
+
+    base_sill = sill if not isinstance(sill, Mapping) else list(sill.values())[0]
+    base_nugget = (
+        nugget if not isinstance(nugget, Mapping) else list(nugget.values())[0]
+    )
+    base_range = (
+        range_param
+        if not isinstance(range_param, Mapping)
+        else list(range_param.values())[0]
+    )
+
+    if base_sill <= 0:
+        raise ValueError(f"sill must be strictly positive, got {base_sill}")
+    if base_nugget < 0:
+        raise ValueError(f"nugget must be non-negative, got {base_nugget}")
+
+    total_sill = float(base_nugget + base_sill)
+
+    eff_ranges = (
+        anisotropy_ranges
+        if anisotropy_ranges is not None
+        else (
+            range_param if isinstance(range_param, (Sequence, Mapping)) else base_range
+        )
+    )
+    samples_t, eff_range = transform_anisotropic_coordinates(
+        coords, ranges=eff_ranges, angles=anisotropy_angles
+    )
+
+    effective_radius = (
+        float(search_radius) if search_radius is not None else 1.5 * float(eff_range)
+    )
+
+    has_sector_search = (max_per_sector is not None) or (max_per_drillhole is not None)
+    k_query = (
+        min(n_samples, max(max_neighbors * 8, 128))
+        if has_sector_search
+        else min(n_samples, max_neighbors + 1)
+    )
+
+    tree = KDTree(samples_t)
+
+    estimates = np.full(n_samples, np.nan, dtype=float)
+    variances = np.full(n_samples, np.nan, dtype=float)
+    num_neighbors_used = np.zeros(n_samples, dtype=int)
+
+    for i in range(n_samples):
+        target_pt = samples_t[i]
+        dists, idxs = tree.query(
+            target_pt, k=k_query, distance_upper_bound=effective_radius
+        )
+
+        if k_query == 1:
+            dists = np.atleast_1d(dists)
+            idxs = np.atleast_1d(idxs)
+
+        # Exclude sample i itself (jackknife leave-one-out) and invalid upper-bound indices
+        valid_mask = (
+            (idxs < n_samples)
+            & (idxs != i)
+            & np.isfinite(dists)
+            & (dists <= effective_radius)
+        )
+        cand_idxs = idxs[valid_mask]
+        cand_dists = dists[valid_mask]
+
+        if len(cand_idxs) == 0:
+            continue
+
+        if has_sector_search:
+            idx_sel, d_sel = _filter_neighborhood_sectors(
+                candidate_coords=samples_t[cand_idxs],
+                candidate_indices=cand_idxs,
+                candidate_distances=cand_dists,
+                target_coord=target_pt,
+                k_neighbors=max_neighbors,
+                max_per_sector=max_per_sector,
+                min_sectors=1,
+                max_per_drillhole=max_per_drillhole,
+                sample_hole_ids=sample_hole_ids,
+            )
+        else:
+            take = min(max_neighbors, len(cand_idxs))
+            idx_sel = cand_idxs[:take]
+            d_sel = cand_dists[:take]
+
+        if len(idx_sel) < min_neighbors:
+            continue
+
+        c_coords = samples_t[idx_sel]
+        c_vals = grades[idx_sel]
+
+        coords_m, vals_m, h_matrix, d_target_m = _deduplicate_collocated_samples(
+            c_coords, c_vals, target_point=target_pt
+        )
+        if d_target_m is not None:
+            d_sel = d_target_m
+        k_m = len(coords_m)
+
+        if k_m < min_neighbors:
+            continue
+
+        K_m = _theoretical_covariance(
+            h_matrix, variogram_model, base_nugget, base_sill, eff_range
+        )
+        K_m[np.diag_indices(k_m)] += 1e-9
+
+        k0_m = _theoretical_covariance(
+            d_sel, variogram_model, base_nugget, base_sill, eff_range
+        )
+
+        # TODO: later date, is there a better way than this if method check? for when we add more methods? or for arbitrary methods?
+        if method == "ordinary":
+            weights_m, mu_lagrange = _solve_ordinary_kriging_system(
+                K_m, k0_m, clip_negative_weights=False
+            )
+            est_val = float(np.sum(weights_m * vals_m))
+            var_val = float(total_sill - np.sum(weights_m * k0_m) - mu_lagrange)
+        else:
+            try:
+                weights_m = np.linalg.solve(K_m, k0_m)
+            except np.linalg.LinAlgError:
+                weights_m = np.zeros(k_m)
+            est_val = float(
+                simple_kriging_mean + np.sum(weights_m * (vals_m - simple_kriging_mean))
+            )
+            var_val = float(total_sill - np.sum(weights_m * k0_m))
+
+        estimates[i] = est_val
+        variances[i] = max(0.0, var_val)
+        num_neighbors_used[i] = len(idx_sel)
+
+    errors = grades - estimates
+    kriging_stds = np.sqrt(np.maximum(0.0, variances))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        standardized_errors = np.where(
+            kriging_stds > 1e-9, errors / kriging_stds, np.nan
+        )
+
+    valid = np.isfinite(estimates)
+    n_valid = int(np.sum(valid))
+
+    if n_valid > 0:
+        me = float(np.mean(errors[valid]))
+        mae = float(np.mean(np.abs(errors[valid])))
+        rmse = float(np.sqrt(np.mean(errors[valid] ** 2)))
+        valid_std = standardized_errors[valid & np.isfinite(standardized_errors)]
+        mse = float(np.mean(valid_std)) if len(valid_std) > 0 else np.nan
+        var_se = float(np.var(valid_std, ddof=1)) if len(valid_std) > 1 else np.nan
+
+        std_act = float(np.std(grades[valid]))
+        std_est = float(np.std(estimates[valid]))
+        if n_valid > 1 and std_act > 1e-9 and std_est > 1e-9:
+            pearson_r = float(np.corrcoef(grades[valid], estimates[valid])[0, 1])
+        else:
+            pearson_r = np.nan
+
+        var_est = float(np.var(estimates[valid], ddof=1)) if n_valid > 1 else 0.0
+        cov_act_est = (
+            float(np.cov(grades[valid], estimates[valid])[0, 1]) if n_valid > 1 else 0.0
+        )
+        sor = float(cov_act_est / var_est) if var_est > 1e-12 else np.nan
+    else:
+        me = mae = rmse = mse = var_se = pearson_r = sor = np.nan
+
+    out_data = {
+        "x": coords[:, 0],
+        "y": coords[:, 1],
+    }
+    if coords.shape[1] == 3:
+        out_data["z"] = coords[:, 2]
+
+    out_data.update(
+        {
+            "actual": grades,
+            "estimated": estimates,
+            "error": errors,
+            "kriging_variance": variances,
+            "kriging_std": kriging_stds,
+            "standardized_error": standardized_errors,
+            "num_neighbors": num_neighbors_used,
+        }
+    )
+
+    df_out = pd.DataFrame(out_data)
+    df_out.attrs["mean_error"] = me
+    df_out.attrs["mean_absolute_error"] = mae
+    df_out.attrs["root_mean_square_error"] = rmse
+    df_out.attrs["mean_standardized_error"] = mse
+    df_out.attrs["variance_standardized_error"] = var_se
+    df_out.attrs["pearson_correlation"] = pearson_r
+    df_out.attrs["slope_of_regression"] = sor
+    df_out.attrs["method"] = method
+    df_out.attrs["total_samples"] = n_samples
+    df_out.attrs["estimated_samples"] = n_valid
+    df_out.attrs["footnotes"] = [
+        "Leave-One-Out (jackknife) cross-validation performed in accordance with "
+        "CIM MRMR Best Practice Guidelines (§6.10) and SME Mining Engineering Handbook (§4.5) (TODO: Manually Verify).",
+        "Target variance of standardized residuals is ~1.0; values > 1.0 indicate under-estimated sill/nugget, "
+        "values < 1.0 indicate over-estimated sill/nugget.",
+    ]
+
+    return df_out
+
+
+def plot_cross_validation_diagnostics(
+    cv_results: pd.DataFrame,
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (14, 11),
+) -> Tuple[plt.Figure, Any]:
+    """Generates the four-panel regulatory cross-validation diagnostic dashboard.
+
+    In accordance with CIM MRMR §6.10 and SME Mining Engineering Handbook (§4.5)
+    (TODO: Manually Verify), renders:
+    1. Actual vs. Estimated Grade Scatter Plot:
+       - Displays 1:1 line of perfect agreement and linear regression line.
+       - Discloses Pearson correlation r, slope of regression, and RMSE.
+    2. Residual Error vs. Estimated Grade Scatter Plot:
+       - Tests for conditional bias / heteroscedasticity across the grade range.
+    3. Standardized Residuals Q-Q Plot:
+       - Checks whether standardized errors (e / sigma_K) follow theoretical standard normal N(0, 1).
+    4. Estimation Error Distribution Histogram:
+       - Shows error distribution with zero-error reference line and Normal curve fit.
+
+    Parameters
+    ----------
+    cv_results : pd.DataFrame
+        DataFrame generated by kriging_cross_validation containing 'actual', 'estimated',
+        'error', and 'standardized_error'.
+    grade_unit : str, default "% Cu"
+        Grade display unit for axis labeling.
+    title : str, optional
+        Overall dashboard title.
+    figsize : Tuple[float, float], default (14, 11)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Any]
+        Matplotlib figure and array of 4 subplot axes.
+    """
+    req_cols = {"actual", "estimated", "error", "standardized_error"}
+    missing = req_cols - set(cv_results.columns)
+    if missing:
+        raise ValueError(
+            f"cv_results is missing required columns: {sorted(missing)}. "
+            f"Must be generated by kriging_cross_validation."
+        )
+
+    valid_mask = (
+        cv_results["actual"].notna()
+        & cv_results["estimated"].notna()
+        & cv_results["error"].notna()
+    )
+    if not np.any(valid_mask):
+        raise ValueError(
+            "cv_results does not contain any valid (non-NaN) estimated samples to plot."
+        )
+
+    df_valid = cv_results.loc[valid_mask].copy()
+    actual = df_valid["actual"].to_numpy()
+    estimated = df_valid["estimated"].to_numpy()
+    error = df_valid["error"].to_numpy()
+
+    std_err_valid = df_valid["standardized_error"].dropna().to_numpy()
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+
+    # -------------------------------------------------------------------------
+    # Panel (0, 0): Actual vs. Estimated Grade Scatter Plot
+    # -------------------------------------------------------------------------
+    ax00 = axes[0, 0]
+    ax00.scatter(
+        estimated,
+        actual,
+        color="#2b5c8f",
+        alpha=0.75,
+        edgecolors="white",
+        s=45,
+        zorder=3,
+        label="Cross-Validated Samples",
+    )
+
+    min_val = min(float(np.min(estimated)), float(np.min(actual)))
+    max_val = max(float(np.max(estimated)), float(np.max(actual)))
+    span = max_val - min_val
+    plot_min = max(0.0, min_val - 0.05 * span)
+    plot_max = max_val + 0.05 * span
+
+    ax00.plot(
+        [plot_min, plot_max],
+        [plot_min, plot_max],
+        color="#333333",
+        linestyle="--",
+        linewidth=1.5,
+        label="1:1 Identity Line",
+        zorder=2,
+    )
+
+    if len(estimated) >= 2 and np.var(estimated) > 1e-12:
+        slope, intercept, r_val, _, _ = stats.linregress(estimated, actual)
+        x_fit = np.linspace(plot_min, plot_max, 100)
+        y_fit = slope * x_fit + intercept
+        ax00.plot(
+            x_fit,
+            y_fit,
+            color="#d9381e",
+            linestyle="-",
+            linewidth=1.8,
+            label=f"Regression Fit (y = {slope:.2f}x + {intercept:.2f})",
+            zorder=2,
+        )
+    else:
+        slope, intercept, r_val = np.nan, np.nan, np.nan
+
+    rmse = float(np.sqrt(np.mean(error**2)))
+    me = float(np.mean(error))
+    sor = cv_results.attrs.get("slope_of_regression", slope)
+    sor_disp = sor if sor is not None and np.isfinite(sor) else slope
+
+    text_00 = (
+        f"N Samples: {len(estimated)}\n"
+        f"Pearson r: {r_val:.3f}\n"
+        f"Slope of Regr: {sor_disp:.3f}\n"
+        f"RMSE: {rmse:.3f} {grade_unit}\n"
+        f"Mean Error: {me:+.3f} {grade_unit}"
+    )
+    ax00.text(
+        0.04,
+        0.96,
+        text_00,
+        transform=ax00.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        bbox=dict(
+            boxstyle="round,pad=0.5", facecolor="white", alpha=0.85, edgecolor="#cccccc"
+        ),
+    )
+
+    ax00.set_xlim(plot_min, plot_max)
+    ax00.set_ylim(plot_min, plot_max)
+    ax00.set_xlabel(f"Estimated Grade [{grade_unit}]", fontsize=10, fontweight="bold")
+    ax00.set_ylabel(f"Actual Grade [{grade_unit}]", fontsize=10, fontweight="bold")
+    ax00.set_title(
+        "Actual vs. Estimated Grade (Conditional Unbiasedness)",
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax00.grid(True, linestyle=":", alpha=0.6)
+    ax00.legend(loc="lower right", fontsize=8.5)
+
+    # -------------------------------------------------------------------------
+    # Panel (0, 1): Residual Error vs. Estimated Grade (Heteroscedasticity Check)
+    # -------------------------------------------------------------------------
+    ax01 = axes[0, 1]
+    ax01.scatter(
+        estimated,
+        error,
+        color="#4a7c59",
+        alpha=0.75,
+        edgecolors="white",
+        s=45,
+        zorder=3,
+    )
+    ax01.axhline(0.0, color="#333333", linestyle="--", linewidth=1.5, zorder=2)
+
+    if len(estimated) >= 2 and np.var(estimated) > 1e-12:
+        slope_err, intercept_err, r_err, _, _ = stats.linregress(estimated, error)
+        x_err_fit = np.linspace(plot_min, plot_max, 100)
+        y_err_fit = slope_err * x_err_fit + intercept_err
+        ax01.plot(
+            x_err_fit,
+            y_err_fit,
+            color="#d9381e",
+            linestyle="-",
+            linewidth=1.6,
+            label=f"Drift Fit (slope = {slope_err:+.3f})",
+        )
+        ax01.legend(loc="upper right", fontsize=8.5)
+
+    text_01 = (
+        f"Mean Error: {me:+.3f} {grade_unit}\n"
+        f"Error Std Dev: {float(np.std(error)):.3f} {grade_unit}\n"
+        f"Zero-Bias Target: 0.0"
+    )
+    ax01.text(
+        0.04,
+        0.96,
+        text_01,
+        transform=ax01.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        bbox=dict(
+            boxstyle="round,pad=0.5", facecolor="white", alpha=0.85, edgecolor="#cccccc"
+        ),
+    )
+
+    ax01.set_xlim(plot_min, plot_max)
+    ax01.set_xlabel(f"Estimated Grade [{grade_unit}]", fontsize=10, fontweight="bold")
+    ax01.set_ylabel(
+        f"Estimation Error (Actual - Estimated) [{grade_unit}]",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax01.set_title(
+        "Residual Error vs. Estimated Grade (Conditional Bias)",
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax01.grid(True, linestyle=":", alpha=0.6)
+
+    # -------------------------------------------------------------------------
+    # Panel (1, 0): Standardized Residuals Q-Q Plot
+    # -------------------------------------------------------------------------
+    ax10 = axes[1, 0]
+    if len(std_err_valid) >= 3:
+        (osm, osr), (slope_qq, intercept_qq, r_qq) = stats.probplot(
+            std_err_valid, dist="norm"
+        )
+        ax10.scatter(
+            osm,
+            osr,
+            color="#6b4c9a",
+            alpha=0.8,
+            edgecolors="white",
+            s=45,
+            zorder=3,
+            label="Sample Quantiles",
+        )
+        x_qq = np.linspace(float(np.min(osm)), float(np.max(osm)), 100)
+        ax10.plot(
+            x_qq,
+            slope_qq * x_qq + intercept_qq,
+            color="#d9381e",
+            linestyle="--",
+            linewidth=1.8,
+            label="Theoretical Fit",
+            zorder=2,
+        )
+
+        mse = float(np.mean(std_err_valid))
+        var_se = float(np.var(std_err_valid, ddof=1))
+        text_10 = (
+            f"Mean Std Error (MSE): {mse:+.3f} (Target ~ 0.0)\n"
+            f"Var Std Error (Var(SE)): {var_se:.3f} (Target ~ 1.0)\n"
+            f"Normal Correlation: {r_qq:.3f}"
+        )
+        ax10.text(
+            0.04,
+            0.96,
+            text_10,
+            transform=ax10.transAxes,
+            fontsize=9,
+            verticalalignment="top",
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="white",
+                alpha=0.85,
+                edgecolor="#cccccc",
+            ),
+        )
+        ax10.legend(loc="lower right", fontsize=8.5)
+    else:
+        ax10.text(
+            0.5, 0.5, "Insufficient samples for Q-Q plot", ha="center", va="center"
+        )
+
+    ax10.set_xlabel(
+        "Theoretical Normal Quantiles N(0, 1)", fontsize=10, fontweight="bold"
+    )
+    ax10.set_ylabel(
+        "Ordered Standardized Residuals (e / sigma_K)", fontsize=10, fontweight="bold"
+    )
+    ax10.set_title(
+        "Standardized Residuals Q-Q Plot (Variogram Scaling Check)",
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax10.grid(True, linestyle=":", alpha=0.6)
+
+    # -------------------------------------------------------------------------
+    # Panel (1, 1): Estimation Error Distribution Histogram
+    # -------------------------------------------------------------------------
+    ax11 = axes[1, 1]
+    n_bins = max(5, min(30, int(len(error) / 3)))
+    count, bins_hist, _ = ax11.hist(
+        error,
+        bins=n_bins,
+        density=True,
+        color="#457b9d",
+        alpha=0.65,
+        edgecolor="#1d3557",
+        zorder=2,
+        label="Error Histogram",
+    )
+
+    err_mean = float(np.mean(error))
+    err_std = float(np.std(error))
+    if err_std > 1e-9:
+        x_norm = np.linspace(bins_hist[0], bins_hist[-1], 200)
+        y_norm = stats.norm.pdf(x_norm, err_mean, err_std)
+        ax11.plot(
+            x_norm,
+            y_norm,
+            color="#e63946",
+            linewidth=2.0,
+            label=f"Normal Fit (mu={err_mean:.2f}, sigma={err_std:.2f})",
+            zorder=3,
+        )
+
+    ax11.axvline(
+        0.0, color="#333333", linestyle="--", linewidth=1.5, label="Zero Bias", zorder=4
+    )
+    ax11.axvline(
+        err_mean,
+        color="#e63946",
+        linestyle=":",
+        linewidth=1.8,
+        label="Mean Error",
+        zorder=4,
+    )
+
+    skewness = float(stats.skew(error)) if len(error) >= 3 else 0.0
+    kurt = float(stats.kurtosis(error)) if len(error) >= 4 else 0.0
+    text_11 = (
+        f"Mean Error: {err_mean:+.3f} {grade_unit}\n"
+        f"Std Dev: {err_std:.3f} {grade_unit}\n"
+        f"Skewness: {skewness:+.2f}\n"
+        f"Kurtosis: {kurt:+.2f}"
+    )
+    ax11.text(
+        0.04,
+        0.96,
+        text_11,
+        transform=ax11.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        bbox=dict(
+            boxstyle="round,pad=0.5", facecolor="white", alpha=0.85, edgecolor="#cccccc"
+        ),
+    )
+
+    ax11.set_xlabel(
+        f"Estimation Error (Actual - Estimated) [{grade_unit}]",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax11.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
+    ax11.set_title("Estimation Error Distribution", fontsize=11, fontweight="bold")
+    ax11.grid(True, linestyle=":", alpha=0.6)
+    ax11.legend(loc="upper right", fontsize=8.5)
+
+    dashboard_title = (
+        title
+        or "Kriging Model Cross-Validation Diagnostics (CIM MRMR §6.10, SME Ch. 4.5)"
+    )
+    fig.suptitle(dashboard_title, fontsize=13, fontweight="bold", y=0.99)
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.97])
+
+    return fig, axes
+
+
+def compare_model_estimation_methods(
+    samples_xy: np.ndarray,
+    sample_grades: np.ndarray,
+    block_model: pd.DataFrame,
+    cutoff_grades: Sequence[float],
+    grade_cols: Mapping[str, str],
+    sample_weights: Optional[np.ndarray] = None,
+    grade_unit: str = "% Cu",
+    tonnes_col: str = "tonnes",
+    metal_factor: float = 0.01,
+) -> pd.DataFrame:
+    """Produces the global statistical bias and method comparison table.
+
+    Mandated by CIM MRMR Best Practice Guidelines (§6.10) and JORC Code (2012 Table 1)
+    (TODO: Manually Verify), compares block estimates across multiple estimation techniques
+    against the declustered sample distribution to detect global over/under-estimation and smoothing severity:
+    - Declustered Samples (global spatial benchmark)
+    - Nearest Neighbor (NN: unbiased global block model benchmark with zero smoothing)
+    - Inverse Distance Weighting (IDW)
+    - Ordinary Kriging (OK)
+    - Simple Kriging (SK)
+
+    Parameters
+    ----------
+    samples_xy : np.ndarray
+        Array of shape (N, 2) or (N, 3) with drillhole sample coordinates.
+    sample_grades : np.ndarray
+        Array of shape (N,) with continuous raw assay grades.
+    block_model : pd.DataFrame
+        Block model DataFrame containing estimated grade columns and tonnage.
+    cutoff_grades : Sequence[float]
+        Sequence of economic cut-off grades to evaluate (e.g., [0.0, 0.3, 0.5, 0.8]).
+        Required without default (CONTRIBUTING.md).
+    grade_cols : Mapping[str, str]
+        Mapping of method display name to block_model column name, e.g.:
+        {'Nearest Neighbor': 'grade_nn', 'Ordinary Kriging': 'grade_ok', 'IDW': 'grade_idw'}.
+    sample_weights : np.ndarray, optional
+        Cell declustering weights for conditioning samples. If None, unweighted mean is used.
+    grade_unit : str, default "% Cu"
+        Grade display unit.
+    tonnes_col : str, default "tonnes"
+        Block model column containing block tonnage.
+    metal_factor : float, default 0.01
+        Multiplier converting grade * tonnes into metal units (0.01 for %, 1e-6 for g/t).
+
+    Returns
+    -------
+    pd.DataFrame
+        Method comparison table reporting Tonnage (Mt), Mean Grade, Contained Metal,
+        and relative % differences against Nearest Neighbor benchmark per method across
+        all specified cut-off grades.
+        Attached in `.attrs`:
+        - 'declustered_sample_mean': Declustered sample mean at zero cut-off.
+        - 'naive_sample_mean': Unweighted sample mean.
+        - 'global_bias_pct': Mapping of method name to global bias % vs declustered samples.
+        - 'nn_benchmark_method': Method identified as the NN benchmark.
+        - 'footnotes': Compliance disclosures conforming to CIM MRMR §6.10 (TODO: Manually Verify).
+    """
+    if len(cutoff_grades) == 0:
+        raise ValueError(
+            "cutoff_grades must be a non-empty sequence of cut-off grades."
+        )
+
+    if tonnes_col not in block_model.columns:
+        raise ValueError(
+            f"tonnes_col '{tonnes_col}' not found in block_model DataFrame."
+        )
+
+    total_model_tonnes = float(block_model[tonnes_col].sum())
+    if total_model_tonnes <= 0:
+        raise ValueError(
+            f"Total tonnage in block_model['{tonnes_col}'] must be strictly positive."
+        )
+
+    for method_name, col_name in grade_cols.items():
+        if col_name not in block_model.columns:
+            raise ValueError(
+                f"Grade column '{col_name}' for method '{method_name}' not found in block_model."
+            )
+
+    s_grades = np.asarray(sample_grades, dtype=float)
+    if len(s_grades) == 0:
+        raise ValueError("sample_grades must not be empty.")
+
+    if sample_weights is not None:
+        weights = np.asarray(sample_weights, dtype=float)
+        if len(weights) != len(s_grades):
+            raise ValueError(
+                f"sample_weights length ({len(weights)}) must match sample_grades ({len(s_grades)})."
+            )
+        w_sum = np.sum(weights)
+        if w_sum <= 0:
+            raise ValueError("Sum of sample_weights must be strictly positive.")
+        w_norm = weights / w_sum
+    else:
+        w_norm = np.ones(len(s_grades), dtype=float) / len(s_grades)
+
+    declustered_sample_mean = float(np.sum(w_norm * s_grades))
+    naive_sample_mean = float(np.mean(s_grades))
+
+    # Identify Nearest Neighbor benchmark method
+    nn_method_name = None
+    for m_name, c_name in grade_cols.items():
+        if (
+            "nearest" in m_name.lower()
+            or "nn" in m_name.lower()
+            or "nearest" in c_name.lower()
+            or "nn" in c_name.lower()
+        ):
+            nn_method_name = m_name
+            break
+
+    sorted_cutoffs = sorted(cutoff_grades)
+
+    # First pass: compute metrics for all methods across all cutoffs
+    records = []
+    # Dict to look up NN metrics: cutoff -> {ore_tonnes, mean_grade, contained_metal}
+    nn_metrics = {}
+
+    for c in sorted_cutoffs:
+        for method_name, col_name in grade_cols.items():
+            vals = block_model[col_name].to_numpy(dtype=float)
+            tonnes = block_model[tonnes_col].to_numpy(dtype=float)
+
+            valid_mask = np.isfinite(vals) & (vals >= c)
+            ore_tonnes = float(np.sum(tonnes[valid_mask]))
+            ore_metal = float(
+                np.sum(tonnes[valid_mask] * vals[valid_mask] * metal_factor)
+            )
+            mean_grade = (
+                float(np.sum(tonnes[valid_mask] * vals[valid_mask]) / ore_tonnes)
+                if ore_tonnes > 0.0
+                else 0.0
+            )
+
+            rec = {
+                "cutoff": c,
+                "method": method_name,
+                "ore_tonnes": ore_tonnes,
+                "mean_grade": mean_grade,
+                "contained_metal": ore_metal,
+            }
+            records.append(rec)
+
+            if method_name == nn_method_name:
+                nn_metrics[c] = {
+                    "ore_tonnes": ore_tonnes,
+                    "mean_grade": mean_grade,
+                    "contained_metal": ore_metal,
+                }
+
+    # Second pass: calculate relative % differences vs NN benchmark
+    for rec in records:
+        c = rec["cutoff"]
+        if nn_method_name is not None and c in nn_metrics:
+            ref = nn_metrics[c]
+            rec["tonnes_diff_pct_vs_nn"] = (
+                float(
+                    (rec["ore_tonnes"] - ref["ore_tonnes"]) / ref["ore_tonnes"] * 100.0
+                )
+                if ref["ore_tonnes"] > 0
+                else 0.0
+            )
+            rec["grade_diff_pct_vs_nn"] = (
+                float(
+                    (rec["mean_grade"] - ref["mean_grade"]) / ref["mean_grade"] * 100.0
+                )
+                if ref["mean_grade"] > 0
+                else 0.0
+            )
+            rec["metal_diff_pct_vs_nn"] = (
+                float(
+                    (rec["contained_metal"] - ref["contained_metal"])
+                    / ref["contained_metal"]
+                    * 100.0
+                )
+                if ref["contained_metal"] > 0
+                else 0.0
+            )
+        else:
+            rec["tonnes_diff_pct_vs_nn"] = np.nan
+            rec["grade_diff_pct_vs_nn"] = np.nan
+            rec["metal_diff_pct_vs_nn"] = np.nan
+
+    res_df = pd.DataFrame(records)
+
+    # Calculate global bias at zero cut-off (or minimum cut-off) vs Declustered Sample Mean
+    min_cutoff = sorted_cutoffs[0]
+    global_bias_dict = {}
+    for method_name in grade_cols.keys():
+        m_row = res_df.loc[
+            (res_df["cutoff"] == min_cutoff) & (res_df["method"] == method_name)
+        ]
+        if not m_row.empty:
+            m_grade = float(m_row["mean_grade"].iloc[0])
+            bias_pct = (
+                float(
+                    (m_grade - declustered_sample_mean)
+                    / declustered_sample_mean
+                    * 100.0
+                )
+                if declustered_sample_mean > 0
+                else np.nan
+            )
+            global_bias_dict[method_name] = bias_pct
+
+    res_df.attrs["declustered_sample_mean"] = declustered_sample_mean
+    res_df.attrs["naive_sample_mean"] = naive_sample_mean
+    res_df.attrs["global_bias_pct"] = global_bias_dict
+    res_df.attrs["nn_benchmark_method"] = nn_method_name
+    res_df.attrs["footnotes"] = [
+        "Model estimation method comparison in accordance with CIM MRMR Best Practice Guidelines (§6.10) "
+        "and JORC Code (2012 Table 1) (TODO: Manually Verify).",
+        f"Global Declustered Sample Mean = {declustered_sample_mean:.3f} {grade_unit} "
+        f"(Naive Sample Mean = {naive_sample_mean:.3f} {grade_unit}).",
+        "Nearest Neighbor (NN) represents the declustered, volumetrically-weighted block model benchmark "
+        "with zero spatial smoothing (CIM MRMR §6.10).",
+        "Global bias at zero cut-off within +/- 2% to +/- 5% indicates acceptable global calibration; "
+        "biases exceeding +/- 5% require investigation into search neighborhood parameters.",
+    ]
+
+    return res_df
+
+
+# =============================================================================
+# PART 2: DRILLHOLE ASSAY QA/QC SUITE (NI 43-101 ITEM 11 & JORC TABLE 1 SEC 1)
+# =============================================================================
+
+
+def analyze_crm_standards(
+    assay_df: pd.DataFrame,
+    standard_id_col: str,
+    grade_col: str,
+    certified_values: Mapping[str, Mapping[str, float]],
+    date_or_seq_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """Evaluates Certified Reference Material (CRM / Standard) assay accuracy and drift.
+
+    In accordance with CIM MRMR Best Practice Guidelines (2019, Section 3 on Data
+    Verification and QA/QC) (TODO: Manually Verify), SME Mining Engineering Handbook
+    (3rd Ed., Section 4.2) (TODO: Manually Verify), and NI 43-101 Form 43-101F1 Item 11
+    (TODO: Manually Verify), evaluates analytical laboratory accuracy, instrument calibration,
+    and analytical drift using standard Shewhart control chart rules.
+
+    Failure Criteria (CIM MRMR §3.3; Long 1998; SME §4.2) (TODO: Manually Verify):
+    ------------------------------------------------------------------------------
+    - Pass: Assayed grade within +/- 2.0*sigma of certified mean (|z| <= 2.0).
+    - Warning (+/-2s): Single assay between +/- 2.0*sigma and +/- 3.0*sigma (2.0 < |z| <= 3.0).
+    - Consecutive Warning Failure: Two consecutive assays > 2.0*sigma on the same side
+      of the mean for the same standard (indicates analytical drift or instrument recalibration error).
+    - Critical Failure (+/-3s): Single assay deviating beyond +/- 3.0*sigma from certified mean (|z| > 3.0).
+
+    Parameters
+    ----------
+    assay_df : pd.DataFrame
+        DataFrame containing assay records including CRM standard sample insertions.
+    standard_id_col : str
+        Column identifying the CRM standard ID (e.g., 'OREAS 501', 'CDN-GS-1P5').
+    grade_col : str
+        Column containing laboratory assayed grades.
+    certified_values : Mapping[str, Mapping[str, float]]
+        Dictionary mapping standard IDs to certified values:
+        {'OREAS 501': {'mean': 1.25, 'std': 0.04}, ...}.
+        Both 'mean' and 'std' must be strictly positive floats.
+    date_or_seq_col : str, optional
+        Column containing assay date, submission batch, or sample sequence order.
+        If provided, entries are sorted chronologically per standard to detect drift.
+
+    Returns
+    -------
+    pd.DataFrame
+        CRM audit table with columns:
+        - standard_id : str
+        - measured_grade : float
+        - certified_mean : float
+        - certified_std : float
+        - z_score : float, (measured - mean) / std
+        - relative_error_pct : float, (measured - mean) / mean * 100
+        - status : str, 'Pass', 'Warning (+/-2s)', 'Failure (+/-3s)', or 'Failure (2 Consecutive +/-2s)'
+        - is_pass : bool
+        - is_warning : bool
+        - is_failure : bool
+        Attached in `.attrs`:
+        - 'summary_by_standard' : pd.DataFrame summarizing count, certified mean/std, measured
+          mean/std, mean bias %, pass count, failure count, and pass rate % per standard.
+        - 'total_crm_samples' : int
+        - 'overall_pass_rate_pct' : float
+        - 'overall_failure_count' : int
+        - 'compliance_verdict' : 'PASSED' (if overall pass rate >= 98% and no unresolved failures)
+          or 'ACTION REQUIRED: Bias or Excessive Failure Detected'
+        - 'footnotes' : list of compliance citations with (TODO: Manually Verify).
+    """
+    if not isinstance(assay_df, pd.DataFrame):
+        raise TypeError(f"assay_df must be a pandas DataFrame, got {type(assay_df)}")
+    if standard_id_col not in assay_df.columns:
+        raise ValueError(f"standard_id_col '{standard_id_col}' not found in assay_df")
+    if grade_col not in assay_df.columns:
+        raise ValueError(f"grade_col '{grade_col}' not found in assay_df")
+    if date_or_seq_col is not None and date_or_seq_col not in assay_df.columns:
+        raise ValueError(f"date_or_seq_col '{date_or_seq_col}' not found in assay_df")
+    if not certified_values or not isinstance(certified_values, (dict, Mapping)):
+        raise ValueError("certified_values must be a non-empty mapping of standard IDs to certified values")
+
+    for sid, vals in certified_values.items():
+        if not isinstance(vals, (dict, Mapping)) or "mean" not in vals or "std" not in vals:
+            raise ValueError(f"Standard '{sid}' in certified_values must contain 'mean' and 'std' keys")
+        if vals["mean"] <= 0 or vals["std"] <= 0:
+            raise ValueError(f"Standard '{sid}' certified mean and std must be strictly positive (> 0)")
+
+    # Filter for rows matching certified standards
+    valid_mask = (
+        assay_df[standard_id_col].isin(certified_values.keys())
+        & assay_df[grade_col].notna()
+        & np.isfinite(pd.to_numeric(assay_df[grade_col], errors="coerce"))
+    )
+    df_crm = assay_df[valid_mask].copy()
+    if len(df_crm) == 0:
+        raise ValueError(
+            f"No valid CRM standard samples found matching certified standard IDs: {list(certified_values.keys())}"
+        )
+
+    if date_or_seq_col is not None:
+        df_crm = df_crm.sort_values(by=date_or_seq_col).reset_index(drop=True)
+    else:
+        df_crm = df_crm.reset_index(drop=True)
+
+    records = []
+    # Process per standard to evaluate consecutive warnings
+    for std_id in certified_values.keys():
+        std_mask = df_crm[standard_id_col] == std_id
+        if not std_mask.any():
+            continue
+        sub_df = df_crm[std_mask]
+        c_mean = float(certified_values[std_id]["mean"])
+        c_std = float(certified_values[std_id]["std"])
+
+        prev_warning_side = 0  # +1 if > +2s, -1 if < -2s, 0 otherwise
+
+        for idx, row in sub_df.iterrows():
+            m_grade = float(row[grade_col])
+            z = (m_grade - c_mean) / c_std
+            rel_err_pct = ((m_grade - c_mean) / c_mean) * 100.0
+
+            # Shewhart status determination
+            if abs(z) > 3.0:
+                status = "Failure (+/-3s)"
+                is_fail = True
+                is_warn = False
+                prev_warning_side = 0
+            elif 2.0 < z <= 3.0:
+                if prev_warning_side == 1:
+                    status = "Failure (2 Consecutive +/-2s)"
+                    is_fail = True
+                    is_warn = False
+                    prev_warning_side = 0
+                else:
+                    status = "Warning (+/-2s)"
+                    is_fail = False
+                    is_warn = True
+                    prev_warning_side = 1
+            elif -3.0 <= z < -2.0:
+                if prev_warning_side == -1:
+                    status = "Failure (2 Consecutive +/-2s)"
+                    is_fail = True
+                    is_warn = False
+                    prev_warning_side = 0
+                else:
+                    status = "Warning (+/-2s)"
+                    is_fail = False
+                    is_warn = True
+                    prev_warning_side = -1
+            else:
+                status = "Pass"
+                is_fail = False
+                is_warn = False
+                prev_warning_side = 0
+
+            rec = {
+                "orig_idx": idx,
+                "standard_id": str(std_id),
+                "measured_grade": m_grade,
+                "certified_mean": c_mean,
+                "certified_std": c_std,
+                "z_score": float(z),
+                "relative_error_pct": float(rel_err_pct),
+                "status": status,
+                "is_pass": bool(not is_warn and not is_fail),
+                "is_warning": bool(is_warn),
+                "is_failure": bool(is_fail),
+            }
+            if date_or_seq_col is not None:
+                rec[date_or_seq_col] = row[date_or_seq_col]
+            records.append(rec)
+
+    res_df = pd.DataFrame(records).sort_values("orig_idx").drop(columns=["orig_idx"]).reset_index(drop=True)
+
+    # Compute summary per standard
+    std_summaries = []
+    for std_id in sorted(res_df["standard_id"].unique()):
+        s_df = res_df[res_df["standard_id"] == std_id]
+        c_mean = float(s_df["certified_mean"].iloc[0])
+        c_std = float(s_df["certified_std"].iloc[0])
+        m_mean = float(s_df["measured_grade"].mean())
+        m_std = float(s_df["measured_grade"].std(ddof=1)) if len(s_df) > 1 else 0.0
+        bias_pct = ((m_mean - c_mean) / c_mean) * 100.0 if c_mean > 0 else 0.0
+        n_tot = len(s_df)
+        n_pass = int(s_df["is_pass"].sum())
+        n_warn = int(s_df["is_warning"].sum())
+        n_fail = int(s_df["is_failure"].sum())
+        pass_rate = (n_pass / n_tot) * 100.0 if n_tot > 0 else 0.0
+
+        std_summaries.append({
+            "standard_id": std_id,
+            "sample_count": n_tot,
+            "certified_mean": c_mean,
+            "certified_std": c_std,
+            "measured_mean": m_mean,
+            "measured_std": m_std,
+            "mean_bias_pct": bias_pct,
+            "pass_count": n_pass,
+            "warning_count": n_warn,
+            "failure_count": n_fail,
+            "pass_rate_pct": pass_rate,
+            "status": "Acceptable" if pass_rate >= 95.0 and abs(bias_pct) <= 5.0 else "Action Required",
+        })
+
+    summary_df = pd.DataFrame(std_summaries)
+
+    tot_crm = len(res_df)
+    tot_pass = int(res_df["is_pass"].sum())
+    tot_warn = int(res_df["is_warning"].sum())
+    tot_fail = int(res_df["is_failure"].sum())
+    overall_pass_rate = (tot_pass / tot_crm) * 100.0 if tot_crm > 0 else 0.0
+
+    verdict = (
+        "PASSED"
+        if overall_pass_rate >= 98.0 and tot_fail == 0
+        else ("ACCEPTABLE WITH MONITORING" if overall_pass_rate >= 95.0 else "ACTION REQUIRED: Lab Re-Assay Triggered")
+    )
+
+    res_df.attrs["summary_by_standard"] = summary_df
+    res_df.attrs["total_crm_samples"] = tot_crm
+    res_df.attrs["overall_pass_count"] = tot_pass
+    res_df.attrs["overall_warning_count"] = tot_warn
+    res_df.attrs["overall_failure_count"] = tot_fail
+    res_df.attrs["overall_pass_rate_pct"] = overall_pass_rate
+    res_df.attrs["compliance_verdict"] = verdict
+    res_df.attrs["footnotes"] = [
+        "CRM analysis conducted under CIM MRMR Best Practice Guidelines (2019, Section 3) (TODO: Manually Verify).",
+        "Shewhart control limits: Warning = +/- 2*sigma; Failure = +/- 3*sigma or two consecutive +/- 2*sigma (TODO: Manually Verify).",
+        "Statutory compliance under NI 43-101 Form 43-101F1 Item 11 and JORC Code (2012, Table 1 Section 1) (TODO: Manually Verify).",
+        "Target industry acceptance: overall pass rate >= 98.0% with zero unresolved critical failures (TODO: Manually Verify).",
+    ]
+
+    return res_df
+
+
+def plot_crm_control_chart(
+    crm_analysis_results: pd.DataFrame,
+    standard_name: str,
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (14, 6),
+) -> Tuple[plt.Figure, Any]:
+    """Renders an official Shewhart Quality Control Chart for a Certified Reference Material.
+
+    Mandated by NI 43-101 Form 43-101F1 Item 11 and JORC Table 1 Section 1 (TODO: Manually Verify),
+    displays chronological assay measurements against certified mean, warning (+/- 2*sigma), and
+    failure (+/- 3*sigma) control thresholds. Color-codes compliant assays, warning flags, and
+    critical failures.
+
+    Parameters
+    ----------
+    crm_analysis_results : pd.DataFrame
+        Audited table produced by analyze_crm_standards.
+    standard_name : str
+        Name of the specific standard to plot.
+    grade_unit : str, default "% Cu"
+        Grade display unit.
+    title : str, optional
+        Plot title. If None, automatically formatted with standard name.
+    figsize : Tuple[float, float], default (14, 6)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Any]
+        Matplotlib figure and axes.
+    """
+    if not isinstance(crm_analysis_results, pd.DataFrame):
+        raise TypeError(f"crm_analysis_results must be a DataFrame, got {type(crm_analysis_results)}")
+    if "standard_id" not in crm_analysis_results.columns:
+        raise ValueError("crm_analysis_results must contain 'standard_id' column")
+
+    std_df = crm_analysis_results[crm_analysis_results["standard_id"] == standard_name].copy()
+    if len(std_df) == 0:
+        available = list(crm_analysis_results["standard_id"].unique()) if len(crm_analysis_results) > 0 else []
+        raise ValueError(
+            f"Standard '{standard_name}' not found in crm_analysis_results. Available standards: {available}"
+        )
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    c_mean = float(std_df["certified_mean"].iloc[0])
+    c_std = float(std_df["certified_std"].iloc[0])
+    x = np.arange(1, len(std_df) + 1)
+    y = std_df["measured_grade"].values
+
+    # Control Limits
+    plus_2s = c_mean + 2.0 * c_std
+    minus_2s = c_mean - 2.0 * c_std
+    plus_3s = c_mean + 3.0 * c_std
+    minus_3s = c_mean - 3.0 * c_std
+
+    # Plot sequence line connecting points
+    ax.plot(x, y, color="#9e9e9e", linestyle="-", linewidth=1.2, alpha=0.7, zorder=2)
+
+    # Plot horizontal control lines
+    ax.axhline(c_mean, color="#2e7d32", linestyle="-", linewidth=2.0, label=f"Certified Mean: {c_mean:.3f} {grade_unit}", zorder=1)
+    ax.axhline(plus_2s, color="#ef6c00", linestyle="--", linewidth=1.5, label="±2σ Warning Limit", zorder=1)
+    ax.axhline(minus_2s, color="#ef6c00", linestyle="--", linewidth=1.5, zorder=1)
+    ax.axhline(plus_3s, color="#c62828", linestyle="-", linewidth=1.8, label="±3σ Failure Limit", zorder=1)
+    ax.axhline(minus_3s, color="#c62828", linestyle="-", linewidth=1.8, zorder=1)
+
+    # Shaded control zones
+    x_span = [0.5, len(std_df) + 0.5]
+    ax.fill_between(x_span, minus_2s, plus_2s, color="#e8f5e9", alpha=0.4, label="Acceptable (±2σ)")
+    ax.fill_between(x_span, plus_2s, plus_3s, color="#fff3e0", alpha=0.6, label="Warning (2σ to 3σ)")
+    ax.fill_between(x_span, minus_3s, minus_2s, color="#fff3e0", alpha=0.6)
+    y_top = max(np.max(y) * 1.05, plus_3s + c_std)
+    y_bot = min(np.min(y) * 0.95, minus_3s - c_std)
+    ax.fill_between(x_span, plus_3s, y_top, color="#ffebee", alpha=0.5, label="Failure (>3σ)")
+    ax.fill_between(x_span, y_bot, minus_3s, color="#ffebee", alpha=0.5)
+
+    # Plot points by status
+    pass_mask = std_df["status"] == "Pass"
+    warn_mask = std_df["status"].str.startswith("Warning")
+    fail_mask = std_df["status"].str.startswith("Failure")
+
+    if pass_mask.any():
+        ax.scatter(x[pass_mask], y[pass_mask], color="#2e7d32", marker="o", s=45, zorder=4, label=f"Pass ({pass_mask.sum()})")
+    if warn_mask.any():
+        ax.scatter(x[warn_mask], y[warn_mask], color="#ef6c00", marker="s", s=65, zorder=5, edgecolor="black", label=f"Warning ({warn_mask.sum()})")
+    if fail_mask.any():
+        ax.scatter(x[fail_mask], y[fail_mask], color="#c62828", marker="X", s=90, zorder=6, edgecolor="black", label=f"Failure ({fail_mask.sum()})")
+
+    ax.set_xlim(0.5, len(std_df) + 0.5)
+    ax.set_ylim(y_bot, y_top)
+
+    # Summary callout box
+    n_tot = len(std_df)
+    n_pass = int(pass_mask.sum())
+    n_fail = int(fail_mask.sum())
+    pass_pct = (n_pass / n_tot) * 100.0 if n_tot > 0 else 0.0
+    m_mean = float(np.mean(y))
+    m_std = float(np.std(y, ddof=1)) if n_tot > 1 else 0.0
+    bias_pct = ((m_mean - c_mean) / c_mean) * 100.0 if c_mean > 0 else 0.0
+
+    callout_text = (
+        f"CRM Standard: {standard_name}\n"
+        f"Total Samples (N): {n_tot}\n"
+        f"Certified: {c_mean:.3f} ± {c_std:.3f} {grade_unit}\n"
+        f"Measured: {m_mean:.3f} ± {m_std:.3f} {grade_unit}\n"
+        f"Mean Bias: {bias_pct:+.2f}%\n"
+        f"Pass Rate: {pass_pct:.1f}%\n"
+        f"Critical Failures: {n_fail}\n"
+        f"Status: {'COMPLIANT' if pass_pct >= 95.0 and n_fail == 0 else 'ACTION REQUIRED'}"
+    )
+    ax.text(
+        0.02,
+        0.95,
+        callout_text,
+        transform=ax.transAxes,
+        verticalalignment="top",
+        fontsize=9,
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffffff", edgecolor="#b0bec5", alpha=0.9),
+        zorder=10,
+    )
+
+    ax.set_xlabel("Assay Submission / Insertion Sequence", fontsize=11, fontweight="bold")
+    ax.set_ylabel(f"Assayed Grade ({grade_unit})", fontsize=11, fontweight="bold")
+    chart_title = title or f"Shewhart Control Chart - CRM Standard {standard_name} (NI 43-101 / JORC Compliance)"
+    ax.set_title(chart_title, fontsize=12, fontweight="bold", pad=12)
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend(loc="upper right", framealpha=0.95, fontsize=8)
+
+    plt.tight_layout()
+    return fig, ax
+
+
+def analyze_analytical_blanks(
+    assay_df: pd.DataFrame,
+    blank_flag_col: str,
+    grade_col: str,
+    detection_limit: float,
+    failure_multiplier: float = 5.0,
+    warning_multiplier: float = 3.0,
+    date_or_seq_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """Evaluates analytical coarse and pulp blanks for sample carryover / cross-contamination.
+
+    In accordance with CIM MRMR Best Practice Guidelines (2019, Section 3) (TODO: Manually Verify),
+    SME Mining Engineering Handbook (3rd Ed., Section 4.2) (TODO: Manually Verify), and NI 43-101
+    Form 43-101F1 Item 11 (TODO: Manually Verify), unmineralized coarse and pulp blanks inserted
+    into sample batches detect cross-contamination during laboratory crushing, pulverizing, and
+    fire assay / ICP digestions.
+
+    Regulatory Acceptance & Failure Standards (CIM MRMR §3.2; SME §4.2) (TODO: Manually Verify):
+    --------------------------------------------------------------------------------------------
+    - Pass: Assayed blank grade <= warning_multiplier * LLD (typically <= 3x LLD).
+    - Warning: Blank grade between warning_multiplier * LLD and failure_multiplier * LLD (3x to 5x LLD).
+    - Failure: Blank grade > failure_multiplier * LLD (typically > 5x LLD).
+      Critical carryover failure indicates contamination from preceding high-grade samples and
+      mandates re-assay of the affected analytical batch.
+
+    Parameters
+    ----------
+    assay_df : pd.DataFrame
+        DataFrame containing assay records including blank insertions.
+    blank_flag_col : str
+        Column identifying blank sample insertions (boolean, integer 1, or string 'Blank').
+    grade_col : str
+        Assayed grade column name.
+    detection_limit : float
+        Analytical Lower Limit of Detection (LLD) for the commodity (> 0).
+    failure_multiplier : float, default 5.0
+        Multiple of detection limit defining critical contamination failure (standard is 5x LLD).
+    warning_multiplier : float, default 3.0
+        Multiple of detection limit defining contamination warning (standard is 3x LLD).
+    date_or_seq_col : str, optional
+        Date or sample sequence column for chronological tracking.
+
+    Returns
+    -------
+    pd.DataFrame
+        Blank evaluation audit table with columns:
+        - measured_grade : float
+        - detection_limit : float
+        - warning_threshold : float
+        - failure_threshold : float
+        - is_contamination_warning : bool
+        - is_contamination_failure : bool
+        - is_pass : bool
+        - status : str ('Pass', 'Warning (>3x LLD)', 'Failure (>5x LLD)')
+        - preceding_grade : float (grade of immediately preceding sample in stream, or NaN)
+        - carryover_ratio_pct : float ((measured - LLD) / preceding_grade * 100 if preceding > 0 else 0.0)
+        Attached in `.attrs`:
+        - 'total_blanks' : int
+        - 'pass_count' : int
+        - 'warning_count' : int
+        - 'failure_count' : int
+        - 'pass_rate_pct' : float
+        - 'failure_rate_pct' : float
+        - 'max_blank_grade' : float
+        - 'compliance_verdict' : 'PASSED' (if failure rate <= 1.0%) or 'ACTION REQUIRED: Cross-Contamination Detected'
+        - 'footnotes' : list of compliance citations with (TODO: Manually Verify).
+    """
+    if not isinstance(assay_df, pd.DataFrame):
+        raise TypeError(f"assay_df must be a pandas DataFrame, got {type(assay_df)}")
+    if blank_flag_col not in assay_df.columns:
+        raise ValueError(f"blank_flag_col '{blank_flag_col}' not found in assay_df")
+    if grade_col not in assay_df.columns:
+        raise ValueError(f"grade_col '{grade_col}' not found in assay_df")
+    if date_or_seq_col is not None and date_or_seq_col not in assay_df.columns:
+        raise ValueError(f"date_or_seq_col '{date_or_seq_col}' not found in assay_df")
+    if detection_limit <= 0:
+        raise ValueError(f"detection_limit must be strictly positive (> 0), got {detection_limit}")
+    if failure_multiplier <= warning_multiplier:
+        raise ValueError(
+            f"failure_multiplier ({failure_multiplier}) must be greater than warning_multiplier ({warning_multiplier})"
+        )
+
+    def _is_blank(val: Any) -> bool:
+        if pd.isna(val):
+            return False
+        if isinstance(val, (bool, np.bool_)):
+            return bool(val)
+        if isinstance(val, (int, float, np.integer, np.floating)):
+            return val == 1
+        s = str(val).strip().lower()
+        return s in {"true", "1", "blank", "coarse_blank", "pulp_blank", "yes", "b", "blk"}
+
+    if date_or_seq_col is not None:
+        stream_df = assay_df.sort_values(by=date_or_seq_col).reset_index(drop=True)
+    else:
+        stream_df = assay_df.reset_index(drop=True)
+
+    is_blank_series = stream_df[blank_flag_col].apply(_is_blank)
+    if not is_blank_series.any():
+        raise ValueError(f"No blank samples identified in column '{blank_flag_col}'")
+
+    warn_thresh = float(warning_multiplier * detection_limit)
+    fail_thresh = float(failure_multiplier * detection_limit)
+
+    blank_indices = stream_df.index[is_blank_series].tolist()
+    records = []
+    for b_idx in blank_indices:
+        b_row = stream_df.iloc[b_idx]
+        m_grade = float(b_row[grade_col])
+
+        prec_grade = np.nan
+        if b_idx > 0:
+            p_val = stream_df.iloc[b_idx - 1][grade_col]
+            try:
+                prec_grade = float(p_val)
+            except (ValueError, TypeError):
+                prec_grade = np.nan
+
+        is_fail = bool(m_grade > fail_thresh)
+        is_warn = bool(m_grade > warn_thresh and not is_fail)
+        is_pass = bool(m_grade <= warn_thresh)
+
+        if is_fail:
+            status = f"Failure (>{failure_multiplier:.0f}x LLD)"
+        elif is_warn:
+            status = f"Warning (>{warning_multiplier:.0f}x LLD)"
+        else:
+            status = "Pass"
+
+        carryover = 0.0
+        if prec_grade > 0 and m_grade > detection_limit:
+            carryover = ((m_grade - detection_limit) / prec_grade) * 100.0
+
+        rec = {
+            "measured_grade": m_grade,
+            "detection_limit": float(detection_limit),
+            "warning_threshold": warn_thresh,
+            "failure_threshold": fail_thresh,
+            "is_contamination_warning": is_warn,
+            "is_contamination_failure": is_fail,
+            "is_pass": is_pass,
+            "status": status,
+            "preceding_grade": float(prec_grade) if np.isfinite(prec_grade) else np.nan,
+            "carryover_ratio_pct": float(carryover),
+        }
+        if date_or_seq_col is not None:
+            rec[date_or_seq_col] = b_row[date_or_seq_col]
+        records.append(rec)
+
+    res_df = pd.DataFrame(records)
+
+    n_tot = len(res_df)
+    n_pass = int(res_df["is_pass"].sum())
+    n_warn = int(res_df["is_contamination_warning"].sum())
+    n_fail = int(res_df["is_contamination_failure"].sum())
+    pass_rate = (n_pass / n_tot) * 100.0 if n_tot > 0 else 0.0
+    fail_rate = (n_fail / n_tot) * 100.0 if n_tot > 0 else 0.0
+    max_grade = float(res_df["measured_grade"].max())
+
+    verdict = "PASSED" if fail_rate <= 1.0 else "ACTION REQUIRED: Contamination Detected"
+
+    res_df.attrs["total_blanks"] = n_tot
+    res_df.attrs["pass_count"] = n_pass
+    res_df.attrs["warning_count"] = n_warn
+    res_df.attrs["failure_count"] = n_fail
+    res_df.attrs["pass_rate_pct"] = pass_rate
+    res_df.attrs["failure_rate_pct"] = fail_rate
+    res_df.attrs["max_blank_grade"] = max_grade
+    res_df.attrs["detection_limit"] = float(detection_limit)
+    res_df.attrs["warning_threshold"] = warn_thresh
+    res_df.attrs["failure_threshold"] = fail_thresh
+    res_df.attrs["compliance_verdict"] = verdict
+    res_df.attrs["footnotes"] = [
+        "Analytical blanks evaluated under CIM MRMR Best Practice Guidelines (2019, Section 3) (TODO: Manually Verify).",
+        f"Contamination thresholds: Warning = {warning_multiplier:.1f}x LLD, Failure = {failure_multiplier:.1f}x LLD (TODO: Manually Verify).",
+        "Statutory compliance under NI 43-101 Form 43-101F1 Item 11 and JORC Code (2012, Table 1 Section 1) (TODO: Manually Verify).",
+        "Industry standard acceptance criterion: <= 1.0% contamination failures in analytical blank stream (TODO: Manually Verify).",
+    ]
+
+    return res_df
+
+
+def plot_blanks_performance(
+    blanks_analysis_results: pd.DataFrame,
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (14, 6),
+) -> Tuple[plt.Figure, Any]:
+    """Generates the chronological blank contamination scatter plot for NI 43-101 / JORC reports.
+
+    Parameters
+    ----------
+    blanks_analysis_results : pd.DataFrame
+        DataFrame generated by analyze_analytical_blanks.
+    grade_unit : str, default "% Cu"
+        Grade display unit.
+    title : str, optional
+        Plot title.
+    figsize : Tuple[float, float], default (14, 6)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Any]
+        Matplotlib figure and axes.
+    """
+    if not isinstance(blanks_analysis_results, pd.DataFrame):
+        raise TypeError(f"blanks_analysis_results must be a DataFrame, got {type(blanks_analysis_results)}")
+    if len(blanks_analysis_results) == 0:
+        raise ValueError("blanks_analysis_results DataFrame is empty")
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    df = blanks_analysis_results
+    x = np.arange(1, len(df) + 1)
+    y = df["measured_grade"].values
+
+    lld = float(df["detection_limit"].iloc[0]) if "detection_limit" in df.columns else float(df.attrs.get("detection_limit", 0.001))
+    warn_thresh = float(df["warning_threshold"].iloc[0]) if "warning_threshold" in df.columns else lld * 3.0
+    fail_thresh = float(df["failure_threshold"].iloc[0]) if "failure_threshold" in df.columns else lld * 5.0
+
+    # Horizontal guide lines
+    ax.axhline(lld, color="#546e7a", linestyle=":", linewidth=1.5, label=f"Detection Limit (LLD): {lld:.4f} {grade_unit}", zorder=1)
+    ax.axhline(warn_thresh, color="#ef6c00", linestyle="--", linewidth=1.5, label=f"Warning Threshold (3x LLD): {warn_thresh:.4f} {grade_unit}", zorder=1)
+    ax.axhline(fail_thresh, color="#c62828", linestyle="-", linewidth=2.0, label=f"Failure Threshold (5x LLD): {fail_thresh:.4f} {grade_unit}", zorder=1)
+
+    # Shaded acceptable zone
+    x_span = [0.5, len(df) + 0.5]
+    ax.fill_between(x_span, 0, warn_thresh, color="#e8f5e9", alpha=0.4, label="Acceptable (≤ 3x LLD)")
+    ax.fill_between(x_span, warn_thresh, fail_thresh, color="#fff3e0", alpha=0.5, label="Warning (3x to 5x LLD)")
+    y_top = max(np.max(y) * 1.15, fail_thresh * 1.3)
+    ax.fill_between(x_span, fail_thresh, y_top, color="#ffebee", alpha=0.4, label="Failure (> 5x LLD)")
+
+    # Scatter points by status
+    pass_mask = df["is_pass"] if "is_pass" in df.columns else (y <= warn_thresh)
+    warn_mask = df["is_contamination_warning"] if "is_contamination_warning" in df.columns else ((y > warn_thresh) & (y <= fail_thresh))
+    fail_mask = df["is_contamination_failure"] if "is_contamination_failure" in df.columns else (y > fail_thresh)
+
+    if pass_mask.any():
+        ax.scatter(x[pass_mask], y[pass_mask], color="#2e7d32", marker="o", s=45, zorder=3, label=f"Compliant Blanks ({pass_mask.sum()})")
+    if warn_mask.any():
+        ax.scatter(x[warn_mask], y[warn_mask], color="#ef6c00", marker="s", s=65, zorder=4, edgecolor="black", label=f"Warnings ({warn_mask.sum()})")
+    if fail_mask.any():
+        ax.scatter(x[fail_mask], y[fail_mask], color="#c62828", marker="X", s=90, zorder=5, edgecolor="black", label=f"Failures ({fail_mask.sum()})")
+
+    ax.set_xlim(0.5, len(df) + 0.5)
+    ax.set_ylim(0, y_top)
+
+    # Statistics callout box
+    n_tot = len(df)
+    n_pass = int(pass_mask.sum())
+    n_fail = int(fail_mask.sum())
+    pass_pct = (n_pass / n_tot) * 100.0 if n_tot > 0 else 0.0
+    max_val = float(np.max(y))
+
+    callout_text = (
+        f"Analytical Blanks Control\n"
+        f"Total Blanks Inserted (N): {n_tot}\n"
+        f"Detection Limit (LLD): {lld:.4f} {grade_unit}\n"
+        f"Warning (3x LLD): {warn_thresh:.4f} {grade_unit}\n"
+        f"Failure (5x LLD): {fail_thresh:.4f} {grade_unit}\n"
+        f"Pass Rate: {pass_pct:.1f}%\n"
+        f"Contamination Failures: {n_fail}\n"
+        f"Max Blank Assay: {max_val:.4f} {grade_unit}\n"
+        f"Compliance: {'PASSED (No Carryover)' if n_fail == 0 else 'ACTION REQUIRED (Contamination Detected)'}"
+    )
+    ax.text(
+        0.02,
+        0.95,
+        callout_text,
+        transform=ax.transAxes,
+        verticalalignment="top",
+        fontsize=9,
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffffff", edgecolor="#b0bec5", alpha=0.9),
+        zorder=10,
+    )
+
+    ax.set_xlabel("Blank Sample Insertion Sequence", fontsize=11, fontweight="bold")
+    ax.set_ylabel(f"Assayed Grade ({grade_unit})", fontsize=11, fontweight="bold")
+    plot_title = title or "Analytical Blank Performance - Cross-Contamination & Carryover Audit"
+    ax.set_title(plot_title, fontsize=12, fontweight="bold", pad=12)
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend(loc="upper right", framealpha=0.95, fontsize=8)
+
+    plt.tight_layout()
+    return fig, ax
+
+
+def analyze_assay_duplicates(
+    duplicate_df: pd.DataFrame,
+    original_col: str,
+    duplicate_col: str,
+    pair_type: Literal["field", "coarse", "pulp"] = "pulp",
+    detection_limit: Optional[float] = None,
+) -> pd.DataFrame:
+    """Evaluates sampling, preparation, and analytical precision using duplicate assays.
+
+    Under CIM MRMR Guidelines (§3.3) (TODO: Manually Verify) and SME Mining Engineering
+    Handbook (§4.2) (TODO: Manually Verify), duplicates segregate sampling variance
+    across three distinct stages:
+    1. 'field' (quarter core / rig splits): Measures geological heterogeneity + sampling error.
+    2. 'coarse' (crushed reject splits): Measures sub-sampling and crushing precision.
+    3. 'pulp' (pulverized analytical splits): Measures pulverization and analytical precision.
+
+    Regulatory Acceptance Thresholds (CIM MRMR §3.3; Stanley & Lawie 2007) (TODO: Manually Verify):
+    ---------------------------------------------------------------------------------------------
+    - Pulp duplicates: >= 90% of pairs must have Half Absolute Relative Difference (HARD) <= 10%.
+    - Coarse duplicates: >= 90% of pairs must have HARD <= 20%.
+    - Field duplicates: >= 90% of pairs must have HARD <= 30%.
+
+    Mathematical Metrics Computed:
+    ------------------------------
+    - Relative Difference: RD = (Duplicate - Original) / Mean(Original, Duplicate) * 100.
+    - Half Absolute Relative Difference: HARD = |Duplicate - Original| / (Duplicate + Original) * 100.
+    - Reduced Major Axis (RMA) Regression Slope and Intercept.
+
+    Parameters
+    ----------
+    duplicate_df : pd.DataFrame
+        DataFrame containing paired original and duplicate assay values.
+    original_col : str
+        Column name of the primary/original assay grade.
+    duplicate_col : str
+        Column name of the duplicate assay grade.
+    pair_type : {"field", "coarse", "pulp"}, default "pulp"
+        Duplicate stage type determining acceptance criteria.
+    detection_limit : float, optional
+        Lower limit of detection; pairs with values < 10x LLD may be flagged
+        to prevent spurious high relative errors near analytical detection limits.
+
+    Returns
+    -------
+    pd.DataFrame
+        Paired duplicate analysis table with original, duplicate, mean, RD, and HARD.
+        Attached in `.attrs`:
+        - 'pair_type', 'total_pairs', 'hard_threshold_pct', 'pct_meeting_hard_threshold'
+        - 'rma_slope', 'rma_intercept', 'pearson_correlation'.
+        - 'footnotes' : list of statutory citations with (TODO: Manually Verify).
+    """
+    if not isinstance(duplicate_df, pd.DataFrame):
+        raise TypeError(f"duplicate_df must be a pandas DataFrame, got {type(duplicate_df)}")
+    if original_col not in duplicate_df.columns:
+        raise ValueError(f"original_col '{original_col}' not found in duplicate_df")
+    if duplicate_col not in duplicate_df.columns:
+        raise ValueError(f"duplicate_col '{duplicate_col}' not found in duplicate_df")
+    if pair_type not in {"field", "coarse", "pulp"}:
+        raise ValueError(f"pair_type must be one of 'field', 'coarse', 'pulp', got '{pair_type}'")
+    if detection_limit is not None and detection_limit <= 0:
+        raise ValueError(f"detection_limit must be strictly positive (> 0), got {detection_limit}")
+
+    hard_threshold_map = {"pulp": 10.0, "coarse": 20.0, "field": 30.0}
+    hard_threshold = hard_threshold_map[pair_type]
+
+    orig_s = pd.to_numeric(duplicate_df[original_col], errors="coerce")
+    dup_s = pd.to_numeric(duplicate_df[duplicate_col], errors="coerce")
+    valid_mask = orig_s.notna() & dup_s.notna() & np.isfinite(orig_s) & np.isfinite(dup_s) & (orig_s > 0) & (dup_s > 0)
+
+    if not valid_mask.any():
+        raise ValueError("No valid positive numeric assay duplicate pairs found")
+
+    sub_orig = orig_s[valid_mask].values
+    sub_dup = dup_s[valid_mask].values
+
+    pair_mean = (sub_orig + sub_dup) / 2.0
+    diff = sub_dup - sub_orig
+    rel_diff_pct = (diff / pair_mean) * 100.0
+    hard_pct = (np.abs(diff) / (sub_orig + sub_dup)) * 100.0
+    meets_hard = hard_pct <= hard_threshold
+
+    if detection_limit is not None:
+        above_10x_lld = pair_mean >= 10.0 * detection_limit
+    else:
+        above_10x_lld = np.ones(len(pair_mean), dtype=bool)
+
+    res_df = pd.DataFrame({
+        "original": sub_orig,
+        "duplicate": sub_dup,
+        "pair_mean": pair_mean,
+        "difference": diff,
+        "relative_difference_pct": rel_diff_pct,
+        "hard_pct": hard_pct,
+        "meets_hard_threshold": meets_hard,
+        "above_10x_lld": above_10x_lld,
+    })
+
+    # Precision evaluation on the relevant subset
+    eval_mask = above_10x_lld if np.any(above_10x_lld) else np.ones(len(res_df), dtype=bool)
+    eval_df = res_df[eval_mask]
+    n_eval = len(eval_df)
+    n_meet = int(eval_df["meets_hard_threshold"].sum())
+    pct_meeting = (n_meet / n_eval) * 100.0 if n_eval > 0 else 0.0
+
+    # Reduced Major Axis (RMA) Regression:
+    # b_rma = sign(r) * (s_y / s_x), a_rma = y_bar - b_rma * x_bar
+    x_vals = eval_df["original"].values
+    y_vals = eval_df["duplicate"].values
+    s_x = float(np.std(x_vals, ddof=1)) if n_eval > 1 else 0.0
+    s_y = float(np.std(y_vals, ddof=1)) if n_eval > 1 else 0.0
+    mean_x = float(np.mean(x_vals)) if n_eval > 0 else 0.0
+    mean_y = float(np.mean(y_vals)) if n_eval > 0 else 0.0
+
+    if n_eval > 1 and s_x > 1e-12 and s_y > 1e-12:
+        r_corr = float(np.corrcoef(x_vals, y_vals)[0, 1])
+        b_rma = float(np.sign(r_corr) * (s_y / s_x))
+        a_rma = float(mean_y - b_rma * mean_x)
+    else:
+        r_corr = 1.0
+        b_rma = 1.0
+        a_rma = 0.0
+
+    verdict = "PASSED" if pct_meeting >= 90.0 else "ACTION REQUIRED: Precision Below 90% Target"
+
+    res_df.attrs["pair_type"] = pair_type
+    res_df.attrs["total_pairs"] = len(res_df)
+    res_df.attrs["evaluated_pairs"] = n_eval
+    res_df.attrs["hard_threshold_pct"] = hard_threshold
+    res_df.attrs["pairs_meeting_threshold"] = n_meet
+    res_df.attrs["pct_meeting_hard_threshold"] = pct_meeting
+    res_df.attrs["pearson_correlation"] = r_corr
+    res_df.attrs["rma_slope"] = b_rma
+    res_df.attrs["rma_intercept"] = a_rma
+    res_df.attrs["mean_original"] = mean_x
+    res_df.attrs["mean_duplicate"] = mean_y
+    res_df.attrs["std_original"] = s_x
+    res_df.attrs["std_duplicate"] = s_y
+    res_df.attrs["compliance_verdict"] = verdict
+    res_df.attrs["footnotes"] = [
+        f"{pair_type.capitalize()} duplicate precision evaluated under CIM MRMR Guidelines (§3.3) (TODO: Manually Verify).",
+        f"Statutory precision threshold: >= 90.0% of pairs must achieve HARD <= {hard_threshold:.0f}% (TODO: Manually Verify).",
+        "Linear trend modeled via Reduced Major Axis (RMA) regression to account for equal error variance (TODO: Manually Verify).",
+        "Statutory compliance under NI 43-101 Form 43-101F1 Item 11 and JORC Code (2012, Table 1 Section 1) (TODO: Manually Verify).",
+    ]
+
+    return res_df
+
+
+def plot_duplicate_analysis(
+    duplicate_results: pd.DataFrame,
+    grade_unit: str = "% Cu",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (14, 6),
+) -> Tuple[plt.Figure, Any]:
+    """Generates dual-panel duplicate precision plots (Scatter + Cumulative HARD Curve).
+
+    In accordance with NI 43-101 Form 43-101F1 Item 11 and JORC Code Table 1 (TODO: Manually Verify):
+    - Left Panel: Original vs. Duplicate Scatter Plot with 1:1 line, RMA regression,
+      and +/- 10% / 20% / 30% error envelopes.
+    - Right Panel: Cumulative Frequency Plot of HARD values with the 90th percentile target line.
+
+    Parameters
+    ----------
+    duplicate_results : pd.DataFrame
+        DataFrame generated by analyze_assay_duplicates.
+    grade_unit : str, default "% Cu"
+        Grade display unit.
+    title : str, optional
+        Plot title.
+    figsize : Tuple[float, float], default (14, 6)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Any]
+        Matplotlib figure and pair of axes.
+    """
+    if not isinstance(duplicate_results, pd.DataFrame):
+        raise TypeError(f"duplicate_results must be a DataFrame, got {type(duplicate_results)}")
+    if len(duplicate_results) == 0:
+        raise ValueError("duplicate_results DataFrame is empty")
+
+    pair_type = duplicate_results.attrs.get("pair_type", "pulp")
+    hard_thresh = float(duplicate_results.attrs.get("hard_threshold_pct", 10.0))
+    pct_meet = float(duplicate_results.attrs.get("pct_meeting_hard_threshold", 90.0))
+    rma_slope = float(duplicate_results.attrs.get("rma_slope", 1.0))
+    rma_icept = float(duplicate_results.attrs.get("rma_intercept", 0.0))
+    r_corr = float(duplicate_results.attrs.get("pearson_correlation", 1.0))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+
+    orig = duplicate_results["original"].values
+    dup = duplicate_results["duplicate"].values
+    meets = duplicate_results["meets_hard_threshold"].values
+
+    # Left Panel: Original vs Duplicate Scatter
+    max_val = max(np.max(orig), np.max(dup)) * 1.08
+    axis_line = np.linspace(0, max_val, 100)
+
+    # 1:1 line
+    ax1.plot(axis_line, axis_line, color="#212121", linestyle="--", linewidth=1.5, label="1:1 Equality", zorder=1)
+
+    # Error envelope (+/- HARD threshold)
+    env_upper = axis_line * (1.0 + 2.0 * (hard_thresh / 100.0) / (1.0 - (hard_thresh / 100.0)))
+    env_lower = axis_line * max(0.0, 1.0 - 2.0 * (hard_thresh / 100.0) / (1.0 + (hard_thresh / 100.0)))
+    ax1.plot(axis_line, env_upper, color="#ef6c00", linestyle=":", linewidth=1.2, label=f"+{hard_thresh:.0f}% HARD Envelope", zorder=1)
+    ax1.plot(axis_line, env_lower, color="#ef6c00", linestyle=":", linewidth=1.2, label=f"-{hard_thresh:.0f}% HARD Envelope", zorder=1)
+    ax1.fill_between(axis_line, env_lower, env_upper, color="#fff3e0", alpha=0.3, zorder=0)
+
+    # RMA regression line
+    rma_y = rma_slope * axis_line + rma_icept
+    ax1.plot(axis_line, rma_y, color="#1565c0", linestyle="-", linewidth=2.0, label=f"RMA: y = {rma_slope:.3f}x + {rma_icept:.3f}", zorder=2)
+
+    # Scatter points
+    ax1.scatter(orig[meets], dup[meets], color="#2e7d32", alpha=0.6, s=35, zorder=3, label=f"Within HARD ({np.sum(meets)})")
+    if np.sum(~meets) > 0:
+        ax1.scatter(orig[~meets], dup[~meets], color="#c62828", alpha=0.7, s=45, marker="^", zorder=4, label=f"Exceeding HARD ({np.sum(~meets)})")
+
+    ax1.set_xlim(0, max_val)
+    ax1.set_ylim(0, max_val)
+    ax1.set_xlabel(f"Original Assay ({grade_unit})", fontsize=11, fontweight="bold")
+    ax1.set_ylabel(f"Duplicate Assay ({grade_unit})", fontsize=11, fontweight="bold")
+    ax1.set_title(f"{pair_type.capitalize()} Duplicates: Original vs. Duplicate Scatter", fontsize=11, fontweight="bold")
+    ax1.grid(True, linestyle=":", alpha=0.5)
+    ax1.legend(loc="upper left", framealpha=0.95, fontsize=8)
+
+    # Right Panel: Cumulative Frequency of HARD (%)
+    hard_vals = np.sort(duplicate_results["hard_pct"].values)
+    cum_freq = np.linspace(0.0, 100.0, len(hard_vals))
+
+    ax2.plot(hard_vals, cum_freq, color="#303f9f", linewidth=2.2, label="Empirical HARD Distribution", zorder=2)
+
+    # 90% horizontal target line
+    ax2.axhline(90.0, color="#c62828", linestyle="--", linewidth=1.8, label="90% Regulatory Threshold", zorder=1)
+    # Target HARD vertical line
+    ax2.axvline(hard_thresh, color="#ef6c00", linestyle="--", linewidth=1.8, label=f"{hard_thresh:.0f}% Target HARD", zorder=1)
+
+    # Highlight intersection
+    ax2.scatter([hard_thresh], [pct_meet], color="#c62828", s=90, zorder=5)
+    ax2.annotate(
+        f"  {pct_meet:.1f}% ≤ {hard_thresh:.0f}% HARD",
+        xy=(hard_thresh, pct_meet),
+        xytext=(hard_thresh + 2, pct_meet - 8),
+        fontsize=9,
+        fontweight="bold",
+        color="#c62828",
+        arrowprops=dict(arrowstyle="->", color="#c62828", lw=1.2),
+        zorder=6,
+    )
+
+    x_max = max(50.0, float(np.percentile(hard_vals, 98)))
+    ax2.set_xlim(0, x_max)
+    ax2.set_ylim(0, 105)
+    ax2.set_xlabel("Half Absolute Relative Difference - HARD (%)", fontsize=11, fontweight="bold")
+    ax2.set_ylabel("Cumulative Frequency (%)", fontsize=11, fontweight="bold")
+    ax2.set_title(f"Cumulative Frequency of HARD ({pair_type.capitalize()} Precision)", fontsize=11, fontweight="bold")
+    ax2.grid(True, linestyle=":", alpha=0.5)
+    ax2.legend(loc="lower right", framealpha=0.95, fontsize=8)
+
+    # Summary callout box on right panel
+    callout_text = (
+        f"{pair_type.capitalize()} Duplicate Precision\n"
+        f"Total Pairs (N): {len(duplicate_results)}\n"
+        f"Pearson Correlation (r): {r_corr:.3f}\n"
+        f"RMA Slope: {rma_slope:.3f}\n"
+        f"HARD Threshold: ≤ {hard_thresh:.0f}%\n"
+        f"Pairs Meeting: {pct_meet:.1f}% (Target: ≥ 90%)\n"
+        f"Verdict: {'PASSED' if pct_meet >= 90.0 else 'ACTION REQUIRED'}"
+    )
+    ax2.text(
+        0.03,
+        0.95,
+        callout_text,
+        transform=ax2.transAxes,
+        verticalalignment="top",
+        fontsize=9,
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffffff", edgecolor="#b0bec5", alpha=0.9),
+        zorder=10,
+    )
+
+    sup_title = title or f"Drillhole Assay Duplicate Precision Assessment ({pair_type.capitalize()} Splits - NI 43-101 / JORC)"
+    fig.suptitle(sup_title, fontsize=13, fontweight="bold", y=0.98)
+    plt.tight_layout()
+    return fig, (ax1, ax2)
+
+
+def generate_qaqc_compliance_summary(
+    total_drillhole_samples: int,
+    crm_results: Optional[pd.DataFrame] = None,
+    blanks_results: Optional[pd.DataFrame] = None,
+    duplicate_results: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Generates the official QA/QC insertion rate and compliance summary table for NI 43-101 / JORC reports.
+
+    Mandated by NI 43-101 Form 43-101F1 Item 11 and JORC Code Table 1 (Section 1) (TODO: Manually Verify),
+    summarizes total control samples inserted, insertion rates (% of stream), pass rates,
+    and failure counts:
+    - Standards (target insertion rate: 5% of stream; target pass rate: >= 98%)
+    - Blanks (target insertion rate: 5% of stream; target pass rate: >= 99%)
+    - Duplicates (target insertion rate: 5% of stream; target pass rate: >= 90%)
+    - Total QA/QC Control Samples (recommended total insertion rate: 15–20% of total assay stream).
+
+    Parameters
+    ----------
+    total_drillhole_samples : int
+        Total number of regular drillhole core/RC samples in the database (> 0).
+    crm_results : pd.DataFrame, optional
+        Audited CRM DataFrame from analyze_crm_standards.
+    blanks_results : pd.DataFrame, optional
+        Audited Blanks DataFrame from analyze_analytical_blanks.
+    duplicate_results : pd.DataFrame, optional
+        Audited Duplicates DataFrame from analyze_assay_duplicates.
+
+    Returns
+    -------
+    pd.DataFrame
+        Publication-ready NI 43-101 Chapter 11 compliance table reporting Sample Type,
+        Count, Insertion Rate (%), Pass Count, Fail Count, and Pass Rate (%).
+    """
+    if total_drillhole_samples <= 0:
+        raise ValueError(f"total_drillhole_samples must be strictly positive (> 0), got {total_drillhole_samples}")
+
+    rows = []
+
+    # 1. CRM Standards
+    if crm_results is not None and len(crm_results) > 0:
+        c_cnt = len(crm_results)
+        c_ins = (c_cnt / total_drillhole_samples) * 100.0
+        c_pass = int(crm_results.attrs.get("overall_pass_count", (crm_results["status"] == "Pass").sum()))
+        c_fail = int(crm_results.attrs.get("overall_failure_count", c_cnt - c_pass))
+        c_rate = (c_pass / c_cnt) * 100.0 if c_cnt > 0 else 0.0
+        c_verdict = "PASSED" if (c_rate >= 98.0 and c_ins >= 5.0 and c_fail == 0) else "ACTION REQUIRED"
+        rows.append({
+            "sample_type": "Certified Reference Materials (CRMs)",
+            "count": c_cnt,
+            "insertion_rate_pct": c_ins,
+            "target_insertion_rate_pct": 5.0,
+            "insertion_status": "Adequate (≥ 5%)" if c_ins >= 5.0 else "Deficient (< 5%)",
+            "pass_count": c_pass,
+            "fail_count": c_fail,
+            "pass_rate_pct": c_rate,
+            "target_pass_rate_pct": 98.0,
+            "compliance_verdict": c_verdict,
+        })
+    else:
+        c_cnt = 0
+        c_pass = 0
+        c_fail = 0
+        rows.append({
+            "sample_type": "Certified Reference Materials (CRMs)",
+            "count": 0,
+            "insertion_rate_pct": 0.0,
+            "target_insertion_rate_pct": 5.0,
+            "insertion_status": "Deficient (< 5%)",
+            "pass_count": 0,
+            "fail_count": 0,
+            "pass_rate_pct": 0.0,
+            "target_pass_rate_pct": 98.0,
+            "compliance_verdict": "NOT PROVIDED",
+        })
+
+    # 2. Analytical Blanks
+    if blanks_results is not None and len(blanks_results) > 0:
+        b_cnt = len(blanks_results)
+        b_ins = (b_cnt / total_drillhole_samples) * 100.0
+        b_pass = int(blanks_results.attrs.get("pass_count", blanks_results["is_pass"].sum() if "is_pass" in blanks_results.columns else len(blanks_results)))
+        b_fail = int(blanks_results.attrs.get("failure_count", b_cnt - b_pass))
+        b_rate = (b_pass / b_cnt) * 100.0 if b_cnt > 0 else 0.0
+        b_verdict = "PASSED" if (b_rate >= 99.0 and b_ins >= 5.0 and b_fail == 0) else "ACTION REQUIRED"
+        rows.append({
+            "sample_type": "Coarse & Pulp Blanks",
+            "count": b_cnt,
+            "insertion_rate_pct": b_ins,
+            "target_insertion_rate_pct": 5.0,
+            "insertion_status": "Adequate (≥ 5%)" if b_ins >= 5.0 else "Deficient (< 5%)",
+            "pass_count": b_pass,
+            "fail_count": b_fail,
+            "pass_rate_pct": b_rate,
+            "target_pass_rate_pct": 99.0,
+            "compliance_verdict": b_verdict,
+        })
+    else:
+        b_cnt = 0
+        b_pass = 0
+        b_fail = 0
+        rows.append({
+            "sample_type": "Coarse & Pulp Blanks",
+            "count": 0,
+            "insertion_rate_pct": 0.0,
+            "target_insertion_rate_pct": 5.0,
+            "insertion_status": "Deficient (< 5%)",
+            "pass_count": 0,
+            "fail_count": 0,
+            "pass_rate_pct": 0.0,
+            "target_pass_rate_pct": 99.0,
+            "compliance_verdict": "NOT PROVIDED",
+        })
+
+    # 3. Duplicate Assays
+    if duplicate_results is not None and len(duplicate_results) > 0:
+        d_cnt = len(duplicate_results)
+        d_ins = (d_cnt / total_drillhole_samples) * 100.0
+        pair_type = duplicate_results.attrs.get("pair_type", "pulp")
+        d_pass = int(duplicate_results.attrs.get("pairs_meeting_threshold", duplicate_results["meets_hard_threshold"].sum()))
+        d_fail = d_cnt - d_pass
+        d_rate = (d_pass / d_cnt) * 100.0 if d_cnt > 0 else 0.0
+        d_verdict = "PASSED" if (d_rate >= 90.0 and d_ins >= 5.0) else "ACTION REQUIRED"
+        rows.append({
+            "sample_type": f"Duplicate Assays ({pair_type.capitalize()})",
+            "count": d_cnt,
+            "insertion_rate_pct": d_ins,
+            "target_insertion_rate_pct": 5.0,
+            "insertion_status": "Adequate (≥ 5%)" if d_ins >= 5.0 else "Deficient (< 5%)",
+            "pass_count": d_pass,
+            "fail_count": d_fail,
+            "pass_rate_pct": d_rate,
+            "target_pass_rate_pct": 90.0,
+            "compliance_verdict": d_verdict,
+        })
+    else:
+        d_cnt = 0
+        d_pass = 0
+        d_fail = 0
+        rows.append({
+            "sample_type": "Duplicate Assays",
+            "count": 0,
+            "insertion_rate_pct": 0.0,
+            "target_insertion_rate_pct": 5.0,
+            "insertion_status": "Deficient (< 5%)",
+            "pass_count": 0,
+            "fail_count": 0,
+            "pass_rate_pct": 0.0,
+            "target_pass_rate_pct": 90.0,
+            "compliance_verdict": "NOT PROVIDED",
+        })
+
+    # 4. Total QA/QC Control
+    tot_cnt = c_cnt + b_cnt + d_cnt
+    tot_ins = (tot_cnt / total_drillhole_samples) * 100.0
+    tot_pass = c_pass + b_pass + d_pass
+    tot_fail = c_fail + b_fail + d_fail
+    tot_rate = (tot_pass / tot_cnt) * 100.0 if tot_cnt > 0 else 0.0
+    tot_verdict = (
+        "PASSED"
+        if (tot_ins >= 15.0 and tot_rate >= 95.0 and all(r["compliance_verdict"] == "PASSED" for r in rows))
+        else ("ACTION REQUIRED" if tot_cnt > 0 else "NO QA/QC DATA")
+    )
+
+    rows.append({
+        "sample_type": "Total QA/QC Control Insertion",
+        "count": tot_cnt,
+        "insertion_rate_pct": tot_ins,
+        "target_insertion_rate_pct": 15.0,
+        "insertion_status": "Adequate (≥ 15%)" if tot_ins >= 15.0 else "Deficient (< 15%)",
+        "pass_count": tot_pass,
+        "fail_count": tot_fail,
+        "pass_rate_pct": tot_rate,
+        "target_pass_rate_pct": 95.0,
+        "compliance_verdict": tot_verdict,
+    })
+
+    res_df = pd.DataFrame(rows)
+
+    res_df.attrs["total_drillhole_samples"] = total_drillhole_samples
+    res_df.attrs["total_qaqc_samples"] = tot_cnt
+    res_df.attrs["total_stream_samples"] = total_drillhole_samples + tot_cnt
+    res_df.attrs["overall_insertion_rate_pct"] = tot_ins
+    res_df.attrs["overall_compliance_verdict"] = tot_verdict
+    res_df.attrs["footnotes"] = [
+        "QA/QC control stream compiled in accordance with NI 43-101 Form 43-101F1 Item 11 (TODO: Manually Verify).",
+        "Compliance verified against CIM MRMR Best Practice Guidelines (2019, Section 3 on Data Verification) (TODO: Manually Verify).",
+        "Standard industry insertion rate guidelines: >= 5% CRMs, >= 5% Blanks, >= 5% Duplicates; Total QA/QC >= 15% (TODO: Manually Verify).",
+        "All data verified suitable for Mineral Resource estimation under JORC Code (2012, Table 1 Section 1) (TODO: Manually Verify).",
+    ]
+
+    return res_df
+
+
+# =============================================================================
+# PART 3: SIMULATION SPATIAL VALIDATION & UNCERTAINTY (SME CH. 4.6, ROSSI CH. 12)
+# =============================================================================
+
+
+def check_simulation_variogram_reproduction(
+    realizations: np.ndarray,
+    grid_points: np.ndarray,
+    variogram_model: str,
+    sill: float,
+    range_param: Union[float, Sequence[float], Mapping[str, float]],
+    nugget: float = 0.0,
+    lags: Optional[Sequence[float]] = None,
+    n_lags: int = 15,
+    max_lag: Optional[float] = None,
+    azimuth: float = 0.0,
+    dip: float = 0.0,
+    tolerance_angle: float = 22.5,
+) -> pd.DataFrame:
+    """Verifies that conditional simulation realizations reproduce the input variogram model.
+
+    In accordance with SME Mining Engineering Handbook (3rd Ed., Section 4.6 on Conditional
+    Simulation) (TODO: Manually Verify) and Rossi & Deutsch (2014, Chapter 12 on Simulation
+    Validation) (TODO: Manually Verify), unlike Kriging (which produces an artificially smoothed,
+    variance-reduced estimate), conditional simulation must reproduce the full spatial variance
+    across all separation distances. Evaluates experimental semivariograms across all realizations
+    l in 1, ..., L along principal continuity directions to verify reproduction within expected
+    Monte Carlo ergodic fluctuation bounds.
+
+    Parameters
+    ----------
+    realizations : np.ndarray
+        Array of shape (M, n_realizations) with simulated grid or block values.
+    grid_points : np.ndarray
+        Array of shape (M, 2) or (M, 3) with target grid coordinates.
+    variogram_model : str
+        Analytical model type ('spherical', 'exponential', 'gaussian', 'cubic').
+    sill : float
+        Variogram partial sill variance C (> 0).
+    range_param : float, Sequence[float], or Mapping
+        Variogram practical correlation range a (> 0).
+    nugget : float, default 0.0
+        Variogram nugget effect C0 (>= 0).
+    lags : Sequence[float], optional
+        Explicit lag distance centers.
+    n_lags : int, default 15
+        Number of lag intervals if lags is None (> 0).
+    max_lag : float, optional
+        Maximum lag distance. If None, defaults to 1.2 * range_param.
+    azimuth : float, default 0.0
+        Directional azimuth in degrees clockwise from North.
+    dip : float, default 0.0
+        Directional dip in degrees.
+    tolerance_angle : float, default 22.5
+        Angular half-window tolerance in degrees. If >= 90.0, omnidirectional.
+
+    Returns
+    -------
+    pd.DataFrame
+        Variogram reproduction table containing:
+        - lag : Separation distance h
+        - model_gamma : Theoretical model semivariance gamma(h)
+        - mean_realization_gamma : Ensemble mean semivariance across realizations
+        - p10_gamma, p50_gamma, p90_gamma : Percentile envelopes of realization semivariances
+        - individual realization semivariance columns 'realization_1', ..., 'realization_L'.
+        Attached in `.attrs`:
+        - 'n_realizations' : L
+        - 'ergodic_fluctuation_pct' : Mean relative % difference between ensemble mean and model.
+        - 'reproduction_verdict' : 'VALIDATED' (if ergodic fluctuation <= 20%) or 'INVESTIGATION REQUIRED'.
+        - 'footnotes' : list of compliance citations with (TODO: Manually Verify).
+    """
+    reals = np.asarray(realizations, dtype=float)
+    if reals.ndim == 1:
+        reals = reals[:, np.newaxis]
+    elif reals.ndim != 2:
+        raise ValueError(f"realizations must be a 1D or 2D array, got shape {reals.shape}")
+
+    pts = np.asarray(grid_points, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] not in (2, 3):
+        raise ValueError(f"grid_points must have shape (M, 2) or (M, 3), got shape {pts.shape}")
+
+    m_pts, n_reals = reals.shape
+    if len(pts) != m_pts:
+        raise ValueError(f"Length of grid_points ({len(pts)}) does not match realizations ({m_pts})")
+
+    if sill <= 0:
+        raise ValueError(f"sill must be strictly positive (> 0), got {sill}")
+    if nugget < 0:
+        raise ValueError(f"nugget must be non-negative (>= 0), got {nugget}")
+    if n_lags < 2:
+        raise ValueError(f"n_lags must be at least 2, got {n_lags}")
+
+    # Extract scalar range representation for default lag bounds
+    if isinstance(range_param, (dict, Mapping)):
+        r_val = float(range_param.get("major", list(range_param.values())[0]))
+    elif isinstance(range_param, (list, tuple, np.ndarray)):
+        r_val = float(range_param[0])
+    else:
+        r_val = float(range_param)
+
+    if r_val <= 0:
+        raise ValueError(f"range_param must be strictly positive (> 0), got {r_val}")
+
+    if max_lag is None:
+        max_lag = float(r_val * 1.2)
+    elif max_lag <= 0:
+        raise ValueError(f"max_lag must be strictly positive (> 0), got {max_lag}")
+
+    if lags is not None:
+        lag_centers = np.sort(np.asarray(lags, dtype=float))
+        n_bins = len(lag_centers)
+        step = float(lag_centers[1] - lag_centers[0]) if n_bins > 1 else float(lag_centers[0])
+        half_step = step / 2.0
+    else:
+        n_bins = int(n_lags)
+        step = float(max_lag / n_bins)
+        half_step = step / 2.0
+        lag_centers = np.linspace(step, max_lag, n_bins)
+
+    # Subsample if grid is large to preserve fast sub-second performance
+    max_sub = 800
+    if m_pts > max_sub:
+        rng = np.random.default_rng(42)
+        sub_idx = rng.choice(m_pts, size=max_sub, replace=False)
+        sub_pts = pts[sub_idx]
+        sub_reals = reals[sub_idx, :]
+    else:
+        sub_pts = pts
+        sub_reals = reals
+
+    n_sub = len(sub_pts)
+
+    # Compute coordinate differences and Euclidean distances
+    diff_coords = sub_pts[:, np.newaxis, :] - sub_pts[np.newaxis, :, :]  # (N, N, dim)
+    dists = np.linalg.norm(diff_coords, axis=-1)  # (N, N)
+
+    # Directional filtering
+    if tolerance_angle < 90.0:
+        rad_az = np.radians(azimuth)
+        rad_dip = np.radians(dip)
+        if sub_pts.shape[1] == 2:
+            dir_vec = np.array([np.sin(rad_az) * np.cos(rad_dip), np.cos(rad_az) * np.cos(rad_dip)])
+        else:
+            dir_vec = np.array([
+                np.sin(rad_az) * np.cos(rad_dip),
+                np.cos(rad_az) * np.cos(rad_dip),
+                -np.sin(rad_dip),
+            ])
+        norm_dir = np.linalg.norm(dir_vec)
+        if norm_dir > 1e-9:
+            dir_vec = dir_vec / norm_dir
+
+        dot_p = np.abs(np.sum(diff_coords * dir_vec, axis=-1))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            cos_a = np.where(dists > 1e-9, dot_p / dists, 1.0)
+        angle_mask = cos_a >= np.cos(np.radians(tolerance_angle))
+    else:
+        angle_mask = np.ones((n_sub, n_sub), dtype=bool)
+
+    tri_mask = np.triu(np.ones((n_sub, n_sub), dtype=bool), k=1) & angle_mask
+    pair_dists = dists[tri_mask]
+    pair_i, pair_j = np.where(tri_mask)
+
+    gamma_reals = np.full((n_bins, n_reals), np.nan, dtype=float)
+    pair_counts = np.zeros(n_bins, dtype=int)
+
+    # Compute experimental semivariance across realizations
+    if len(pair_dists) > 0:
+        for k, h_k in enumerate(lag_centers):
+            in_bin = (pair_dists >= h_k - half_step) & (pair_dists < h_k + half_step)
+            pair_counts[k] = int(np.sum(in_bin))
+            if pair_counts[k] > 0:
+                for l in range(n_reals):
+                    z_diff = sub_reals[pair_i[in_bin], l] - sub_reals[pair_j[in_bin], l]
+                    gamma_reals[k, l] = 0.5 * float(np.mean(z_diff ** 2))
+
+    # Compute theoretical model semivariance
+    total_sill = float(nugget + sill)
+    cov_vals = _theoretical_covariance(
+        lag_centers,
+        model=variogram_model,
+        nugget=nugget,
+        sill=sill,
+        range_param=range_param,
+    )
+    model_gamma = np.maximum(0.0, total_sill - cov_vals)
+
+    # Realization ensemble metrics
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        mean_real_gamma = np.nanmean(gamma_reals, axis=1)
+        p10_gamma = np.nanpercentile(gamma_reals, 10, axis=1)
+        p50_gamma = np.nanpercentile(gamma_reals, 50, axis=1)
+        p90_gamma = np.nanpercentile(gamma_reals, 90, axis=1)
+
+    records = {
+        "lag": lag_centers,
+        "model_gamma": model_gamma,
+        "mean_realization_gamma": mean_real_gamma,
+        "p10_gamma": p10_gamma,
+        "p50_gamma": p50_gamma,
+        "p90_gamma": p90_gamma,
+        "pair_count": pair_counts,
+    }
+    for l in range(n_reals):
+        records[f"realization_{l + 1}"] = gamma_reals[:, l]
+
+    res_df = pd.DataFrame(records)
+
+    # Quantify ergodic fluctuation within practical range
+    valid_lags = (lag_centers <= r_val) & np.isfinite(mean_real_gamma) & (model_gamma > 1e-6)
+    if np.any(valid_lags):
+        ergodic_fluc = float(
+            np.mean(np.abs(mean_real_gamma[valid_lags] - model_gamma[valid_lags]) / model_gamma[valid_lags]) * 100.0
+        )
+    else:
+        ergodic_fluc = 0.0
+
+    verdict = (
+        "VALIDATED (Accurate Variogram Reproduction)"
+        if ergodic_fluc <= 20.0
+        else "INVESTIGATION REQUIRED (Ergodic Fluctuation / Divergence Detected)"
+    )
+
+    res_df.attrs["n_realizations"] = n_reals
+    res_df.attrs["variogram_model"] = variogram_model
+    res_df.attrs["sill"] = float(sill)
+    res_df.attrs["nugget"] = float(nugget)
+    res_df.attrs["total_sill"] = total_sill
+    res_df.attrs["range_param"] = r_val
+    res_df.attrs["ergodic_fluctuation_pct"] = ergodic_fluc
+    res_df.attrs["reproduction_verdict"] = verdict
+    res_df.attrs["footnotes"] = [
+        "Conditional simulation spatial reproduction evaluated under SME Mining Engineering Handbook (§4.6) (TODO: Manually Verify).",
+        "Spatial variability verification complies with Rossi & Deutsch (2014, Chapter 12) (TODO: Manually Verify).",
+        "Unlike smoothed Kriging estimates, conditional simulation realizations must reproduce the input semivariance model (TODO: Manually Verify).",
+        "Discrepancies within +/- 15–20% reflect acceptable Monte Carlo ergodic fluctuations in finite domains (TODO: Manually Verify).",
+    ]
+
+    return res_df
+
+
+def plot_simulation_variogram_reproduction(
+    variogram_reproduction_results: pd.DataFrame,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (12, 6),
+) -> Tuple[plt.Figure, Any]:
+    """Renders the variogram reproduction validation chart for conditional simulations.
+
+    Displays:
+    - Theoretical input variogram model curve (thick solid dark red line).
+    - Individual realization semivariograms (thin semi-transparent blue lines).
+    - Realization ensemble mean curve (dashed navy line) and P10-P90 uncertainty band.
+
+    Parameters
+    ----------
+    variogram_reproduction_results : pd.DataFrame
+        DataFrame produced by check_simulation_variogram_reproduction.
+    title : str, optional
+        Plot title.
+    figsize : Tuple[float, float], default (12, 6)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Any]
+        Matplotlib figure and axes.
+    """
+    if not isinstance(variogram_reproduction_results, pd.DataFrame):
+        raise TypeError(
+            f"variogram_reproduction_results must be a DataFrame, got {type(variogram_reproduction_results)}"
+        )
+    if "lag" not in variogram_reproduction_results.columns:
+        raise ValueError("variogram_reproduction_results must contain 'lag' column")
+
+    df = variogram_reproduction_results
+    fig, ax = plt.subplots(figsize=figsize)
+
+    lags = df["lag"].values
+    model_g = df["model_gamma"].values
+    mean_g = df["mean_realization_gamma"].values
+    p10_g = df["p10_gamma"].values
+    p90_g = df["p90_gamma"].values
+
+    # Plot individual realization curves
+    real_cols = [c for c in df.columns if c.startswith("realization_")]
+    first_real = True
+    for c in real_cols:
+        lbl = f"Realizations (N={len(real_cols)})" if first_real else None
+        ax.plot(lags, df[c].values, color="#90caf9", alpha=0.35, linewidth=1.0, label=lbl, zorder=2)
+        first_real = False
+
+    # Shaded P10-P90 uncertainty envelope
+    ax.fill_between(lags, p10_g, p90_g, color="#bbdefb", alpha=0.45, label="P10–P90 Simulation Envelope", zorder=3)
+
+    # Realization ensemble mean curve
+    ax.plot(lags, mean_g, color="#0d47a1", linestyle="--", linewidth=2.0, label="Simulation Ensemble Mean", zorder=4)
+
+    # Theoretical model curve
+    ax.plot(lags, model_g, color="#b71c1c", linestyle="-", linewidth=2.5, label="Theoretical Variogram Model γ(h)", zorder=5)
+
+    # Total Sill line
+    total_sill = float(df.attrs.get("total_sill", np.nanmax(model_g)))
+    ax.axhline(total_sill, color="#424242", linestyle=":", linewidth=1.5, label=f"Total Sill ($C_0 + C$) = {total_sill:.3f}", zorder=1)
+
+    # Practical Range vertical line
+    r_val = float(df.attrs.get("range_param", np.nan))
+    if np.isfinite(r_val) and r_val > 0:
+        ax.axvline(r_val, color="#ef6c00", linestyle="--", linewidth=1.2, label=f"Practical Range $a$ = {r_val:.1f} m", zorder=1)
+
+    # Summary callout box
+    fluc = float(df.attrs.get("ergodic_fluctuation_pct", 0.0))
+    verdict = df.attrs.get("reproduction_verdict", "N/A")
+    v_model = df.attrs.get("variogram_model", "spherical")
+
+    callout_text = (
+        f"Simulation Spatial Validation\n"
+        f"Realizations: {len(real_cols)}\n"
+        f"Variogram Model: {v_model.capitalize()}\n"
+        f"Total Sill: {total_sill:.3f}\n"
+        f"Practical Range: {r_val:.1f} m\n"
+        f"Ergodic Fluctuation: {fluc:.1f}%\n"
+        f"Status: {verdict}"
+    )
+    ax.text(
+        0.02,
+        0.95,
+        callout_text,
+        transform=ax.transAxes,
+        verticalalignment="top",
+        fontsize=9,
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffffff", edgecolor="#b0bec5", alpha=0.9),
+        zorder=10,
+    )
+
+    ax.set_xlabel("Separation Distance $h$ (m)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Semivariance $\\gamma(h)$", fontsize=11, fontweight="bold")
+    chart_title = title or "Conditional Simulation Variogram Reproduction & Ergodic Fluctuation (SME §4.6)"
+    ax.set_title(chart_title, fontsize=12, fontweight="bold", pad=12)
+    ax.set_xlim(0, float(np.max(lags) * 1.02))
+    ax.set_ylim(0, max(total_sill * 1.25, float(np.nanmax(p90_g) * 1.15) if len(p90_g) > 0 else total_sill * 1.25))
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend(loc="lower right", framealpha=0.95, fontsize=8)
+
+    plt.tight_layout()
+    return fig, ax
+
+
+def compute_simulation_grade_tonnage_envelopes(
+    block_realizations: np.ndarray,
+    block_model: pd.DataFrame,
+    cutoff_grades: Sequence[float],
+    tonnes_col: str = "tonnes",
+    metal_factor: float = 0.01,
+) -> pd.DataFrame:
+    """Evaluates geological risk envelopes (P10, P50, P90) across simulated realizations.
+
+    In accordance with SME Mining Engineering Handbook (§4.6) (TODO: Manually Verify) and
+    Rossi & Deutsch (2014, Chapter 12) (TODO: Manually Verify), evaluating Grade-Tonnage curves
+    across all L simulated realizations reveals the true non-linear dispersion variance and provides
+    defensible confidence bounds:
+    - P10: Optimistic / high case (90th percentile of realization distribution).
+    - P50: Median / expected case (50th percentile).
+    - P90: Conservative / low case (10th percentile of realization distribution).
+
+    Parameters
+    ----------
+    block_realizations : np.ndarray
+        Array of shape (n_blocks, n_realizations) with simulated block grades.
+    block_model : pd.DataFrame
+        Block model DataFrame containing block tonnages.
+    cutoff_grades : Sequence[float]
+        Sequence of economic cut-off grades to evaluate.
+    tonnes_col : str, default "tonnes"
+        Column containing block tonnage.
+    metal_factor : float, default 0.01
+        Multiplier to calculate contained metal (0.01 for %, 1e-6 for g/t).
+
+    Returns
+    -------
+    pd.DataFrame
+        Risk envelope table containing for each cut-off grade:
+        - cutoff_grade : float
+        - tonnage_p10, tonnage_p50, tonnage_p90, tonnage_mean : float
+        - grade_p10, grade_p50, grade_p90, grade_mean : float
+        - metal_p10, metal_p50, metal_p90, metal_mean : float
+        Attached in `.attrs`:
+        - 'n_realizations' : L
+        - 'n_blocks' : N
+        - 'footnotes' : list of compliance citations with (TODO: Manually Verify).
+    """
+    reals = np.asarray(block_realizations, dtype=float)
+    if reals.ndim == 1:
+        reals = reals[:, np.newaxis]
+    elif reals.ndim != 2:
+        raise ValueError(f"block_realizations must be a 1D or 2D array, got shape {reals.shape}")
+
+    if not isinstance(block_model, pd.DataFrame):
+        raise TypeError(f"block_model must be a pandas DataFrame, got {type(block_model)}")
+    if tonnes_col not in block_model.columns:
+        raise ValueError(f"tonnes_col '{tonnes_col}' not found in block_model")
+
+    n_blocks, n_reals = reals.shape
+    if len(block_model) != n_blocks:
+        raise ValueError(f"block_model rows ({len(block_model)}) must match block_realizations rows ({n_blocks})")
+
+    if not isinstance(cutoff_grades, (list, tuple, np.ndarray, Sequence)) or len(cutoff_grades) == 0:
+        raise ValueError("cutoff_grades must be a non-empty sequence of cut-off values")
+
+    tonnes = block_model[tonnes_col].values.astype(float)
+    c_grades = np.sort(np.asarray(cutoff_grades, dtype=float))
+    if np.any(c_grades < 0):
+        raise ValueError("Cut-off grades must be non-negative (>= 0)")
+
+    rows = []
+    for cog in c_grades:
+        t_reals = np.zeros(n_reals, dtype=float)
+        g_reals = np.zeros(n_reals, dtype=float)
+        m_reals = np.zeros(n_reals, dtype=float)
+
+        for l in range(n_reals):
+            mask = reals[:, l] >= cog
+            ore_t = float(np.sum(tonnes[mask]))
+            if ore_t > 0:
+                ore_g = float(np.sum(tonnes[mask] * reals[mask, l]) / ore_t)
+                ore_m = float(ore_t * ore_g * metal_factor)
+            else:
+                ore_g = 0.0
+                ore_m = 0.0
+            t_reals[l] = ore_t
+            g_reals[l] = ore_g
+            m_reals[l] = ore_m
+
+        rows.append({
+            "cutoff_grade": cog,
+            # In mining risk conventions: P10 is optimistic (high), P90 is conservative (low)
+            "tonnage_p10": float(np.percentile(t_reals, 90)),
+            "tonnage_p50": float(np.percentile(t_reals, 50)),
+            "tonnage_p90": float(np.percentile(t_reals, 10)),
+            "tonnage_mean": float(np.mean(t_reals)),
+            "grade_p10": float(np.percentile(g_reals, 90)),
+            "grade_p50": float(np.percentile(g_reals, 50)),
+            "grade_p90": float(np.percentile(g_reals, 10)),
+            "grade_mean": float(np.mean(g_reals)),
+            "metal_p10": float(np.percentile(m_reals, 90)),
+            "metal_p50": float(np.percentile(m_reals, 50)),
+            "metal_p90": float(np.percentile(m_reals, 10)),
+            "metal_mean": float(np.mean(m_reals)),
+        })
+
+    res_df = pd.DataFrame(rows)
+
+    res_df.attrs["n_realizations"] = n_reals
+    res_df.attrs["n_blocks"] = n_blocks
+    res_df.attrs["tonnes_col"] = tonnes_col
+    res_df.attrs["metal_factor"] = metal_factor
+    res_df.attrs["footnotes"] = [
+        "Grade-Tonnage risk envelopes evaluated across conditional simulation realizations (SME §4.6) (TODO: Manually Verify).",
+        "P10 represents high case (90th percentile), P50 median case, and P90 conservative low case (10th percentile) (TODO: Manually Verify).",
+        "Simulation grade-tonnage distributions quantify non-linear recoverable resource uncertainty (Rossi & Deutsch 2014) (TODO: Manually Verify).",
+    ]
+
+    return res_df
+
+
+def plot_simulation_grade_tonnage_envelopes(
+    envelopes_results: pd.DataFrame,
+    grade_unit: str = "% Cu",
+    tonnage_unit: str = "Mt",
+    metal_unit: str = "kt",
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (14, 6),
+) -> Tuple[plt.Figure, Tuple[plt.Axes, plt.Axes]]:
+    """Renders dual-panel Grade-Tonnage uncertainty envelope charts (Tonnage & Grade).
+
+    Parameters
+    ----------
+    envelopes_results : pd.DataFrame
+        DataFrame produced by compute_simulation_grade_tonnage_envelopes.
+    grade_unit : str, default "% Cu"
+        Grade display unit.
+    tonnage_unit : str, default "Mt"
+        Tonnage scale unit.
+    metal_unit : str, default "kt"
+        Contained metal scale unit.
+    title : str, optional
+        Figure title.
+    figsize : Tuple[float, float], default (14, 6)
+        Matplotlib figure dimensions.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Tuple[plt.Axes, plt.Axes]]
+        Matplotlib figure and pair of axes (tonnage_ax, grade_ax).
+    """
+    if not isinstance(envelopes_results, pd.DataFrame):
+        raise TypeError(f"envelopes_results must be a DataFrame, got {type(envelopes_results)}")
+    if "cutoff_grade" not in envelopes_results.columns:
+        raise ValueError("envelopes_results must contain 'cutoff_grade' column")
+
+    df = envelopes_results
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+
+    cogs = df["cutoff_grade"].values
+
+    # Determine automatic scaling factor for tonnages if expressed in raw tonnes
+    raw_max_t = df["tonnage_p10"].max()
+    t_scale = 1e-6 if raw_max_t > 1e5 and tonnage_unit == "Mt" else (1e-3 if raw_max_t > 1e4 and tonnage_unit == "kt" else 1.0)
+
+    t_p10 = df["tonnage_p10"].values * t_scale
+    t_p50 = df["tonnage_p50"].values * t_scale
+    t_p90 = df["tonnage_p90"].values * t_scale
+    t_mean = df["tonnage_mean"].values * t_scale
+
+    g_p10 = df["grade_p10"].values
+    g_p50 = df["grade_p50"].values
+    g_p90 = df["grade_p90"].values
+    g_mean = df["grade_mean"].values
+
+    # Left Panel: Ore Tonnage Risk Envelope vs Cut-off Grade
+    ax1.plot(cogs, t_p50, color="#1565c0", linestyle="-", linewidth=2.2, label="P50 Expected Tonnage", zorder=3)
+    ax1.plot(cogs, t_p10, color="#0d47a1", linestyle="--", linewidth=1.4, label="P10 High / P90 Low Case", zorder=2)
+    ax1.plot(cogs, t_p90, color="#0d47a1", linestyle="--", linewidth=1.4, zorder=2)
+    ax1.fill_between(cogs, t_p90, t_p10, color="#bbdefb", alpha=0.5, label="P10–P90 Uncertainty Envelope", zorder=1)
+    ax1.plot(cogs, t_mean, color="#757575", linestyle=":", linewidth=1.5, label="Mean Tonnage", zorder=2)
+
+    ax1.set_xlabel(f"Cut-off Grade ({grade_unit})", fontsize=11, fontweight="bold")
+    ax1.set_ylabel(f"Ore Tonnage ({tonnage_unit})", fontsize=11, fontweight="bold")
+    ax1.set_title("Ore Tonnage Risk Envelope vs. Cut-off", fontsize=11, fontweight="bold")
+    ax1.grid(True, linestyle=":", alpha=0.5)
+    ax1.legend(loc="upper right", framealpha=0.95, fontsize=8)
+
+    # Right Panel: Average Ore Grade Risk Envelope vs Cut-off Grade
+    ax2.plot(cogs, g_p50, color="#2e7d32", linestyle="-", linewidth=2.2, label="P50 Expected Grade", zorder=3)
+    ax2.plot(cogs, g_p10, color="#1b5e20", linestyle="--", linewidth=1.4, label="P10 High / P90 Low Case", zorder=2)
+    ax2.plot(cogs, g_p90, color="#1b5e20", linestyle="--", linewidth=1.4, zorder=2)
+    ax2.fill_between(cogs, g_p90, g_p10, color="#c8e6c9", alpha=0.5, label="P10–P90 Uncertainty Envelope", zorder=1)
+    ax2.plot(cogs, g_mean, color="#757575", linestyle=":", linewidth=1.5, label="Mean Grade", zorder=2)
+
+    ax2.set_xlabel(f"Cut-off Grade ({grade_unit})", fontsize=11, fontweight="bold")
+    ax2.set_ylabel(f"Average Ore Grade ({grade_unit})", fontsize=11, fontweight="bold")
+    ax2.set_title("Average Ore Grade Risk Envelope vs. Cut-off", fontsize=11, fontweight="bold")
+    ax2.grid(True, linestyle=":", alpha=0.5)
+    ax2.legend(loc="lower right", framealpha=0.95, fontsize=8)
+
+    sup_title = title or "Conditional Simulation Grade–Tonnage Risk Envelopes (SME §4.6 / Rossi & Deutsch Ch. 12)"
+    fig.suptitle(sup_title, fontsize=13, fontweight="bold", y=0.98)
+    plt.tight_layout()
+    return fig, (ax1, ax2)
+
+
+def drill_spacing_analysis_by_simulation(
+    block_realizations: np.ndarray,
+    block_model: pd.DataFrame,
+    production_volume_m3: float,
+    confidence_level: float = 0.90,
+    target_precision_pct: float = 15.0,
+    tonnes_col: str = "tonnes",
+) -> pd.DataFrame:
+    """Calibrates CIM / JORC drillhole spacing criteria using conditional simulation.
+
+    In accordance with CIM MRMR Guidelines (§6.11) (TODO: Manually Verify) and industry
+    standard practices (Verly, Postolski & Parker 2014; Rossi & Deutsch 2014) (TODO: Manually Verify):
+    - Measured Mineral Resource: Quarterly production volume known to within +/- 15%
+      at a 90% confidence level (or annual volume with higher precision).
+    - Indicated Mineral Resource: Annual production volume known to within +/- 15%
+      at a 90% confidence level.
+    Aggregates simulated blocks into contiguous mining production parcels matching the production
+    volume to measure the relative estimation error as a function of drill spacing.
+
+    Parameters
+    ----------
+    block_realizations : np.ndarray
+        Array of shape (n_blocks, n_realizations) containing simulated grades.
+    block_model : pd.DataFrame
+        Block model with coordinates and tonnages.
+    production_volume_m3 : float
+        Volume of the production period (e.g. quarterly or annual production parcel) (> 0).
+    confidence_level : float, default 0.90
+        Target statistical confidence level (standard is 0.90 for 90%).
+    target_precision_pct : float, default 15.0
+        Target relative error percentage (standard is +/- 15%).
+    tonnes_col : str, default "tonnes"
+        Tonnage column name.
+
+    Returns
+    -------
+    pd.DataFrame
+        Drill spacing calibration table with parcel_id, block_count, parcel_tonnes,
+        mean_grade, std_grade, p_lower, p_upper, relative_error_pct, status,
+        and classification_qualification ('Measured Candidate', 'Indicated Candidate', etc.).
+    """
+    reals = np.asarray(block_realizations, dtype=float)
+    if reals.ndim == 1:
+        reals = reals[:, np.newaxis]
+    elif reals.ndim != 2:
+        raise ValueError(f"block_realizations must be a 1D or 2D array, got shape {reals.shape}")
+
+    if not isinstance(block_model, pd.DataFrame):
+        raise TypeError(f"block_model must be a pandas DataFrame, got {type(block_model)}")
+    if tonnes_col not in block_model.columns:
+        raise ValueError(f"tonnes_col '{tonnes_col}' not found in block_model")
+
+    n_blocks, n_reals = reals.shape
+    if len(block_model) != n_blocks:
+        raise ValueError(f"block_model rows ({len(block_model)}) must match block_realizations rows ({n_blocks})")
+
+    if production_volume_m3 <= 0:
+        raise ValueError(f"production_volume_m3 must be strictly positive (> 0), got {production_volume_m3}")
+    if not (0.0 < confidence_level < 1.0):
+        raise ValueError(f"confidence_level must be between 0 and 1, got {confidence_level}")
+    if target_precision_pct <= 0:
+        raise ValueError(f"target_precision_pct must be strictly positive (> 0), got {target_precision_pct}")
+
+    tonnes = block_model[tonnes_col].values.astype(float)
+
+    # Estimate block volume in m3 (assuming standard 2.7 t/m3 if no volume column provided)
+    if "block_volume" in block_model.columns:
+        b_vol = block_model["block_volume"].values.astype(float)
+    elif "density" in block_model.columns and np.all(block_model["density"] > 0):
+        b_vol = tonnes / block_model["density"].values.astype(float)
+    else:
+        b_vol = tonnes / 2.70
+
+    mean_b_vol = float(np.mean(b_vol)) if len(b_vol) > 0 else 1.0
+    blocks_per_parcel = max(1, int(round(production_volume_m3 / max(1e-3, mean_b_vol))))
+
+    # Spatial sorting if coordinates present
+    coord_cols = [c for c in ["z", "y", "x"] if c in block_model.columns]
+    if len(coord_cols) > 0:
+        sort_order = block_model.sort_values(by=coord_cols).index.values
+    else:
+        sort_order = np.arange(n_blocks)
+
+    sorted_reals = reals[sort_order, :]
+    sorted_tonnes = tonnes[sort_order]
+    sorted_vols = b_vol[sort_order]
+
+    # Partition blocks into contiguous parcels
+    alpha = 1.0 - confidence_level
+    p_low_pct = 100.0 * (alpha / 2.0)
+    p_high_pct = 100.0 * (1.0 - alpha / 2.0)
+
+    records = []
+    n_parcels = int(np.ceil(n_blocks / blocks_per_parcel))
+
+    for p_idx in range(n_parcels):
+        start_i = p_idx * blocks_per_parcel
+        end_i = min(n_blocks, (p_idx + 1) * blocks_per_parcel)
+        if start_i >= end_i:
+            continue
+
+        p_t = sorted_tonnes[start_i:end_i]
+        p_v = sorted_vols[start_i:end_i]
+        tot_p_t = float(np.sum(p_t))
+        tot_p_v = float(np.sum(p_v))
+
+        # Realization parcel grades
+        if tot_p_t > 0:
+            p_grades_reals = np.sum(sorted_reals[start_i:end_i, :] * p_t[:, np.newaxis], axis=0) / tot_p_t
+        else:
+            p_grades_reals = np.mean(sorted_reals[start_i:end_i, :], axis=0)
+
+        mean_g = float(np.mean(p_grades_reals))
+        std_g = float(np.std(p_grades_reals, ddof=1)) if n_reals > 1 else 0.0
+        q_low = float(np.percentile(p_grades_reals, p_low_pct))
+        q_high = float(np.percentile(p_grades_reals, p_high_pct))
+
+        # Relative error % = (Q_high - Q_low) / (2 * Mean) * 100
+        denom = max(1e-6, mean_g)
+        rel_err = float(((q_high - q_low) / (2.0 * denom)) * 100.0)
+
+        qualifies = rel_err <= target_precision_pct
+        status = f"Qualifies (≤ {target_precision_pct:.0f}%)" if qualifies else f"Exceeds Limit (> {target_precision_pct:.0f}%)"
+
+        # Classification candidate
+        if qualifies:
+            qualification = "Measured Candidate" if production_volume_m3 <= 50000.0 else "Indicated Candidate"
+        else:
+            qualification = "Inferred / Requires Infill Drilling"
+
+        records.append({
+            "parcel_id": f"Parcel_{p_idx + 1:02d}",
+            "block_count": end_i - start_i,
+            "parcel_volume_m3": tot_p_v,
+            "parcel_tonnes": tot_p_t,
+            "mean_grade": mean_g,
+            "std_grade": std_g,
+            "p_lower": q_low,
+            "p_upper": q_high,
+            "relative_error_pct": rel_err,
+            "status": status,
+            "classification_qualification": qualification,
+            "meets_target_precision": qualifies,
+        })
+
+    res_df = pd.DataFrame(records)
+
+    tot_p = len(res_df)
+    n_qual = int(res_df["meets_target_precision"].sum()) if tot_p > 0 else 0
+    qual_rate = (n_qual / tot_p) * 100.0 if tot_p > 0 else 0.0
+    avg_rel_err = float(res_df["relative_error_pct"].mean()) if tot_p > 0 else 0.0
+
+    overall_verdict = (
+        f"CONFIRMED: Meets ±{target_precision_pct:.0f}% Precision at {confidence_level*100:.0f}% Confidence"
+        if qual_rate >= 85.0
+        else f"UNCONFIRMED: Requires Tighter Spacing ({qual_rate:.1f}% parcels meet target)"
+    )
+
+    res_df.attrs["total_parcels"] = tot_p
+    res_df.attrs["parcels_qualifying"] = n_qual
+    res_df.attrs["qualification_rate_pct"] = qual_rate
+    res_df.attrs["mean_relative_error_pct"] = avg_rel_err
+    res_df.attrs["production_volume_m3"] = production_volume_m3
+    res_df.attrs["confidence_level"] = confidence_level
+    res_df.attrs["target_precision_pct"] = target_precision_pct
+    res_df.attrs["overall_classification_verdict"] = overall_verdict
+    res_df.attrs["footnotes"] = [
+        "Drillhole spacing calibration conducted using conditional simulation (CIM MRMR §6.11) (TODO: Manually Verify).",
+        "Measured resource criterion: quarterly production known to +/- 15% at 90% confidence (Verly et al. 2014) (TODO: Manually Verify).",
+        "Indicated resource criterion: annual production known to +/- 15% at 90% confidence (Rossi & Deutsch 2014) (TODO: Manually Verify).",
+    ]
+
+    return res_df
+
+
+# =============================================================================
+# PART 4: POLYMETALLIC EQUIVALENCY & NET SMELTER RETURN (CIM MRMR §7.2, JORC CL 50)
+# =============================================================================
+
+
+def calculate_net_smelter_return(
+    block_model: pd.DataFrame,
+    commodities_config: Mapping[str, Mapping[str, float]],
+    royalty_pct: float = 0.0,
+    offsite_costs_per_tonne: float = 0.0,
+    currency: str = "$",
+) -> pd.DataFrame:
+    """Calculates block-by-block Net Smelter Return (NSR in $/t) for polymetallic deposits.
+
+    In accordance with CIM MRMR Best Practice Guidelines (§7.2) (TODO: Manually Verify) and SME Mining
+    Engineering Handbook (Ch. 6.1; Rossi & Deutsch 2014) (TODO: Manually Verify), in multi-element
+    deposits (e.g., Cu-Au-Ag, Pb-Zn-Ag), economic cut-off evaluation cannot be conducted on a single
+    metal grade. The Net Smelter Return (NSR, $/t) represents the net revenue realized at the mine gate
+    after accounting for:
+    - Base metal market price.
+    - Concentrator / metallurgical recovery.
+    - Smelter payable metal percentage.
+    - Smelter Treatment Charges (TCs) and Refining Charges (RCs).
+    - Penalty deductions for deleterious elements.
+    - Concentrate freight, moisture, and offsite realization charges.
+    - Gross and net smelter royalties (NSR royalties).
+
+    Formula per Commodity i:
+    ------------------------
+    Revenue_i ($/t) = Grade_i * Unit_Conversion_i * Recovery_i * Payable_i * (Price_i - RC_i) - TC_i - Penalties_i
+    Gross_NSR ($/t) = Sum_i Revenue_i
+    NSR ($/t) = max(0, Gross_NSR - offsite_costs) * (1 - Royalty / 100)
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Block model DataFrame containing estimated grade columns for all commodities.
+    commodities_config : Mapping[str, Mapping[str, float]]
+        Nested dictionary configuring each commodity:
+        {
+            'Cu': {
+                'grade_col': 'grade_cu', 'price': 3.80, 'unit_conversion': 22.0462,  # $/lb from %
+                'recovery': 0.88, 'payability': 0.95, 'refining_charge': 0.08, 'treatment_charge_per_metal_unit': 0.05
+            },
+            'Au': {
+                'grade_col': 'grade_au', 'price': 1900.0, 'unit_conversion': 0.0321507,  # $/oz from g/t
+                'recovery': 0.75, 'payability': 0.90, 'refining_charge': 5.0, 'treatment_charge_per_metal_unit': 0.0
+            }
+        }
+    royalty_pct : float, default 0.0
+        Overall Net Smelter Return royalty percentage (e.g., 2.0 for 2% NSR royalty).
+    offsite_costs_per_tonne : float, default 0.0
+        General off-site transportation, insurance, and representation charges per tonne ore.
+    currency : str, default "$"
+        Currency symbol for output column labeling.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of block_model with added columns:
+        - 'nsr_gross' : Gross realized revenue before royalties ($/t).
+        - 'nsr' : Final Net Smelter Return ($/t) used for economic cut-off application.
+        - Individual revenue contribution columns per commodity ('nsr_cu', 'nsr_au', etc.).
+    """
+    if not isinstance(block_model, pd.DataFrame):
+        raise TypeError(f"block_model must be a pandas DataFrame, got {type(block_model)}")
+    if len(block_model) == 0:
+        raise ValueError("block_model cannot be empty")
+    if not isinstance(commodities_config, (dict, Mapping)) or len(commodities_config) == 0:
+        raise ValueError("commodities_config must be a non-empty mapping of commodity configurations")
+
+    if not (0.0 <= royalty_pct < 100.0):
+        raise ValueError(f"royalty_pct must be between 0.0 and 100.0, got {royalty_pct}")
+    if offsite_costs_per_tonne < 0.0:
+        raise ValueError(f"offsite_costs_per_tonne must be non-negative (>= 0), got {offsite_costs_per_tonne}")
+
+    out_df = block_model.copy()
+    gross_nsr = np.zeros(len(out_df), dtype=float)
+    contributions = {}
+
+    for comm_name, cfg in commodities_config.items():
+        if not isinstance(cfg, (dict, Mapping)):
+            raise TypeError(f"Configuration for commodity '{comm_name}' must be a dictionary or mapping")
+
+        grade_col = cfg.get("grade_col")
+        if not grade_col or grade_col not in out_df.columns:
+            raise ValueError(f"grade_col '{grade_col}' for commodity '{comm_name}' not found in block_model")
+
+        price = float(cfg.get("price", 0.0))
+        if price <= 0.0:
+            raise ValueError(f"price for commodity '{comm_name}' must be strictly positive (> 0), got {price}")
+
+        recovery = float(cfg.get("recovery", 1.0))
+        if recovery <= 0.0:
+            raise ValueError(f"recovery for commodity '{comm_name}' must be strictly positive (> 0), got {recovery}")
+        if recovery > 1.0:
+            recovery = recovery / 100.0
+
+        payability = float(cfg.get("payability", 1.0))
+        if payability <= 0.0:
+            raise ValueError(f"payability for commodity '{comm_name}' must be strictly positive (> 0), got {payability}")
+        if payability > 1.0:
+            payability = payability / 100.0
+
+        unit_conv = float(cfg.get("unit_conversion", 1.0))
+        if unit_conv <= 0.0:
+            raise ValueError(f"unit_conversion for commodity '{comm_name}' must be strictly positive (> 0), got {unit_conv}")
+
+        rc = float(cfg.get("refining_charge", 0.0))
+        if rc < 0.0:
+            raise ValueError(f"refining_charge for commodity '{comm_name}' must be non-negative (>= 0), got {rc}")
+
+        tc = float(cfg.get("treatment_charge_per_metal_unit", cfg.get("treatment_charge", 0.0)))
+        if tc < 0.0:
+            raise ValueError(f"treatment_charge for commodity '{comm_name}' must be non-negative (>= 0), got {tc}")
+
+        penalties = float(cfg.get("penalties_per_tonne", 0.0))
+        if penalties < 0.0:
+            raise ValueError(f"penalties_per_tonne for commodity '{comm_name}' must be non-negative (>= 0), got {penalties}")
+
+        # Vectorized revenue per tonne ore for this commodity
+        grades = out_df[grade_col].values.astype(float)
+        net_price = max(0.0, price - rc)
+        payable_factor = recovery * payability
+        metal_units_per_t = grades * unit_conv
+        payable_metal = metal_units_per_t * payable_factor
+
+        comm_gross = payable_metal * net_price - tc * payable_metal - penalties
+        comm_gross = np.maximum(0.0, comm_gross)
+
+        comm_col = f"nsr_{comm_name.lower()}"
+        out_df[comm_col] = comm_gross
+        gross_nsr += comm_gross
+        contributions[comm_name] = float(np.mean(comm_gross))
+
+    out_df["nsr_gross"] = gross_nsr
+    royalty_factor = 1.0 - (royalty_pct / 100.0)
+    net_nsr = np.maximum(0.0, (gross_nsr - offsite_costs_per_tonne) * royalty_factor)
+    out_df["nsr"] = net_nsr
+
+    mean_gross = float(np.mean(gross_nsr))
+    mean_net = float(np.mean(net_nsr))
+
+    denom_gross = max(1e-6, mean_gross)
+    shares = {c: float((val / denom_gross) * 100.0) for c, val in contributions.items()}
+
+    out_df.attrs["commodities"] = list(commodities_config.keys())
+    out_df.attrs["royalty_pct"] = royalty_pct
+    out_df.attrs["offsite_costs_per_tonne"] = offsite_costs_per_tonne
+    out_df.attrs["currency"] = currency
+    out_df.attrs["mean_gross_nsr"] = mean_gross
+    out_df.attrs["mean_nsr"] = mean_net
+    out_df.attrs["commodity_contributions"] = contributions
+    out_df.attrs["commodity_percentage_shares"] = shares
+    out_df.attrs["footnotes"] = [
+        "Net Smelter Return (NSR) calculated under CIM MRMR Best Practice Guidelines (§7.2) for polymetallic deposits (TODO: Manually Verify).",
+        "Smelter deductions include Treatment Charges (TC), Refining Charges (RC), and payable metal factors (SME Handbook Ch. 6.1) (TODO: Manually Verify).",
+        "Royalty deductions applied on mine-gate realized net revenue (Rossi & Deutsch 2014) (TODO: Manually Verify).",
+    ]
+
+    return out_df
+
+
+def calculate_equivalent_grade(
+    block_model: pd.DataFrame,
+    primary_commodity: str,
+    primary_grade_col: str,
+    primary_price: float,
+    primary_recovery: float,
+    secondary_commodities: Mapping[str, Mapping[str, float]],
+    output_col: Optional[str] = None,
+    primary_unit_conversion: float = 1.0,
+) -> pd.DataFrame:
+    """Calculates multi-metal equivalent grade in compliance with JORC Clause 50 and CIM MRMR §7.2.
+
+    Mandatory Regulatory Compliance (JORC Code 2012 Clause 50 & CIM MRMR Guidelines §7.2):
+    -------------------------------------------------------------------------------------
+    Under international reporting codes, reporting metal equivalents (e.g., CuEq or AuEq)
+    requires strict disclosure of:
+    1. Assumed commodity prices and metallurgical recoveries for ALL included metals.
+    2. Demonstration of reasonable prospect for eventual economic extraction (RPEEE) for each element.
+    3. Formula explicitly stated in report:
+       EqGrade = Grade_primary + Sum_j [ Grade_j * (Price_j * Rec_j * Conv_j) / (Price_prim * Rec_prim * Conv_prim) ]
+
+    Parameters
+    ----------
+    block_model : pd.DataFrame
+        Block model DataFrame containing primary and secondary grade columns.
+    primary_commodity : str
+        Primary metal symbol (e.g., 'Cu' for CuEq or 'Au' for AuEq).
+    primary_grade_col : str
+        Column name of the primary commodity grade in block_model.
+    primary_price : float
+        Market price per unit of the primary commodity (> 0).
+    primary_recovery : float
+        Metallurgical recovery fraction of the primary commodity (0.0 to 1.0).
+    secondary_commodities : Mapping[str, Mapping[str, float]]
+        Dictionary of secondary commodities with grade column, price, recovery, and conversion factor:
+        {
+            'Au': {'grade_col': 'grade_au', 'price': 1900.0, 'recovery': 0.75, 'conversion_factor': 0.03215 / 22.0462}
+        }
+    output_col : str, optional
+        Name of the resulting equivalent grade column (defaults to f"{primary_commodity.lower()}_eq").
+    primary_unit_conversion : float, default 1.0
+        Conversion factor for primary metal grade to price unit per tonne ore.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of block_model with equivalent grade column populated.
+        Attached in `.attrs`:
+        - 'formula_string': Textual disclosure formula required by JORC Clause 50.
+        - 'primary_commodity', 'secondary_commodities', 'prices', 'recoveries'.
+    """
+    if not isinstance(block_model, pd.DataFrame):
+        raise TypeError(f"block_model must be a pandas DataFrame, got {type(block_model)}")
+    if len(block_model) == 0:
+        raise ValueError("block_model cannot be empty")
+    if primary_grade_col not in block_model.columns:
+        raise ValueError(f"primary_grade_col '{primary_grade_col}' not found in block_model")
+
+    if primary_price <= 0.0:
+        raise ValueError(f"primary_price must be strictly positive (> 0), got {primary_price}")
+    if primary_recovery <= 0.0:
+        raise ValueError(f"primary_recovery must be strictly positive (> 0), got {primary_recovery}")
+    if primary_recovery > 1.0:
+        primary_recovery = primary_recovery / 100.0
+
+    if primary_unit_conversion <= 0.0:
+        raise ValueError(f"primary_unit_conversion must be strictly positive (> 0), got {primary_unit_conversion}")
+
+    if not isinstance(secondary_commodities, (dict, Mapping)) or len(secondary_commodities) == 0:
+        raise ValueError("secondary_commodities must be a non-empty mapping of secondary commodity configurations")
+
+    out_df = block_model.copy()
+    prim_grades = out_df[primary_grade_col].values.astype(float)
+    eq_grade = np.copy(prim_grades)
+
+    denom = primary_price * primary_recovery * primary_unit_conversion
+    eq_factors = {}
+    formula_terms = [primary_commodity]
+
+    for sec_name, cfg in secondary_commodities.items():
+        if not isinstance(cfg, (dict, Mapping)):
+            raise TypeError(f"Configuration for secondary commodity '{sec_name}' must be a dictionary or mapping")
+
+        g_col = cfg.get("grade_col")
+        if not g_col or g_col not in out_df.columns:
+            raise ValueError(f"grade_col '{g_col}' for secondary commodity '{sec_name}' not found in block_model")
+
+        sec_p = float(cfg.get("price", 0.0))
+        if sec_p <= 0.0:
+            raise ValueError(f"price for secondary commodity '{sec_name}' must be strictly positive (> 0), got {sec_p}")
+
+        sec_rec = float(cfg.get("recovery", 1.0))
+        if sec_rec <= 0.0:
+            raise ValueError(f"recovery for secondary commodity '{sec_name}' must be strictly positive (> 0), got {sec_rec}")
+        if sec_rec > 1.0:
+            sec_rec = sec_rec / 100.0
+
+        sec_conv = float(cfg.get("conversion_factor", cfg.get("unit_conversion", 1.0)))
+        if sec_conv <= 0.0:
+            raise ValueError(f"conversion_factor for secondary commodity '{sec_name}' must be strictly positive (> 0), got {sec_conv}")
+
+        num = sec_p * sec_rec * sec_conv
+        factor = float(num / denom)
+        eq_factors[sec_name] = factor
+
+        sec_grades = out_df[g_col].values.astype(float)
+        eq_grade += sec_grades * factor
+
+        formula_terms.append(f"[{sec_name} * ({sec_p:.2f} * {sec_rec:.4f} * {sec_conv:.4g}) / ({primary_price:.2f} * {primary_recovery:.4f} * {primary_unit_conversion:.4g})]")
+
+    final_out_col = output_col if output_col is not None else f"{primary_commodity.lower()}_eq"
+    out_df[final_out_col] = eq_grade
+
+    formula_str = f"{primary_commodity}Eq = " + " + ".join(formula_terms)
+
+    out_df.attrs["primary_commodity"] = primary_commodity
+    out_df.attrs["primary_price"] = primary_price
+    out_df.attrs["primary_recovery"] = primary_recovery
+    out_df.attrs["primary_unit_conversion"] = primary_unit_conversion
+    out_df.attrs["secondary_commodities"] = list(secondary_commodities.keys())
+    out_df.attrs["equivalency_factors"] = eq_factors
+    out_df.attrs["formula_string"] = formula_str
+    out_df.attrs["output_col"] = final_out_col
+    out_df.attrs["mean_primary_grade"] = float(np.mean(prim_grades))
+    out_df.attrs["mean_equivalent_grade"] = float(np.mean(eq_grade))
+    out_df.attrs["footnotes"] = [
+        "Metal equivalent reporting complies with JORC Code (2012) Clause 50 disclosure requirements (TODO: Manually Verify).",
+        "Equivalency factors incorporate individual metallurgical recoveries and metal market prices under CIM MRMR §7.2 (TODO: Manually Verify).",
+        "Assumes reasonable prospects for eventual economic extraction (RPEEE) for all constituent metals (TODO: Manually Verify).",
+    ]
+
+    return out_df
+
+
+def plot_net_smelter_return_breakdown(
+    nsr_results: pd.DataFrame,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (13, 5),
+) -> Tuple[plt.Figure, Tuple[plt.Axes, plt.Axes]]:
+    """Renders dual-panel NSR breakdown: revenue contributions and block model distribution.
+
+    Parameters
+    ----------
+    nsr_results : pd.DataFrame
+        DataFrame produced by calculate_net_smelter_return.
+    title : str, optional
+        Figure title.
+    figsize : Tuple[float, float], default (13, 5)
+        Figure size in inches.
+
+    Returns
+    -------
+    Tuple[plt.Figure, Tuple[plt.Axes, plt.Axes]]
+        Matplotlib figure and axes pair (waterfall/bar ax, distribution ax).
+    """
+    if not isinstance(nsr_results, pd.DataFrame):
+        raise TypeError(f"nsr_results must be a pandas DataFrame, got {type(nsr_results)}")
+    if "nsr" not in nsr_results.columns or "nsr_gross" not in nsr_results.columns:
+        raise ValueError("nsr_results must contain 'nsr' and 'nsr_gross' columns produced by calculate_net_smelter_return")
+
+    commodities = nsr_results.attrs.get("commodities", [])
+    currency = nsr_results.attrs.get("currency", "$")
+    mean_nsr = float(nsr_results["nsr"].mean())
+    p50_nsr = float(nsr_results["nsr"].median())
+    mean_gross = float(nsr_results["nsr_gross"].mean())
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+
+    # Panel 1: Revenue contributions by commodity and net NSR
+    comm_cols = [f"nsr_{c.lower()}" for c in commodities if f"nsr_{c.lower()}" in nsr_results.columns]
+    bar_labels = [c.upper() for c in commodities if f"nsr_{c.lower()}" in nsr_results.columns]
+    bar_vals = [float(nsr_results[col].mean()) for col in comm_cols]
+
+    # Add Gross NSR and Net NSR bars
+    bar_labels.extend(["Gross NSR", "Net NSR"])
+    bar_vals.extend([mean_gross, mean_nsr])
+
+    colors = ["#1976d2", "#ffb300", "#7cb342", "#8e24aa"][:len(comm_cols)] + ["#546e7a", "#2e7d32"]
+
+    bars = ax1.bar(bar_labels, bar_vals, color=colors, edgecolor="black", linewidth=0.8, alpha=0.9)
+    for bar in bars:
+        h = bar.get_height()
+        ax1.annotate(
+            f"{currency}{h:.2f}/t",
+            xy=(bar.get_x() + bar.get_width() / 2, h),
+            xytext=(0, 4),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    ax1.set_ylabel(f"Average Value ({currency}/t)", fontsize=11, fontweight="bold")
+    ax1.set_title("Average Revenue Breakdown by Metal & Net NSR", fontsize=11, fontweight="bold")
+    ax1.grid(True, linestyle=":", alpha=0.5, axis="y")
+
+    # Panel 2: Block Model NSR Distribution
+    nsr_vals = nsr_results["nsr"].values
+    ax2.hist(nsr_vals, bins=25, color="#1976d2", edgecolor="black", alpha=0.7, density=True, label="Block Frequency")
+    ax2.axvline(mean_nsr, color="#d32f2f", linestyle="--", linewidth=2.0, label=f"Mean NSR: {currency}{mean_nsr:.2f}/t")
+    ax2.axvline(p50_nsr, color="#2e7d32", linestyle="-.", linewidth=2.0, label=f"Median NSR: {currency}{p50_nsr:.2f}/t")
+
+    ax2.set_xlabel(f"Net Smelter Return ({currency}/t)", fontsize=11, fontweight="bold")
+    ax2.set_ylabel("Probability Density", fontsize=11, fontweight="bold")
+    ax2.set_title(f"Block Model NSR Distribution ({currency}/t)", fontsize=11, fontweight="bold")
+    ax2.grid(True, linestyle=":", alpha=0.5)
+    ax2.legend(loc="upper right", framealpha=0.95, fontsize=9)
+
+    sup_title = title or "Polymetallic Net Smelter Return (NSR) Valuation (CIM §7.2 / SME Ch. 6.1)"
+    fig.suptitle(sup_title, fontsize=13, fontweight="bold", y=0.98)
+    plt.tight_layout()
+    return fig, (ax1, ax2)
